@@ -127,7 +127,7 @@ def gen_base_subquery(plan, dialect=DUCKDB) -> str:
     if plan.preds:  # pre-aggregation filters live in base subquery for cleanliness
         t2 = Translator(plan, _RAW)
         base += "\nWHERE " + " AND ".join(t2.expr(p) for p in plan.preds)
-        plan.preds = []
+    
     return base
 
 
