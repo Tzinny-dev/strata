@@ -1,0 +1,218 @@
+"""Strata AST nodes."""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple, Dict
+
+from .types import Col
+
+
+@dataclass
+class Node:
+    span: tuple = None
+
+
+# ------------------------------------------------------------------ expressions
+
+@dataclass
+class Literal(Node):
+    value: object = None
+
+
+@dataclass
+class ColumnRef(Node):
+    name: str = ""
+    qualifier: Optional[str] = None
+
+
+@dataclass
+class Call(Node):
+    name: str = ""
+    args: List[Node] = field(default_factory=list)
+
+
+@dataclass
+class BinOp(Node):
+    op: str = ""
+    left: Node = None
+    right: Node = None
+
+
+@dataclass
+class UnOp(Node):
+    op: str = ""
+    operand: Node = None
+
+
+@dataclass
+class TemplateStr(Node):
+    # "prefix{id}suffix{id2}" -> parts
+    parts: List[Tuple[str, Optional[str]]] = field(default_factory=list)
+
+
+@dataclass
+class ListExpr(Node):
+    items: List[Node] = field(default_factory=list)
+
+
+@dataclass
+class ListComprehension(Node):
+    body: Node = None
+    var: str = ""
+    iterable: Node = None
+
+
+@dataclass
+class ModelValue(Node):
+    """model literal used inside fn bodies (compile-time value constructor)."""
+    name: Node = None
+    contract: Optional[str] = None
+    attrs: Dict[str, str] = field(default_factory=dict)
+    stmts: List["Stmt"] = field(default_factory=list)
+
+
+# ------------------------------------------------------------------ statements
+
+@dataclass
+class Stmt(Node):
+    pass
+
+
+@dataclass
+class FromStmt(Stmt):
+    table: str = ""
+
+
+@dataclass
+class JoinStmt(Stmt):
+    kind: str = ""          # left inner anti semi
+    table: str = ""
+    on: Node = None
+
+
+@dataclass
+class FilterStmt(Stmt):
+    cond: Node = None
+
+
+@dataclass
+class LetStmt(Stmt):
+    name: str = ""
+    expr: Node = None
+
+
+@dataclass
+class OutAssign(Node):
+    name: str = ""
+    expr: Node = None
+
+
+@dataclass
+class DeriveStmt(Stmt):
+    assigns: List[OutAssign] = field(default_factory=list)
+
+
+@dataclass
+class AggregateStmt(Stmt):
+    assigns: List[OutAssign] = field(default_factory=list)
+
+
+@dataclass
+class GroupStmt(Stmt):
+    keys: List[Node] = field(default_factory=list)
+    body: List[Stmt] = field(default_factory=list)
+
+
+@dataclass
+class SortStmt(Stmt):
+    keys: List[Tuple[Node, bool]] = field(default_factory=list)  # (expr, desc)
+
+
+@dataclass
+class TakeStmt(Stmt):
+    start: Optional[int] = None
+    end: Optional[int] = None
+    limit: Optional[int] = None
+
+
+@dataclass
+class SelectStmt(Stmt):
+    assigns: List[OutAssign] = field(default_factory=list)
+
+
+# ------------------------------------------------------------------ declarations
+
+@dataclass
+class SourceDecl(Node):
+    name: str = ""
+    resource: Dict[str, str] = field(default_factory=dict)
+    props: List[Tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class ContractField(Node):
+    name: str = ""
+    type_spec: str = ""
+    params: List[object] = field(default_factory=list)
+    nonnull: bool = False
+    unique: bool = False
+    primary: bool = False
+    protected: bool = False
+    enum: list = field(default_factory=list)
+    classification: Optional[str] = None
+
+
+@dataclass
+class ContractDecl(Node):
+    name: str = ""
+    fields: List[ContractField] = field(default_factory=list)
+
+
+@dataclass
+class ModelDecl(Node):
+    name: str = ""
+    contract: Optional[str] = None
+    attrs: Dict[str, str] = field(default_factory=dict)
+    stmts: List[Stmt] = field(default_factory=list)
+    generated: bool = False       # produced by fn expansion
+
+
+@dataclass
+class FnDecl(Node):
+    name: str = ""
+    params: List[Tuple[str, str]] = field(default_factory=list)
+    body: Node = None
+
+
+@dataclass
+class PipelineDecl(Node):
+    name: str = ""
+    env: Optional[str] = None
+    models: List[Node] = field(default_factory=list)
+    sources: Dict[str, Dict[str, str]] = field(default_factory=dict)
+
+
+@dataclass
+class ImportDecl(Node):
+    path: str = ""
+
+
+@dataclass
+class GeneratorDecl(Node):
+    """Top-level `by_country(countries())` -- compile-time model generation."""
+    call: Node = None
+
+
+@dataclass
+class Module:
+    path: str = ""
+    decls: List[Node] = field(default_factory=list)
+
+    def find(self, kind, name=None):
+        for d in self.decls:
+            if kind(d) and (name is None or d.name == name):
+                return d
+        return None
+
+    def all(self, kind):
+        return [d for d in self.decls if kind(d)]

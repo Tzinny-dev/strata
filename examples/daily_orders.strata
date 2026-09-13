@@ -1,0 +1,59 @@
+// Strata 0.1 example: verified daily revenue per country/day.
+
+source orders(ns: "crm", dataset: "prod_orders") {
+  columns: {
+    order_id:         int64 nonnull,
+    customer_id:      int64 nonnull,
+    country:          string nonnull,
+    gross_amount_usd: money nonnull,
+    is_test:          bool,
+    order_day:        date nonnull,
+  }
+}
+
+source refunds(ns: "crm", dataset: "prod_refunds") {
+  columns: {
+    order_id:     int64 nonnull,
+    discount_usd: money,
+    refunded_at:  timestamp,
+  }
+}
+
+contract OrderMetrics {
+  order_id     : int64 nonnull
+  customer_id  : int64 nonnull
+  country      : string nonnull enum {ES, MX, CO, BR}
+  gross_amount : money nonnull
+  net_amount   : money nonnull
+  order_day    : date nonnull
+}
+
+model daily_orders -> contract OrderMetrics {
+  owner: "finanzas"
+  reason: "Ingresos verificados partir de orders/refunds (test orders excluded)"
+
+  from orders
+  join_left refunds on orders.order_id == refunds.order_id
+
+  let country  = upper(orders.country)
+  let gross    = orders.gross_amount_usd
+  let discount = coalesce(refunds.discount_usd, 0)
+
+  filter coalesce(orders.is_test, false) == false
+
+  group {country, orders.order_day} (
+    aggregate {
+      order_id     = count(orders.order_id),
+      customer_id  = max(orders.customer_id),
+      gross_amount = sum(gross),
+      net_amount   = sum(gross - discount),
+    }
+  )
+
+  sort {orders.order_day, country}
+}
+
+pipeline prod {
+  env: prod,
+  models: [daily_orders],
+}

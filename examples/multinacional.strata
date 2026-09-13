@@ -1,0 +1,41 @@
+// Strata 0.1 example: compile-time fn generating one model per country.
+// The whole point: generated models are first-class DAG nodes with lineage,
+// contracts and lineage-diff -- not a template string.
+
+source orders(ns: "crm", dataset: "prod_orders") {
+  columns: {
+    order_id:         int64 nonnull,
+    customer_id:      int64 nonnull,
+    country:          string nonnull,
+    gross_amount_usd: money nonnull,
+    is_test:          bool,
+    order_day:        date nonnull,
+  }
+}
+
+contract OrderMetrics {
+  order_id         : int64 nonnull
+  customer_id      : int64 nonnull
+  country          : string nonnull enum {ES, MX, CO, BR}
+  gross_amount_usd : money nonnull
+  order_day        : date nonnull
+}
+
+fn countries() -> List<Str> {
+  ["ES", "MX", "CO", "BR"]
+}
+
+fn by_country(names: List<Str>) -> List<Model> {
+  [ model "m_${c}_orders" -> contract OrderMetrics {
+      from orders
+      filter orders.country == c
+  } for c in names ]
+}
+
+// module-level generator: expands into real model nodes
+by_country(countries())
+
+pipeline multinacional {
+  env: prod,
+  models: [by_country(countries())],
+}
