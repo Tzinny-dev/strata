@@ -184,6 +184,8 @@ def main(argv=None):
     p.add_argument("file")
     p.add_argument("--seed", action="store_true")
     p.add_argument("--only-stale", action="store_true")
+    p.add_argument("--dialect", default="duckdb",
+                   help="target warehouse: duckdb | bigquery | snowflake")
     p.set_defaults(fn=cmd_run)
 
     p = sub.add_parser("init", help="write AGENTS.md")

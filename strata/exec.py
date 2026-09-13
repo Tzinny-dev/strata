@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from . import sqlgen
+from .dialects import DUCKDB
 from .analysis import Project, TypedModel, contract_field_col
 from .types import StrataType, STRING
 
@@ -87,7 +88,8 @@ def runtime_pins(con, project: Project, tm: TypedModel, view: str, report: List[
 
 
 def materialize(con, project: Project, tms: Dict[str, TypedModel],
-                names: Optional[List[str]] = None, sort_by_deps=True):
+                names: Optional[List[str]] = None, sort_by_deps=True,
+                dialect=DUCKDB):
     """Create/recreate views v_<name> in topological order; return pin report."""
     if names is None:
         names = list(tms)
@@ -98,7 +100,7 @@ def materialize(con, project: Project, tms: Dict[str, TypedModel],
     applied: List[str] = []
     for name in order:
         tm = tms[name]
-        sql = sqlgen.full_sql(tms, [name])
+        sql = sqlgen.full_sql(tms, [name], dialect=dialect)
         con.execute(sql)
         applied.append(name)
         runtime_pins(con, project, tm, f"v_{name}", pins)
@@ -125,7 +127,8 @@ def _dep_order(tms: Dict[str, TypedModel], names: List[str]) -> List[str]:
 
 
 def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
-        only_stale: bool = False, names: Optional[List[str]] = None):
+        only_stale: bool = False, names: Optional[List[str]] = None,
+        dialect=DUCKDB):
     if names is None:
         names = list(tms)
     if only_stale:
@@ -133,6 +136,6 @@ def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
         names = [n for n in names if n in stale] or []
         if not names:
             return [], [], "everything up to date (nothing to do)"
-    applied, pins = materialize(con, project, tms, names)
+    applied, pins = materialize(con, project, tms, names, dialect=dialect)
     save_manifest(module_path, {n: tm.fingerprint for n, tm in tms.items()})
     return applied, pins, None
