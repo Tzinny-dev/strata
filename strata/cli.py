@@ -82,6 +82,33 @@ def cmd_plan(args):
     return 0
 
 
+def _fail_loud_contracts(proj, tms, changes, radius):
+    """Fail-loud §7 (E030-32): a change that removes/narrows a column that a
+    downstream model reads is a cross-team contract break. Protected columns
+    (contract `protected`/`primary_key`/`nonnull`) are the hard boundary: the
+    producer PR must NOT ship it. Returns None if no protected column is hit,
+    else prints E030 radius and returns the breaking (node, col) list."""
+    breaking = []
+    for node, col in changes:
+        tm = tms.get(node)
+        if tm is None:
+            continue
+        c = tm.schema.get(col)
+        if c is not None and (c.protected or c.primary or not c.nullable):
+            breaking.append((node, col))
+    if not breaking:
+        return None
+    consumed = sorted(radius)
+    print(f"\nE030: change to protected/consumed column(s) breaks consumer contract:")
+    for n, c in breaking:
+        print(f"  producer {n}.{c} (protected/contract-bound)")
+    print(f"  -> {len(consumed)} consumer column(s) depend on it:")
+    for n, c in consumed:
+        print(f"    {n}.{c}")
+    print("  producer PR must NOT ship this change (cross-team contract, E030-32)")
+    return breaking
+
+
 def cmd_lineage(args):
     proj = load(args.file)
     tms = check(proj)
@@ -100,6 +127,13 @@ def cmd_lineage(args):
         print("\nblast radius (what breaks if source protected/changed):")
         for node, col in sorted(radius):
             print(f"  {node}.{col}")
+        _fail_loud_contracts(proj, tms, changes, radius)
+        if radius:
+            print(f"\nE030: {len(radius)} consumer column(s) break if "
+                  f"{changes[0][0]}.{changes[0][1]} is removed/narrowed: "
+                  f"{', '.join(f'{n}.{c}' for n, c in sorted(radius))}")
+            print("  -> producer PR must NOT ship this change (cross-team contract)")
+            return 1
     return 0
 
 
