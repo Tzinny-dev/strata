@@ -62,6 +62,13 @@ def cmd_compile(args):
 def cmd_plan(args):
     proj = load(args.file)
     tms = check(proj)
+    if args.seed:
+        exec_mod.save_manifest(args.file, {n: tm.fingerprint for n, tm in tms.items()})
+        print(f"seed baseline pinned ({len(tms)} model(s), content-addressed):")
+        for name in sorted(tms):
+            print(f"  {name}  {tms[name].fingerprint}")
+        print("\nidentical re-runs (same sources + same code) will see nothing stale.")
+        return 0
     stale = exec_mod.stale_models(tms, args.file)
     print("model graph (topological):")
     for name, tm in tms.items():
@@ -173,6 +180,9 @@ def main(argv=None):
 
     p = sub.add_parser("plan", help="compute stale set")
     p.add_argument("file")
+    p.add_argument("--seed", action="store_true",
+                   help="pin current fingerprints as content-addressed baseline "
+                        "(self-pinning: identical re-runs see nothing stale)")
     p.set_defaults(fn=cmd_plan)
 
     p = sub.add_parser("lineage-diff", help="print lineage + blast radius")
