@@ -89,8 +89,16 @@ class Translator:
                 return self._in(e)
             if name in ("count", "sum", "avg", "max", "min", "coalesce", "upper", "lower"):
                 return f"{name.upper()}({args})"
-            return f"{name}({args})"
+            return self.fn_sql(name, args)
         raise ValueError(f"cannot codegen {type(e).__name__}")
+
+    def fn_sql(self, name: str, args: str) -> str:
+        mapped = self.dialect.function_map.get(name)
+        if mapped is None:
+            raise RuntimeError(
+                f"dialect {self.dialect.name!r} cannot express function {name}()"
+                f" (add an alias to dialects.py or rewrite the model)")
+        return f"{mapped}({args})"
 
     def _in(self, e: ast.Call):
         # IN is represented as Call('in', [x, [a,b,c]])

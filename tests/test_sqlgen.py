@@ -5,6 +5,9 @@ from strata import analysis
 from strata.analysis import Checker
 from strata.parser import parse_strata
 from strata import sqlgen
+from strata.dialects import DUCKDB, BIGQUERY, SNOWFLAKE
+from strata.dialects import get_dialect
+from strata.analysis import StrataError
 
 EX = Path(__file__).parent.parent / "examples"
 
@@ -77,6 +80,33 @@ class TestFullSQLExecutableSyntax(unittest.TestCase):
         sql = sqlgen.model_sql(proj.typed["daily_orders"])
         self.assertIn("LOWER(t0.country) AS country", sql)
         self.assertNotIn("t0.country AS country", sql)
+
+
+class TestDialectFailLoud(unittest.TestCase):
+    """The dialect adapter's fail-loud guarantee must hold at the codegen
+    boundary, not just on the capability flag: compiling a plan whose ANTI JOIN
+    the pinned warehouse cannot express must raise, never emit wrong SQL."""
+
+    @classmethod
+    def setUpClass(cls):
+        src = (EX / "daily_orders.strata").read_text().replace(
+            "join_left refunds on orders.order_id == refunds.order_id",
+            "join_anti refunds on orders.order_id == refunds.order_id")
+        proj = analysis.Project(parse_strata(src, "daily_anti_orders.strata"))
+        Checker(proj).check_all()
+        cls.anti = proj.typed["daily_orders"]
+
+    def test_duckdb_expresses_anti(self):
+        sql = sqlgen.model_sql(self.anti, dialect=DUCKDB)
+        self.assertIn("ANTI JOIN", sql)
+
+    def test_bigquery_anti_fails_loudly(self):
+        with self.assertRaises(RuntimeError):
+            sqlgen.model_sql(self.anti, dialect=BIGQUERY)
+
+    def test_snowflake_anti_fails_loudly(self):
+        with self.assertRaises(RuntimeError):
+            sqlgen.model_sql(self.anti, dialect=SNOWFLAKE)
 
 
 if __name__ == "__main__":

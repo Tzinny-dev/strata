@@ -13,7 +13,8 @@ from typing import Dict, Optional
 
 class Dialect:
     def __init__(self, name: str, quote_ident, type_map: Dict[str, str],
-                 decimal, money: str, array, supports_anti_semi: bool):
+                 decimal, money: str, array, supports_anti_semi: bool,
+                 function_map: Optional[Dict[str, str]] = None):
         self.name = name
         self._quote = quote_ident
         self.type_map = type_map
@@ -21,6 +22,7 @@ class Dialect:
         self._array = array
         self.money = money
         self.supports_anti_semi = supports_anti_semi
+        self.function_map = function_map or {}
 
     # -- identifiers --------------------------------------------------
     def ident(self, name: str) -> str:
@@ -86,14 +88,22 @@ def _sf_dec(p: int, s: int) -> str:
 
 
 def _sf_array(elem: str) -> str:
-    return f"ARRAY"
+    return "ARRAY"
 
+
+# Functions that every dialect expresses identically, spelled how each
+# warehouse expects the CALL to look in SQL (DuckDB emits bare names).
+_UNIVERSAL_FNS = {
+    "count": "count", "sum": "sum", "avg": "avg", "max": "max", "min": "min",
+    "coalesce": "coalesce", "upper": "upper", "lower": "lower",
+}
 
 DUCKDB = Dialect(
     "duckdb", _bare,
     {"int64": "BIGINT", "float64": "DOUBLE", "string": "VARCHAR", "bool": "BOOLEAN",
      "date": "DATE", "timestamp": "TIMESTAMP", "uuid": "UUID", "json": "JSON"},
     _dec, "DECIMAL(38,2)", _array, supports_anti_semi=True,
+    function_map=_UNIVERSAL_FNS,
 )
 
 BIGQUERY = Dialect(
@@ -101,6 +111,7 @@ BIGQUERY = Dialect(
     {"int64": "INT64", "float64": "FLOAT64", "string": "STRING", "bool": "BOOL",
      "date": "DATE", "timestamp": "TIMESTAMP", "uuid": "STRING", "json": "JSON"},
     _bq_dec, "NUMERIC(38,2)", _bq_array, supports_anti_semi=False,
+    function_map=_UNIVERSAL_FNS,
 )
 
 SNOWFLAKE = Dialect(
@@ -108,13 +119,14 @@ SNOWFLAKE = Dialect(
     {"int64": "BIGINT", "float64": "DOUBLE", "string": "VARCHAR", "bool": "BOOLEAN",
      "date": "DATE", "timestamp": "TIMESTAMP_NTZ", "uuid": "VARCHAR", "json": "VARIANT"},
     _sf_dec, "NUMBER(38,2)", _sf_array, supports_anti_semi=False,
+    function_map=_UNIVERSAL_FNS,
 )
 
-DIALECTS = {d.name: d for d in (DUCKDB, BIGQUERY, SNOWFLAKE)}
+_DIALECTS = {d.name: d for d in (DUCKDB, BIGQUERY, SNOWFLAKE)}
 
 
 def get_dialect(name: str) -> Dialect:
     try:
-        return DIALECTS[name]
+        return _DIALECTS[name]
     except KeyError:
-        raise ValueError(f"unknown dialect {name!r} (have: {', '.join(DIALECTS)})")
+        raise ValueError(f"unknown dialect {name!r} (have: {', '.join(_DIALECTS)})") from None
