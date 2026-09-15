@@ -59,6 +59,23 @@ class TestExec(unittest.TestCase):
         applied2, pins2, note = ex.run(con, proj, tms, path, only_stale=True)
         self.assertEqual(applied2, [])
 
+    def test_seed_autonomous_subcommand(self):
+        import duckdb
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "daily_orders.strata")
+        Path(path).write_text((EX / "daily_orders.strata").read_text())
+        w = os.path.join(d, "seed.duckdb")
+        from strata.cli import cmd_seed
+        from types import SimpleNamespace
+        rc = cmd_seed(SimpleNamespace(file=path, output=w))
+        self.assertEqual(rc, 0)
+        fresh = duckdb.connect(w)
+        n_orders = fresh.execute("SELECT count(*) FROM orders").fetchone()[0]
+        n_refunds = fresh.execute("SELECT count(*) FROM refunds").fetchone()[0]
+        fresh.close()
+        self.assertEqual(n_orders, 5)
+        self.assertEqual(n_refunds, 2)
+
     def test_run_sin_o_no_crash(self):
         d = tempfile.mkdtemp()
         path = os.path.join(d, "daily_orders.strata")

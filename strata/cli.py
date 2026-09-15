@@ -173,6 +173,33 @@ def cmd_run(args):
     return 0
 
 
+def cmd_seed(args):
+    """§15: `strata seed <file>` is the autonomous sibling of `run --seed`.
+
+    It only loads the demo source fixtures (orders with its 5 rows, refunds
+    with its 2 rows) into a duckdb warehouse and prints what was seeded --
+    it does NOT run the DAG (that stays with `strata run`). Honors -o to
+    persist to a .duckdb file, else in-memory (§14 :memory: byte-certain)."""
+    proj = load(args.file)
+    tms = check(proj)
+    try:
+        import duckdb
+    except ImportError as ie:
+        print("duckdb not available; run with the venv interpreter "
+              "(/tmp/opencode/strata-venv/bin/python3)", file=sys.stderr)
+        return 2
+    con = duckdb.connect(getattr(args, "output", None) or ":memory:")
+    _run_seed(con, args.file)
+    for tname, in con.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'main' ORDER BY table_name").fetchall():
+        rows = con.execute(f"SELECT count(*) FROM {tname}").fetchone()[0]
+        print(f"  seeded  {tname}  ({rows} rows)")
+    if getattr(args, "output", None):
+        con.close()
+    return 0
+
+
 def _run_seed(con, path: str):
     from .seed import seed_sql  # lazy: seed imports live alongside examples
     con.execute(seed_sql()[0])
@@ -277,6 +304,12 @@ def main(argv=None):
     p.add_argument("file", metavar="schema.yml", help="dbt schema.yml (sources + models with columns)")
     p.add_argument("--output", help="output .strata path (default: alongside the schema.yml)")
     p.set_defaults(fn=cmd_import_dbt)
+    p = sub.add_parser("seed", help="load demo source fixtures into a warehouse (duckdb required)")
+    p.add_argument("file")
+    p.add_argument("--output", "-o",
+                   help="persist the seeded warehouse to this .duckdb file "
+                        "(default: in-memory, discarded on exit)")
+    p.set_defaults(fn=cmd_seed)
 
     args = ap.parse_args(argv)
     try:
