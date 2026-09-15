@@ -146,7 +146,7 @@ def cmd_run(args):
         print("duckdb not available; run with the venv interpreter "
               "(/tmp/opencode/strata-venv/bin/python)", file=sys.stderr)
         return 2
-    con = duckdb.connect()
+    con = duckdb.connect(getattr(args, "output", None) or None)
     if args.seed:
         _run_seed(con, args.file)
     applied, pins, note = exec_mod.run(con, proj, tms, args.file,
@@ -168,6 +168,8 @@ def cmd_run(args):
             print("    " + ", ".join(cols))
             for row in con.execute(f"SELECT * FROM v_{first} LIMIT 3").fetchall():
                 print("    " + ", ".join(str(v) for v in row))
+    if getattr(args, "output", None):
+        con.close()
     return 0
 
 
@@ -260,6 +262,9 @@ def main(argv=None):
     p.add_argument("--only-stale", action="store_true")
     p.add_argument("--dialect", default="duckdb",
                    help="target warehouse: duckdb | bigquery | snowflake")
+    p.add_argument("--output", "-o",
+                   help="persist the warehouse to this .duckdb file "
+                        "(default: in-memory, discarded on exit)")
     p.set_defaults(fn=cmd_run)
 
     p = sub.add_parser("init", help="write AGENTS.md")

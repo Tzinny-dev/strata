@@ -59,6 +59,34 @@ class TestExec(unittest.TestCase):
         applied2, pins2, note = ex.run(con, proj, tms, path, only_stale=True)
         self.assertEqual(applied2, [])
 
+    def test_run_output_persists_fresh_warehouse(self):
+        """§13: `strata run -o warehouse.duckdb` (cli hook REAL L265/L149/L171)
+        materializes byte-deterministic views into a REAL on-disk duckdb file
+        — a FRESH duckdb.connect(path) after cmd_run sees v_daily_orders with
+        3 rows and the exact byte-certain ES gross/net (§10 gate)."""
+        with __import__("tempfile").TemporaryDirectory() as d:
+            src = Path(d) / "daily_orders.strata"
+            src.write_text((EX / "daily_orders.strata").read_text())
+            warehouse = Path(d) / "warehouse.duckdb"
+            from strata.cli import main
+            import io as _io
+            err = _io.StringIO()
+            with __import__("contextlib").redirect_stderr(err):
+                code = main(["run", str(src), "--seed", "-o", str(warehouse)])
+            self.assertEqual(code, 0, err.getvalue())
+            import duckdb
+            con2 = duckdb.connect(str(warehouse))
+            n = con2.execute("SELECT count(*) FROM v_daily_orders").fetchone()[0]
+            self.assertEqual(n, 3)
+            gross = con2.execute("SELECT gross_amount FROM v_daily_orders "
+                                 "WHERE country='ES'").fetchone()[0]
+            net = con2.execute("SELECT net_amount FROM v_daily_orders "
+                               "WHERE country='ES'").fetchone()[0]
+            self.assertEqual(float(gross), 210.00)
+            self.assertEqual(float(net), 200.00)
+            con2.close()
+
+
     def test_unique_pin_fails(self):
         import duckdb
         con = duckdb.connect()
