@@ -136,3 +136,45 @@ def test_rollback_manifest_and_branch_recorded(tmp_path):
     exec_mod.swap_branch(con2, ["m0"], "b2")
     exec_mod.swap_branch(con2, ["m0"], "b2")  # idempotent repoint
     assert con2.execute("SELECT count(*) FROM v_m0").fetchone()[0] == 0
+
+
+def test_execute_run_replays_from_record(tmp_path):
+    proj, tms, path = _proj(tmp_path)
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE TABLE orders(order_id BIGINT, country VARCHAR)")
+    con.execute("INSERT INTO orders VALUES (1, 'ES'), (2, 'MX')")
+    exec_mod.run(con, proj, tms, path, branch="feat")
+    rid = exec_mod.load_history(path)[-1]["run_id"]
+    applied, pins, orig = exec_mod.execute_run(con, proj, tms, path, rid)
+    assert applied == ["m0"]
+    assert con.execute("SELECT count(*) FROM v_m0").fetchone()[0] == 2
+    hist = exec_mod.load_history(path)
+    assert len(hist) == 2
+    assert hist[-1]["replay_of"] == rid          # append-only lineage
+    assert hist[-1]["branch"] == "feat"          # environment from the RECORD
+    # drifted module never re-executes (fail-loud)
+    f = Path(path)
+    f.write_text(BASE.replace("upper(orders.country)", "lower(orders.country)"))
+    with pytest.raises(exec_mod.PinError):
+        exec_mod.execute_run(duckdb.connect(":memory:"), proj, tms, path, rid)
+
+
+def test_execute_run_rejects_unknown_run(tmp_path):
+    proj, tms, path = _proj(tmp_path)
+    with pytest.raises(exec_mod.PinError):
+        exec_mod.execute_run(duckdb.connect(":memory:"), proj, tms, path, "deadbeef0000")
+
+
+def test_warehouse_branches_inventory(tmp_path):
+    proj, tms, path = _proj(tmp_path)
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE TABLE orders(order_id BIGINT, country VARCHAR)")
+    con.execute("CREATE TABLE refunds(x BIGINT)")  # un-namespaced table lands on main
+    exec_mod.materialize(con, proj, tms, branch="feat", stage_only=True)
+    exec_mod.materialize(con, proj, tms, branch="b2", stage_only=True)
+    exec_mod.swap_branch(con, ["m0"], "feat")
+    inv = exec_mod.warehouse_branches(con)
+    assert inv["feat"]["staged"] == ["m0"]
+    assert inv["b2"]["staged"] == ["m0"] and inv["b2"].get("live", []) == []
+    # the live v_m0 view belongs to the promoted-name namespace, reported on main
+    assert inv["main"]["live"] == ["m0"]

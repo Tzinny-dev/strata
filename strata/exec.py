@@ -340,3 +340,56 @@ def verify_run(module_path: str, run_id: str) -> dict:
             raise PinError(f"verify FAILED: {name} changed since run {e['run_id']} "
                            f"({fp[:8]} -> {tm.fingerprint[:8]})")
     return e
+
+
+def execute_run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
+                run_id: str, dialect=DUCKDB):
+    """Replay WITH re-execution (spec §5): re-materialize a recorded run from
+    its content-addressed record. The record must verify first (same gate as
+    `verify_run`) — a drifted module never re-executes (fail-loud). Branch,
+    source_overrides and model set come from the RECORD, not from flags, so
+    the replay reproduces the recorded environment exactly. The new run is
+    appended with `replay_of` for lineage (history stays append-only)."""
+    e = verify_run(module_path, run_id)
+    branch = e.get("branch", "main")
+    overrides = e.get("source_overrides") or None
+    names = e.get("names") or list(tms)
+    names = [n for n in names if n in tms]
+    applied, pins = materialize(con, project, tms, names, dialect=dialect,
+                                source_overrides=overrides, branch=branch)
+    fps = {n: tm.fingerprint for n, tm in tms.items()}
+    save_manifest(module_path, fps)
+    record_run(module_path, {
+        "fingerprints": fps,
+        "applied": applied,
+        "pins": pins,
+        "names": names,
+        "dialect": e.get("dialect", getattr(dialect, "name", str(dialect))),
+        "source_overrides": overrides or {},
+        "branch": branch,
+        "replay_of": e["run_id"],
+    })
+    return applied, pins, e
+
+
+def warehouse_branches(con) -> dict:
+    """Branch inventory of a warehouse: {branch: {staged: [views], live: [views]}}."""
+    rows = con.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema='main'").fetchall()
+    have = {r[0] for r in rows}
+    branches: dict = {}
+    for tn in sorted(have):
+        if tn.startswith(STAGED_PREFIX) and BRANCH_SEP in tn:
+            rest = tn[len(STAGED_PREFIX):]
+            b, model = rest.split(BRANCH_SEP, 1)
+            branches.setdefault(b, {"staged": [], "live": []})["staged"].append(model)
+        elif tn.startswith(PROMOTED_PREFIX):
+            branches.setdefault("main", {"staged": [], "live": []})["live"].append(
+                tn[len(PROMOTED_PREFIX):])
+        else:
+            branches.setdefault("main", {"staged": [], "live": []})
+    for b in branches:
+        branches[b]["staged"].sort()
+        branches[b]["live"].sort()
+    return branches

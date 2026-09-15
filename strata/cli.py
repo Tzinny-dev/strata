@@ -320,6 +320,34 @@ def cmd_init(args):
     return 0
 
 
+def cmd_branches(args):
+    """Branch inventory of a persisted warehouse: staged (stg_<branch>__*) and
+    live (v_*) views per branch. The rollback/promotion surface at a glance."""
+    if not getattr(args, "output", None):
+        print("(no warehouse: pass -o FILE.duckdb; an in-memory warehouse is always empty)")
+        return 0
+    if not Path(args.output).exists():
+        print(f"error: E083: warehouse {args.output!r} not found", file=sys.stderr)
+        return 1
+    try:
+        import duckdb
+    except ImportError:
+        print("duckdb not available; run with the venv interpreter", file=sys.stderr)
+        return 2
+    con = duckdb.connect(args.output, read_only=True)
+    branches = exec_mod.warehouse_branches(con)
+    con.close()
+    if not branches:
+        print("(no branches: warehouse has no staged/live views)")
+        return 0
+    for b in sorted(branches):
+        inv = branches[b]
+        print(f"branch {b}")
+        print(f"  staged  {', '.join(inv['staged']) or '-'}")
+        print(f"  live    {', '.join(inv['live']) or '-'}")
+    return 0
+
+
 def cmd_fmt(args):
     from .fmt import format_module
     proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, "search_dir", None) else None))
@@ -360,6 +388,35 @@ def cmd_replay(args):
             print(f"error: E082: {ex}", file=sys.stderr)
             return 1
         print(f"verify OK: run {e['run_id']} stable ({len(e.get('fingerprints', {}))} model(s), no re-execution)")
+        return 0
+    if getattr(args, "execute", False):
+        if not args.run_id:
+            print("error: E082: --execute needs a run_id", file=sys.stderr)
+            return 1
+        proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, "search_dir", None) else None))
+        tms = check(proj)
+        try:
+            import duckdb
+        except ImportError:
+            print("duckdb not available; run with the venv interpreter", file=sys.stderr)
+            return 2
+        con = duckdb.connect(getattr(args, "output", None) or ":memory:")
+        if getattr(args, "seed", False):
+            _run_seed(con, args.file)
+        try:
+            applied, pins, orig = exec_mod.execute_run(con, proj, tms, args.file, args.run_id)
+        except exec_mod.PinError as pe:
+            print(f"error: E082: {pe}", file=sys.stderr)
+            return 1
+        except StrataError as se:
+            print(f"error: {se}", file=sys.stderr)
+            return 1
+        if getattr(args, "output", None):
+            con.close()
+        print(f"replayed {orig['run_id']} -> new run recorded "
+              f"(branch {orig.get('branch', 'main')}, {len(applied)} model(s) re-materialized)")
+        for p in pins:
+            print(p)
         return 0
     hist = exec_mod.load_history(args.file)
     if args.run_id:
@@ -503,7 +560,16 @@ def main(argv=None):
     p.add_argument("run_id", nargs="?")
     p.add_argument("--last", default="10")
     p.add_argument("--verify", default=None, help="verify run stable without re-execution")
+    p.add_argument("--execute", action="store_true",
+                   help="re-execute the run from its record (branch/overrides/model set from the record)")
+    p.add_argument("--seed", action="store_true", help="with --execute: seed demo sources into a fresh warehouse")
+    p.add_argument("-o", "--output", default=None, help="with --execute: persist the warehouse to this .duckdb file")
+    p.add_argument("--search-dir", default=None, help="with --execute: extra dir resolving import a.b")
     p.set_defaults(fn=cmd_replay)
+
+    p = sub.add_parser("branches", help="list staging branches in a warehouse (staged/live views per branch)")
+    p.add_argument("-o", "--output", default=None, help="warehouse .duckdb file (default: describe :memory: as empty)")
+    p.set_defaults(fn=cmd_branches)
 
     p = sub.add_parser("rollback", help="repoint manifest (and live views with -o) to a recorded run")
     p.add_argument("file")
