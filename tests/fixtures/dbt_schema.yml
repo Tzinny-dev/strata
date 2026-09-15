@@ -1,0 +1,45 @@
+# dbt schema.yml — Strata import-dbt fixture
+version: 2
+
+sources:
+  - name: crm
+    schema: prod
+    tables:
+      - name: orders
+        description: "raw CRM orders"
+        columns:
+          - name: order_id
+            data_type: bigint
+            description: PK
+            tests: [unique, not_null]
+          - name: customer_id
+            data_type: bigint
+          - name: gross_amount_usd
+            data_type: numeric
+            tests: [not_null]
+          - name: order_day
+            data_type: date
+            tests: [not_null]
+      - name: refunds
+        description: "raw CRM refunds"
+        columns:
+          - name: order_id
+            data_type: bigint
+          - name: discount_usd
+            data_type: numeric
+
+models:
+  - name: daily_orders
+    description: "verified daily revenue"
+    columns:
+      - name: order_id
+        data_type: bigint
+        tests: [unique, not_null]
+      - name: gross_amount_usd
+        data_type: numeric
+        tests: [not_null]
+      - name: net_amount_usd
+        data_type: numeric
+        tests: [not_null]
+  - name: unverified_legacy
+    description: "no contract in schema.yml — import MUST fail loud"

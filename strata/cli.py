@@ -176,6 +176,24 @@ def _run_seed(con, path: str):
     con.execute(seed_sql()[0])
 
 
+def cmd_import_dbt(args):
+    """Import a dbt schema.yml (sources + models with column contracts) into a
+    deterministic .strata artifact via strata/importdbt.py (E041 fail-loud §4
+    / §11: a dbt model doing  with no columns cannot be imported — the
+    warehouse owns the types)."""
+    from strata.importdbt import import_dbt_schema, ImportFailedFailLoud
+    path = Path(args.file)
+    try:
+        artifact = import_dbt_schema(path)
+    except ImportFailedFailLoud as e:
+        print(f"E041: {e}", file=sys.stderr)
+        return 1
+    out = Path(getattr(args, 'output', None) or (path.parent / path.stem).with_suffix('.strata'))
+    out.write_text(artifact)
+    print(f"wrote {out}")
+    return 0
+
+
 def cmd_init(args):
     target = Path(args.target)
     target.mkdir(parents=True, exist_ok=True)
@@ -249,6 +267,11 @@ def main(argv=None):
     p.add_argument("--claude", action="store_true")
     p.add_argument("target", nargs="?", default=".")
     p.set_defaults(fn=cmd_init)
+
+    p = sub.add_parser("import-dbt", help="import a dbt schema.yml into a .strata artifact")
+    p.add_argument("file", metavar="schema.yml", help="dbt schema.yml (sources + models with columns)")
+    p.add_argument("--output", help="output .strata path (default: alongside the schema.yml)")
+    p.set_defaults(fn=cmd_import_dbt)
 
     args = ap.parse_args(argv)
     try:
