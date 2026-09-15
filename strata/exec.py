@@ -1,4 +1,4 @@
-"""Executor: materializes views via DuckDB and enforces phase-C (runtime) pins.
+"""Executor: transactional staging + atomic swap via DuckDB (Fase 3).
 
 "Nothing is published until the pin passes": each materialized view is checked
 against its contract before the manifest is written. A violation aborts the run
@@ -129,9 +129,40 @@ def runtime_pins(con, project: Project, tm: TypedModel, view: str, report: List[
             report.append(f"  ok  {tm.name}.{f.name}: {'primary_key' if f.primary else 'unique'}")
 
 
+BRANCH_SEP = "__"
+PROMOTED_PREFIX = "v_"
+STAGED_PREFIX = "stg_"
+
+
+def staged_name(name: str, branch: str = "main") -> str:
+    """Staging view per model+branch: stg_<branch>__<model>."""
+    safe = "".join(c if (c.isalnum() or c == "_") else "_" for c in branch)
+    return f"{STAGED_PREFIX}{safe}{BRANCH_SEP}{name}"
+
+
+def promoted_name(name: str) -> str:
+    return f"{PROMOTED_PREFIX}{name}"
+
+
+def list_branches(con) -> List[str]:
+    try:
+        rows = con.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema='main'").fetchall()
+    except Exception:
+        return ["main"]
+    branches = set()
+    for (tn,) in rows:
+        if tn.startswith(STAGED_PREFIX) and BRANCH_SEP in tn:
+            rest = tn[len(STAGED_PREFIX):]
+            branches.add(rest.split(BRANCH_SEP, 1)[0])
+    return sorted(branches) or ["main"]
+
+
 def materialize(con, project: Project, tms: Dict[str, TypedModel],
                 names: Optional[List[str]] = None, sort_by_deps=True,
-                dialect=DUCKDB, source_overrides: Optional[Dict[str, Dict[str, str]]] = None):
+                dialect=DUCKDB, source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+                branch: str = "main", stage_only: bool = False):
     """Create/recreate views v_<name> in topological order; return pin report.
 
     `source_overrides` ({source: {ns, dataset, ...}}) rewrites the compiled
@@ -162,15 +193,57 @@ def materialize(con, project: Project, tms: Dict[str, TypedModel],
             if default not in read_sql and target not in read_sql:
                 raise PinError(f"source override {src!r} matches no compiled table "
                                f"(default {default!r}, target {target!r}) — dangling override")
+    staged_prefix = STAGED_PREFIX + branch + BRANCH_SEP
     for name in order:
         tm = tms[name]
-        sql = sqlgen.full_sql(tms, [name], dialect=dialect)
+        # Layered read: live v_* for upstreams already promoted, staged for
+        # upstreams built in THIS run (never a half-promoted mix).
+        sql_live = sqlgen.full_sql(tms, [name], dialect=dialect,
+                                   view_prefix=staged_prefix,
+                                   upstream_prefix=PROMOTED_PREFIX)
+        sql_staged = sqlgen.full_sql(tms, [name], dialect=dialect,
+                                     view_prefix=staged_prefix,
+                                     upstream_prefix=staged_prefix)
+        sql = sql_live
+        for d in tm.deps:
+            if d in order:
+                sql = sql_staged
+                break
         if source_overrides:
             sql, _ = _apply_source_overrides(sql, project, source_overrides)
-        con.execute(sql)
+        for stmt in sql.split(";\n"):
+            if stmt.strip():
+                con.execute(stmt)
         applied.append(name)
-        runtime_pins(con, project, tm, f"v_{name}", pins)
+        runtime_pins(con, project, tm, staged_name(name, branch), pins)
+    if not stage_only:
+        swap_branch(con, order, branch)
     return applied, pins
+
+
+def swap_branch(con, names: List[str], branch: str = "main") -> List[str]:
+    """Atomic promote: staged stg_<branch>__<m> -> live v_<m>.
+
+    Last-known-good stays queryable until every staged view exists; the swap
+    itself is one transaction (CREATE OR REPLACE VIEW per model). Returns
+    the promoted view names.
+    """
+    done: List[str] = []
+    con.execute("BEGIN TRANSACTION")
+    try:
+        for name in names:
+            stg = staged_name(name, branch)
+            live = promoted_name(name)
+            con.execute(f"CREATE OR REPLACE VIEW {live} AS SELECT * FROM {stg}")
+            done.append(live)
+        con.execute("COMMIT")
+    except Exception:
+        try:
+            con.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    return done
 
 
 def _apply_source_overrides(sql: str, project: Project,
@@ -220,7 +293,8 @@ def _dep_order(tms: Dict[str, TypedModel], names: List[str]) -> List[str]:
 
 def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
         only_stale: bool = False, names: Optional[List[str]] = None,
-        dialect=DUCKDB, source_overrides: Optional[Dict[str, Dict[str, str]]] = None):
+        dialect=DUCKDB, source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+        branch: str = "main", stage_only: bool = False):
     if names is None:
         names = list(tms)
     if only_stale:
@@ -229,7 +303,8 @@ def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
         if not names:
             return [], [], "everything up to date (nothing to do)"
     applied, pins = materialize(con, project, tms, names, dialect=dialect,
-                                source_overrides=source_overrides)
+                                source_overrides=source_overrides, branch=branch,
+                                stage_only=stage_only)
     fps = {n: tm.fingerprint for n, tm in tms.items()}
     save_manifest(module_path, fps)
     record_run(module_path, {
@@ -239,5 +314,29 @@ def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
         "names": names,
         "dialect": getattr(dialect, "name", str(dialect)),
         "source_overrides": source_overrides or {},
+        "branch": branch,
     })
     return applied, pins, None
+
+
+def verify_run(module_path: str, run_id: str) -> dict:
+    """Replay WITHOUT re-execution: the record is valid iff every pinned
+    fingerprint still matches a freshly typechecked model (content-addressed
+    stability proof). Raises PinError otherwise."""
+    e = find_run(module_path, run_id)
+    if e is None:
+        raise PinError(f"unknown run {run_id!r} (see strata replay)")
+    from .parser import parse_strata as _parse
+    from .analysis import Checker as _Checker, Project as _Project
+    src = Path(module_path).read_text()
+    proj = _Project(_parse(src, module_path))
+    _Checker(proj).check_all()
+    fps = e.get("fingerprints", {})
+    for name, fp in fps.items():
+        tm = proj.typed.get(name)
+        if tm is None:
+            raise PinError(f"verify FAILED: model {name!r} gone since run {e['run_id']}")
+        if tm.fingerprint != fp:
+            raise PinError(f"verify FAILED: {name} changed since run {e['run_id']} "
+                           f"({fp[:8]} -> {tm.fingerprint[:8]})")
+    return e

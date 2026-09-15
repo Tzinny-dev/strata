@@ -159,23 +159,28 @@ def cmd_run(args):
     applied, pins, note = exec_mod.run(con, proj, tms, args.file,
                                        only_stale=args.only_stale,
                                        names=wanted,
-                                       source_overrides=overrides or None)
+                                       source_overrides=overrides or None,
+                                       branch=getattr(args, "branch", "main"),
+                                       stage_only=getattr(args, "stage_only", False))
     if note:
         print(note)
     else:
+        live = "v_" if not getattr(args, "stage_only", False) else f"stg_{getattr(args, 'branch', 'main')}__"
         for a in applied:
-            n = con.execute(f"SELECT count(*) FROM v_{a}").fetchone()[0]
-            print(f"  materialized  v_{a}  ({n} rows)")
+            n = con.execute(f"SELECT count(*) FROM {live}{a}").fetchone()[0]
+            print(f"  materialized  {live}{a}  ({n} rows)")
     for p in pins:
         print(p)
     # demo preview
     if not args.only_stale:
         first = applied[0] if applied else (list(tms)[0] if tms else None)
         if first:
-            print("\n  preview " + first)
-            cols = [d[0] for d in con.execute(f"SELECT * FROM v_{first} LIMIT 1").description]
+            view = ("v_" if not getattr(args, "stage_only", False)
+                    else f"stg_{getattr(args, 'branch', 'main')}__") + first
+            print("\n  preview " + first + f" ({view})" )
+            cols = [d[0] for d in con.execute(f"SELECT * FROM {view} LIMIT 1").description]
             print("    " + ", ".join(cols))
-            for row in con.execute(f"SELECT * FROM v_{first} LIMIT 3").fetchall():
+            for row in con.execute(f"SELECT * FROM {view} LIMIT 3").fetchall():
                 print("    " + ", ".join(str(v) for v in row))
     if getattr(args, "output", None):
         con.close()
@@ -348,6 +353,14 @@ def cmd_lint(args):
 
 
 def cmd_replay(args):
+    if getattr(args, "verify", None):
+        try:
+            e = exec_mod.verify_run(args.file, args.verify)
+        except Exception as ex:
+            print(f"error: E082: {ex}", file=sys.stderr)
+            return 1
+        print(f"verify OK: run {e['run_id']} stable ({len(e.get('fingerprints', {}))} model(s), no re-execution)")
+        return 0
     hist = exec_mod.load_history(args.file)
     if args.run_id:
         e = exec_mod.find_run(args.file, args.run_id)
@@ -375,7 +388,33 @@ def cmd_rollback(args):
     fps = e.get("fingerprints", {})
     exec_mod.save_manifest(args.file, fps)
     print(f"rolled back manifest to run {e['run_id']} ({len(fps)} model(s) pinned)")
-    print("next strata run --only-stale will rebuild what diverged since")
+    if getattr(args, "output", None):
+        try:
+            import duckdb
+        except ImportError:
+            print("duckdb not available; manifest repoint only")
+            return 1
+        if not Path(args.output).exists():
+            print(f"error: E083: warehouse {args.output!r} not found "
+                  "(nothing to repoint)", file=sys.stderr)
+            return 1
+        con = duckdb.connect(args.output)
+        names = list(fps)
+        branch = getattr(args, "branch", None) or e.get("branch", "main")
+        have = {r[0] for r in con.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema='main'").fetchall()}
+        missing = [n for n in names if exec_mod.staged_name(n, branch) not in have]
+        if missing:
+            con.close()
+            print(f"error: E083: staged view(s) missing for branch {branch!r}: "
+                  f"{', '.join(missing)} — rollback cannot repoint to data that "
+                  "does not exist (fail-loud, no silent replay)", file=sys.stderr)
+            return 1
+        exec_mod.swap_branch(con, names, branch)
+        con.close()
+        print(f"repointed live views v_* <- stg_{branch}__* ({len(names)} view(s))")
+    else:
+        print("next strata run --only-stale will rebuild what diverged since")
     return 0
 
 
@@ -415,6 +454,8 @@ def main(argv=None):
     p.add_argument("file")
     p.add_argument("--seed", action="store_true")
     p.add_argument("--only-stale", action="store_true")
+    p.add_argument("--branch", default="main", help="staging branch (stg_<branch>__*, promoted to v_* on swap)")
+    p.add_argument("--stage-only", action="store_true", help="build + pin staged views without promoting (blue-green hold)")
     p.add_argument("--pipeline", default=None,
                    help="pipeline to materialize (default: first pipeline; "
                         "its sources: overrides select the env tables)")
@@ -457,15 +498,18 @@ def main(argv=None):
     p.add_argument("--search-dir", default=None)
     p.set_defaults(fn=cmd_lint)
 
-    p = sub.add_parser("replay", help="list/inspect content-addressed run records")
+    p = sub.add_parser("replay", help="list/inspect/verify content-addressed run records")
     p.add_argument("file")
     p.add_argument("run_id", nargs="?")
     p.add_argument("--last", default="10")
+    p.add_argument("--verify", default=None, help="verify run stable without re-execution")
     p.set_defaults(fn=cmd_replay)
 
-    p = sub.add_parser("rollback", help="repoint manifest to a recorded run")
+    p = sub.add_parser("rollback", help="repoint manifest (and live views with -o) to a recorded run")
     p.add_argument("file")
     p.add_argument("run_id")
+    p.add_argument("-o", "--output", default=None, help="warehouse file whose live v_* views to repoint")
+    p.add_argument("--branch", default=None, help="staging branch to repoint from (default: run's recorded branch)")
     p.set_defaults(fn=cmd_rollback)
 
     p = sub.add_parser("check", help="validate a .strata artifact without materializing (CI guard)")

@@ -108,12 +108,12 @@ class Translator:
         return f"({lhs} IN ({parts}))"
 
 
-def gen_base_subquery(plan, dialect=DUCKDB) -> str:
+def gen_base_subquery(plan, dialect=DUCKDB, upstream_prefix: str = "v_") -> str:
     t = Translator(plan, _RAW, dialect=dialect)
     # explicit projection over the left table (avoids name clashes with computed columns)
     computed = {bc.name for bc in plan.base_cols if bc.expr is not None}
     left_input = plan.inputs[0]
-    left_table = f"v_{left_input.node}" if not left_input.is_source else left_input.node
+    left_table = f"{upstream_prefix}{left_input.node}" if not left_input.is_source else left_input.node
     selects = [f"t0.{cname}" for cname in left_input.cols if cname not in computed]
     for j in plan.joins:
         inp = plan.inputs[j.index]
@@ -132,7 +132,7 @@ def gen_base_subquery(plan, dialect=DUCKDB) -> str:
             raise RuntimeError(f"dialect {t.dialect.name!r} cannot express ANTI/{j.kind.upper()} JOIN"
                              f" (emit NOT EXISTS/EXISTS instead via an equivalent pipeline)")
         jnode = plan.inputs[j.index]
-        jtable = f"v_{jnode.node}" if not jnode.is_source else jnode.node
+        jtable = f"{upstream_prefix}{jnode.node}" if not jnode.is_source else jnode.node
         froms.append(f"{kind} {jtable} t{j.index} ON {on_sql}")
     base = "SELECT " + ", ".join(selects) + "\nFROM " + "\n  ".join(froms)
     if plan.preds:  # pre-aggregation filters live in base subquery for cleanliness
@@ -168,16 +168,17 @@ def gen_outer(plan, dialect=DUCKDB) -> str:
     return sql
 
 
-def model_sql(tm: TypedModel, dialect=DUCKDB) -> str:
+def model_sql(tm: TypedModel, dialect=DUCKDB, upstream_prefix: str = "v_") -> str:
     plan = tm.plan
     if plan is None:
         return "-- no plan"
-    base = gen_base_subquery(plan, dialect=dialect)
+    base = gen_base_subquery(plan, dialect=dialect, upstream_prefix=upstream_prefix)
     outer = gen_outer(plan, dialect=dialect)
     return f"-- model {tm.name}" + (f" -> contract {tm.contract}" if tm.contract else "") + "\nWITH base AS (\n" + base + "\n)\n" + outer + "\n"
 
 
-def full_sql(tms: List[TypedModel], names: List[str], dialect=DUCKDB) -> str:
+def full_sql(tms: List[TypedModel], names: List[str], dialect=DUCKDB,
+           view_prefix: str = "v_", upstream_prefix: str = "v_") -> str:
     # One statement per view: `materialize` executes them sequentially in
     # topological order, so upstream views (v_base) already exist when the
     # downstream view compiles. A single multi-CTE string would collide
@@ -185,6 +186,6 @@ def full_sql(tms: List[TypedModel], names: List[str], dialect=DUCKDB) -> str:
     view_sqls = []
     for name in names:
         tm = tms[name]
-        sql = model_sql(tm, dialect=dialect)
-        view_sqls.append(f"CREATE OR REPLACE VIEW v_{name} AS\n{sql}")
+        sql = model_sql(tm, dialect=dialect, upstream_prefix=upstream_prefix)
+        view_sqls.append(f"CREATE OR REPLACE VIEW {view_prefix}{name} AS\n{sql}")
     return ";\n".join(view_sqls)
