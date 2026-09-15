@@ -65,8 +65,10 @@ class Parser:
         while not self.at("EOF"):
             if self.at("KW", "import"):
                 self.advance()
-                p = self.expect("ID").value
-                m.decls.append(ast.ImportDecl(path=p))
+                parts = [self.expect("ID").value]
+                while self.match("SYM", "."):
+                    parts.append(self.expect("ID").value)
+                m.decls.append(ast.ImportDecl(path=".".join(parts)))
             elif self.at("KW", "source"):
                 m.decls.append(self.parse_source())
             elif self.at("KW", "contract"):

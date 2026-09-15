@@ -10,6 +10,7 @@ import hashlib
 import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from . import ast
@@ -244,8 +245,10 @@ class FnEvaluator:
 # ------------------------------------------------------------------ project
 
 class Project:
-    def __init__(self, module: ast.Module):
+    def __init__(self, module: ast.Module, search_dirs: Optional[List[str]] = None,
+                 _seen: Optional[Set[str]] = None):
         self.module = module
+        self.search_dirs = [str(p) for p in (search_dirs or [])]
         self.expansions: List[ast.GeneratorDecl] = []
         self.sources: Dict[str, ast.SourceDecl] = {}
         self.contracts: Dict[str, ast.ContractDecl] = {}
@@ -253,23 +256,64 @@ class Project:
         self.fns: Dict[str, ast.FnDecl] = {}
         self.pipelines: List[ast.PipelineDecl] = []
         self.typed: Dict[str, TypedModel] = {}
+        self.modules: Dict[str, ast.Module] = {module.path or "<strata>": module}
+        self.imports: List[str] = []
         self._resolve()
         self._expand_fns()
 
+    # -- multi-file imports (spec/grammar.md: `import a.b` -> a/b.strata) ----
+    def _resolve_import(self, path: str, seen: Set[str]) -> Optional[ast.Module]:
+        rel = Path(*path.split(".")).with_suffix(".strata")
+        candidates: List[Path] = []
+        cur = Path(self.module.path or "<strata>")
+        if str(cur) not in ("<strata>", "") and cur.parent != Path("."):
+            candidates.append(cur.parent / rel)
+        for d in self.search_dirs:
+            candidates.append(Path(d) / rel)
+        candidates.append(Path.cwd() / rel)
+        for cand in candidates:
+            if cand.is_file():
+                key = str(cand.resolve())
+                if key in seen:
+                    raise err("F045", f"circular import {path!r} ({cand})")
+                from .parser import parse_strata as _parse
+                seen.add(key)
+                sub = _parse(cand.read_text(), str(cand))
+                self.modules[str(cand)] = sub
+                self.imports.append(path)
+                for d in sub.decls:
+                    if isinstance(d, ast.ImportDecl):
+                        self._resolve_import(d.path, seen)
+                    else:
+                        self._merge_decl(d)
+                return sub
+        raise err("E022", f"cannot resolve import {path!r} (tried {', '.join(str(c) for c in candidates)})")
+
+    def _merge_decl(self, d: ast.Node) -> None:
+        if isinstance(d, ast.SourceDecl):
+            self.sources.setdefault(d.name, d)
+        elif isinstance(d, ast.ContractDecl):
+            self.contracts.setdefault(d.name, d)
+        elif isinstance(d, ast.ModelDecl):
+            self.models.setdefault(d.name, d)
+        elif isinstance(d, ast.FnDecl):
+            self.fns.setdefault(d.name, d)
+        elif isinstance(d, ast.PipelineDecl):
+            self.pipelines.append(d)
+        elif isinstance(d, ast.GeneratorDecl):
+            self.expansions.append(d)
+
     def _resolve(self):
+        seen: Set[str] = set()
+        try:
+            seen.add(str(Path(self.module.path).resolve()))
+        except Exception:
+            pass
         for d in self.module.decls:
-            if isinstance(d, ast.SourceDecl):
-                self.sources[d.name] = d
-            elif isinstance(d, ast.ContractDecl):
-                self.contracts[d.name] = d
-            elif isinstance(d, ast.ModelDecl):
-                self.models[d.name] = d
-            elif isinstance(d, ast.FnDecl):
-                self.fns[d.name] = d
-            elif isinstance(d, ast.PipelineDecl):
-                self.pipelines.append(d)
-            elif isinstance(d, ast.GeneratorDecl):
-                self.expansions.append(d)
+            if isinstance(d, ast.ImportDecl):
+                self._resolve_import(d.path, seen)
+            else:
+                self._merge_decl(d)
 
     def _expand_fns(self):
         ev = FnEvaluator(self)
@@ -333,7 +377,32 @@ class Project:
                 names.extend(str(it.value) for it in item.items if isinstance(it, ast.Literal))
             elif isinstance(item, ast.ColumnRef):
                 names.append(item.name)
+            elif isinstance(item, ast.Call):  # unresolved fn hook
+                raise err("F046", f"pipeline has unexpanded fn {item.name!r}", item.span)
         return names
+
+    def pipeline_by_name(self, name: Optional[str]) -> Optional[ast.PipelineDecl]:
+        if not self.pipelines:
+            return None
+        if name is None:
+            return self.pipelines[0]
+        for p in self.pipelines:
+            if p.name == name:
+                return p
+        raise err("E023", f"unknown pipeline {name!r}")
+
+    def pipeline_sources(self, pipeline: Optional[str]) -> Dict[str, Dict[str, str]]:
+        """Per-env source resource overrides for `run --pipeline`.
+
+        `pipeline prod { sources: { orders: from(ns: "x", dataset: "y") } }`
+        returns {"orders": {"ns": "x", "dataset": "y"}}. Empty when the
+        pipeline declares no `sources:` — `exec.run` then uses the compiled
+        `source(ns,dataset)` defaults. (spec/grammar.md §5, propuesta Fase 2.)
+        """
+        p = self.pipeline_by_name(pipeline)
+        if p is None:
+            return {}
+        return {src: dict(kv) for src, kv in (p.sources or {}).items()}
 
 
 # ------------------------------------------------------------------ typing helpers
@@ -728,7 +797,12 @@ class _ModelState:
                 raise err("E013", f"{model.name}.{f.name}: contract enum/classification requires string, got {col.t}")
 
     def fingerprint(self):
-        text = str(self.decl)
+        # Canonical fingerprint: AST-shape, not source-whitespace. `str(decl)`
+        # embeds raw spans/whitespace, so `fmt` (which only re-emits the same
+        # AST) would spuriously mark everything stale. Canonicalize instead.
+        from . import fmt as _fmt
+        text = _fmt.format_module(__import__("strata.ast", fromlist=["Module"]).Module(
+            path="<fp>", decls=[self.decl]))
         parts = [self.decl.name, self.decl.contract or "", re.sub(r"\s+", " ", text)]
         for d in self.tm.deps:
             up = self.c.p.typed.get(d)

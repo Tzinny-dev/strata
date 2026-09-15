@@ -17,10 +17,10 @@ from .parser import ParseError, parse_strata
 from .analysis import StrataError, Checker, build_down_edges, blast_radius
 
 
-def load(path: str):
+def load(path: str, search_dirs=None):
     src = Path(path).read_text()
     module = parse_strata(src, path)
-    proj = analysis.Project(module)
+    proj = analysis.Project(module, search_dirs=search_dirs)
     return proj
 
 
@@ -33,7 +33,7 @@ def check(proj, model_names=None):
 # ---------------------------------------------------------------- commands
 
 def cmd_build(args):
-    proj = load(args.file)
+    proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
     tms = check(proj, args.model)
     out = []
     for name in (args.model or list(tms)):
@@ -52,7 +52,7 @@ def cmd_build(args):
 
 
 def cmd_compile(args):
-    proj = load(args.file)
+    proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
     tms = check(proj, args.model)
     names = args.model or (proj.model_names_for(None) or list(tms))
     print(sqlgen.full_sql(tms, names, dialect=get_dialect(args.dialect)))
@@ -60,7 +60,7 @@ def cmd_compile(args):
 
 
 def cmd_plan(args):
-    proj = load(args.file)
+    proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
     tms = check(proj)
     if args.seed:
         exec_mod.save_manifest(args.file, {n: tm.fingerprint for n, tm in tms.items()})
@@ -110,7 +110,7 @@ def _fail_loud_contracts(proj, tms, changes, radius):
 
 
 def cmd_lineage(args):
-    proj = load(args.file)
+    proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
     tms = check(proj)
     down = build_down_edges(tms)
     print("lineage (column-level dependency edges):")
@@ -138,19 +138,28 @@ def cmd_lineage(args):
 
 
 def cmd_run(args):
-    proj = load(args.file)
+    search = ([args.search_dir] if getattr(args, "search_dir", None) else [])
+    proj = load(args.file, search_dirs=search or None)
     tms = check(proj)
+    pipeline = proj.pipeline_by_name(getattr(args, "pipeline", None))
+    wanted = proj.model_names_for(pipeline, include_generated=True) if pipeline else None
+    overrides = proj.pipeline_sources(pipeline.name if pipeline else None)
+    if overrides:
+        print(f"pipeline {pipeline.name!r} env={pipeline.env or '-'} "
+              f"source overrides: {', '.join(f'{k}<-{v}' for k, v in sorted(overrides.items()))}")
     try:
         import duckdb
     except ImportError as ie:
         print("duckdb not available; run with the venv interpreter "
-              "(/tmp/opencode/strata-venv/bin/python)", file=sys.stderr)
+              "(prototype/.venv/bin/python)", file=sys.stderr)
         return 2
     con = duckdb.connect(getattr(args, "output", None) or ":memory:")
     if args.seed:
         _run_seed(con, args.file)
     applied, pins, note = exec_mod.run(con, proj, tms, args.file,
-                                       only_stale=args.only_stale)
+                                       only_stale=args.only_stale,
+                                       names=wanted,
+                                       source_overrides=overrides or None)
     if note:
         print(note)
     else:
@@ -170,6 +179,57 @@ def cmd_run(args):
                 print("    " + ", ".join(str(v) for v in row))
     if getattr(args, "output", None):
         con.close()
+    return 0
+
+
+def cmd_check(args):
+    """§16: `strata check <file> [--dialect D]` -- autonomous CI guard, sibling
+    of plan/lineage-diff. Runs the compiled-model gates (E0xx fail-loud) plus
+    a fail-loud dialect probe, prints the typed contracts and pins each model
+    declares, and exits 0 only when everything is green. It NEVER materializes:
+    the guard a PR runs in CI without side effects."""
+    proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
+    tms = check(proj)
+    try:
+        dialect = get_dialect(getattr(args, "dialect", "duckdb"))
+    except ValueError as ve:
+        print(str(ve), file=sys.stderr)
+        return 4
+    for name in sorted(tms):
+        tm = tms[name]
+        cols = ", ".join(c.describe() for c in tm.schema.values()) or "(no columns)"
+        # Phase-C pins declared by this model's contract (what `run` enforces
+        # via exec.runtime_pins without materializing here).
+        pins: list[str] = []
+        if tm.contract:
+            cd = proj.contracts.get(tm.contract)
+            if cd is None:
+                print(f"error: E061: unknown contract {tm.contract!r}", file=sys.stderr)
+                return 1
+            for f in cd.fields:
+                bits: list[str] = []
+                if f.nonnull:
+                    bits.append("nonnull")
+                if f.enum:
+                    bits.append("enum{" + ",".join(f.enum) + "}")
+                if f.primary:
+                    bits.append("primary_key")
+                elif f.unique:
+                    bits.append("unique")
+                pins.append(f"{name}.{f.name}:{'+'.join(bits) if bits else 'type'}")
+        # Fail-loud dialect probe: same translator `run`/`compile` use, but
+        # without touching any warehouse (CI guard has no side effects).
+        try:
+            sqlgen.model_sql(tm, dialect=dialect)
+        except RuntimeError as re:
+            print(f"error: E070: dialect {dialect.name!r} cannot express model {name!r}: {re}",
+                  file=sys.stderr)
+            return 4
+        print(f"  ok  {name}")
+        print(f"    contract  {cols}")
+        print(f"    pins      {', '.join(pins) if pins else '(none)'}")
+    print(f"  check OK: {len(tms)} model(s) green, dialect {dialect.name}, "
+          "nothing materialized")
     return 0
 
 
@@ -255,6 +315,70 @@ def cmd_init(args):
     return 0
 
 
+def cmd_fmt(args):
+    from .fmt import format_module
+    proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, "search_dir", None) else None))
+    text = format_module(proj.module)
+    if getattr(args, "check", False):
+        if Path(args.file).read_text() != text:
+            print(f"{args.file}: not formatted (run strata fmt --write)")
+            return 1
+        print(f"{args.file}: formatted")
+        return 0
+    if getattr(args, "write", False):
+        Path(args.file).write_text(text)
+        print(f"formatted {args.file}")
+        return 0
+    print(text, end="")
+    return 0
+
+
+def cmd_lint(args):
+    from .lint import lint
+    proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, "search_dir", None) else None))
+    tms = check(proj)
+    warns = lint(proj, tms)
+    for w in warns:
+        print(f"  {w}")
+    if warns:
+        print(f"\nlint: {len(warns)} warning(s)")
+        return 2 if getattr(args, "strict", False) else 0
+    print("lint: clean")
+    return 0
+
+
+def cmd_replay(args):
+    hist = exec_mod.load_history(args.file)
+    if args.run_id:
+        e = exec_mod.find_run(args.file, args.run_id)
+        if e is None:
+            print(f"error: E080: unknown run {args.run_id!r} ({len(hist)} in history)", file=sys.stderr)
+            return 1
+        print(f"run {e['run_id']} at {e.get('at', '?')}")
+        print(f"  applied      {', '.join(e.get('applied', [])) or '-'}")
+        print(f"  fingerprints {e.get('fingerprints', {})}")
+        print(f"  pins         {len(e.get('pins', []))} pin report lines")
+        return 0
+    if not hist:
+        print("no runs recorded (run strata run first)")
+        return 0
+    for e in hist[-int(args.last):]:
+        print(f"{e['run_id']}  {e.get('at', '?')}  applied={','.join(e.get('applied', [])) or '-'}")
+    return 0
+
+
+def cmd_rollback(args):
+    e = exec_mod.find_run(args.file, args.run_id)
+    if e is None:
+        print(f"error: E081: unknown run {args.run_id!r} (see strata replay)", file=sys.stderr)
+        return 1
+    fps = e.get("fingerprints", {})
+    exec_mod.save_manifest(args.file, fps)
+    print(f"rolled back manifest to run {e['run_id']} ({len(fps)} model(s) pinned)")
+    print("next strata run --only-stale will rebuild what diverged since")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="strata", description="declarative, versioned data transformations")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -262,6 +386,7 @@ def main(argv=None):
     p = sub.add_parser("build", help="typecheck + contracts + lineage (no DB)")
     p.add_argument("file")
     p.add_argument("model", nargs="*")
+    p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
     p.set_defaults(fn=cmd_build)
 
     p = sub.add_parser("compile", help="emit SQL")
@@ -269,6 +394,7 @@ def main(argv=None):
     p.add_argument("model", nargs="*")
     p.add_argument("--dialect", default="duckdb",
                    help="target warehouse: duckdb | bigquery | snowflake")
+    p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
     p.set_defaults(fn=cmd_compile)
 
     p = sub.add_parser("plan", help="compute stale set")
@@ -276,17 +402,24 @@ def main(argv=None):
     p.add_argument("--seed", action="store_true",
                    help="pin current fingerprints as content-addressed baseline "
                         "(self-pinning: identical re-runs see nothing stale)")
+    p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
     p.set_defaults(fn=cmd_plan)
 
     p = sub.add_parser("lineage-diff", help="print lineage + blast radius")
     p.add_argument("file")
     p.add_argument("--change", help="source col change to simulate, e.g. crm.orders:order_id")
+    p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
     p.set_defaults(fn=cmd_lineage)
 
     p = sub.add_parser("run", help="materialize views (duckdb required)")
     p.add_argument("file")
     p.add_argument("--seed", action="store_true")
     p.add_argument("--only-stale", action="store_true")
+    p.add_argument("--pipeline", default=None,
+                   help="pipeline to materialize (default: first pipeline; "
+                        "its sources: overrides select the env tables)")
+    p.add_argument("--search-dir", default=None,
+                   help="extra dir resolving `import a.b` -> a/b.strata")
     p.add_argument("--dialect", default="duckdb",
                    help="target warehouse: duckdb | bigquery | snowflake")
     p.add_argument("--output", "-o",
@@ -310,6 +443,38 @@ def main(argv=None):
                    help="persist the seeded warehouse to this .duckdb file "
                         "(default: in-memory, discarded on exit)")
     p.set_defaults(fn=cmd_seed)
+
+    p = sub.add_parser("fmt", help="canonical formatter (AST -> text, idempotent)")
+    p.add_argument("file")
+    p.add_argument("--write", action="store_true", help="rewrite file in place")
+    p.add_argument("--check", action="store_true", help="exit 1 if not formatted (CI)")
+    p.add_argument("--search-dir", default=None)
+    p.set_defaults(fn=cmd_fmt)
+
+    p = sub.add_parser("lint", help="static warnings (no DB)")
+    p.add_argument("file")
+    p.add_argument("--strict", action="store_true", help="exit 2 on warnings")
+    p.add_argument("--search-dir", default=None)
+    p.set_defaults(fn=cmd_lint)
+
+    p = sub.add_parser("replay", help="list/inspect content-addressed run records")
+    p.add_argument("file")
+    p.add_argument("run_id", nargs="?")
+    p.add_argument("--last", default="10")
+    p.set_defaults(fn=cmd_replay)
+
+    p = sub.add_parser("rollback", help="repoint manifest to a recorded run")
+    p.add_argument("file")
+    p.add_argument("run_id")
+    p.set_defaults(fn=cmd_rollback)
+
+    p = sub.add_parser("check", help="validate a .strata artifact without materializing (CI guard)")
+    p.add_argument("file")
+    p.add_argument("--dialect", default="duckdb",
+                   help="target warehouse for the contract types gate: "
+                        "duckdb | bigquery | snowflake")
+    p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
+    p.set_defaults(fn=cmd_check)
 
     args = ap.parse_args(argv)
     try:

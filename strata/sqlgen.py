@@ -113,6 +113,7 @@ def gen_base_subquery(plan, dialect=DUCKDB) -> str:
     # explicit projection over the left table (avoids name clashes with computed columns)
     computed = {bc.name for bc in plan.base_cols if bc.expr is not None}
     left_input = plan.inputs[0]
+    left_table = f"v_{left_input.node}" if not left_input.is_source else left_input.node
     selects = [f"t0.{cname}" for cname in left_input.cols if cname not in computed]
     for j in plan.joins:
         inp = plan.inputs[j.index]
@@ -123,14 +124,16 @@ def gen_base_subquery(plan, dialect=DUCKDB) -> str:
             continue
         selects.append(f"{t.expr(bc.expr)} AS {bc.name}")
 
-    froms = [f"{left_input.node} t0"]
+    froms = [f"{left_table} t0"]
     for j in plan.joins:
         on_sql = t.expr(j.on)
         kind = JOIN_SQL[j.kind]
         if j.kind in ("anti", "semi") and not t.dialect.supports_anti_semi:
             raise RuntimeError(f"dialect {t.dialect.name!r} cannot express ANTI/{j.kind.upper()} JOIN"
                              f" (emit NOT EXISTS/EXISTS instead via an equivalent pipeline)")
-        froms.append(f"{kind} {plan.inputs[j.index].node} t{j.index} ON {on_sql}")
+        jnode = plan.inputs[j.index]
+        jtable = f"v_{jnode.node}" if not jnode.is_source else jnode.node
+        froms.append(f"{kind} {jtable} t{j.index} ON {on_sql}")
     base = "SELECT " + ", ".join(selects) + "\nFROM " + "\n  ".join(froms)
     if plan.preds:  # pre-aggregation filters live in base subquery for cleanliness
         t2 = Translator(plan, _RAW)
@@ -175,9 +178,13 @@ def model_sql(tm: TypedModel, dialect=DUCKDB) -> str:
 
 
 def full_sql(tms: List[TypedModel], names: List[str], dialect=DUCKDB) -> str:
+    # One statement per view: `materialize` executes them sequentially in
+    # topological order, so upstream views (v_base) already exist when the
+    # downstream view compiles. A single multi-CTE string would collide
+    # (`WITH base ... FROM base` self-reference) — keep statements separate.
     view_sqls = []
     for name in names:
         tm = tms[name]
         sql = model_sql(tm, dialect=dialect)
         view_sqls.append(f"CREATE OR REPLACE VIEW v_{name} AS\n{sql}")
-    return "\n".join(view_sqls)
+    return ";\n".join(view_sqls)

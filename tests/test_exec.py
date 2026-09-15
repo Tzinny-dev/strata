@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from strata import analysis
-from strata.analysis import Checker
+from strata.analysis import Checker, Project
 from strata.parser import parse_strata
 from strata.exec import PinError, load_manifest, save_manifest
 
@@ -58,6 +58,17 @@ class TestExec(unittest.TestCase):
         # second run: nothing stale
         applied2, pins2, note = ex.run(con, proj, tms, path, only_stale=True)
         self.assertEqual(applied2, [])
+
+    def test_check_autonomous_subcommand(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "daily_orders.strata")
+        Path(path).write_text((EX / "daily_orders.strata").read_text())
+        from strata.cli import cmd_check
+        from types import SimpleNamespace
+        rc = cmd_check(SimpleNamespace(file=path, dialect="duckdb"))
+        self.assertEqual(rc, 0)
+        rc_bad = cmd_check(SimpleNamespace(file=path, dialect="oracle"))
+        self.assertEqual(rc_bad, 4)
 
     def test_seed_autonomous_subcommand(self):
         import duckdb
@@ -134,6 +145,70 @@ model m -> contract C { from dupes }
         with self.assertRaises(PinError):
             ex.run(con, proj, proj.typed, path)
 
+    def test_import_multi_file(self):
+        """`import lib.base` merges sources/contracts/models (spec/grammar.md).
+
+        Fail-loud: unknown import -> E022, circular import -> F045."""
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "lib").mkdir()
+            (Path(d) / "lib" / "base.strata").write_text(
+                'source orders(ns: "crm", dataset: "orders") {\n'
+                '  columns: { order_id: int64 nonnull }\n'
+                '}\n'
+                'contract C { order_id : int64 nonnull }\n'
+                'model base -> contract C { from orders }\n')
+            main_p = Path(d) / "main.strata"
+            main_p.write_text(
+                'import lib.base\n'
+                'model top -> contract C { from base }\n'
+                'pipeline p { env: dev, models: [top] }\n')
+            proj = Project(parse_strata(main_p.read_text(), str(main_p)),
+                           search_dirs=[d])
+            Checker(proj).check_all()
+            self.assertIn("base", proj.models)
+            self.assertIn("top", proj.typed)
+            self.assertEqual(proj.imports, ["lib.base"])
+            # unknown import fails loud
+            bad = Path(d) / "bad.strata"
+            bad.write_text('import lib.missing\nmodel m { from orders }\n')
+            with self.assertRaises(analysis.StrataError):
+                Checker(Project(parse_strata(bad.read_text(), str(bad)),
+                                search_dirs=[d])).check_all()
+
+    def test_pipeline_sources_override(self):
+        """`pipeline { sources: { orders: from(dataset: ...) } }` rewrites
+        the compiled table per env; a dangling override fails loud."""
+        import duckdb
+        with tempfile.TemporaryDirectory() as d:
+            text = (
+                'source orders(ns: "crm", dataset: "orders") {\n'
+                '  columns: { order_id: int64 nonnull, v: int64 nonnull }\n'
+                '}\n'
+                'contract C { order_id : int64 nonnull, v : int64 nonnull }\n'
+                'model m -> contract C { from orders }\n'
+                'pipeline prod { env: prod, models: [m],\n'
+                '  sources: { orders: from(ns: "crm", dataset: "orders_eu") } }\n')
+            path = os.path.join(d, "p.strata")
+            Path(path).write_text(text)
+            proj = Project(parse_strata(text, path))
+            Checker(proj).check_all()
+            self.assertEqual(proj.pipeline_sources("prod"),
+                             {"orders": {"ns": "crm", "dataset": "orders_eu"}})
+            con = duckdb.connect()
+            con.execute("CREATE TABLE orders_eu (order_id BIGINT, v BIGINT)")
+            con.execute("INSERT INTO orders_eu VALUES (7, 7)")
+            from strata import exec as ex
+            applied, pins, _ = ex.run(
+                con, proj, proj.typed, path, names=["m"],
+                source_overrides=proj.pipeline_sources("prod"))
+            self.assertEqual(applied, ["m"])
+            n = con.execute("SELECT order_id FROM v_m").fetchone()[0]
+            self.assertEqual(n, 7)
+            # dangling override (no compiled table matches) fails loud
+            with self.assertRaises(PinError):
+                ex.run(con, proj, proj.typed, path, names=["m"],
+                       source_overrides={"ghost": {"dataset": "nowhere"}})
+
 
 class TestManifest(unittest.TestCase):
     def test_manifest_roundtrip(self):
@@ -164,3 +239,66 @@ class TestStale(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestFmtLintReplayRollback(unittest.TestCase):
+    def test_fmt_idempotent_and_fp_stable(self):
+        from strata.parser import parse_strata
+        from strata.fmt import format_module
+        src = (EX / "daily_orders.strata").read_text()
+        once = format_module(parse_strata(src, "daily_orders.strata"))
+        twice = format_module(parse_strata(once, "fmt.strata"))
+        self.assertEqual(once, twice)
+        p1 = Project(parse_strata(src, "a"))
+        Checker(p1).check_all()
+        p2 = Project(parse_strata(once, "b"))
+        Checker(p2).check_all()
+        self.assertEqual(p1.typed["daily_orders"].fingerprint,
+                         p2.typed["daily_orders"].fingerprint)
+
+    def test_lint_warns(self):
+        from strata.cli import cmd_lint
+        from types import SimpleNamespace
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_lint(SimpleNamespace(file=str(EX / "daily_orders.strata"),
+                                          search_dir=None, strict=False))
+        self.assertEqual(rc, 0)
+        # daily_orders has owner; craft a model without contract/owner
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "x.strata"
+            p.write_text('source s(ns: "n", dataset: "s") {\n  columns: { a: int64 }\n}\nmodel m { from s }\n')
+            buf2 = io.StringIO()
+            with contextlib.redirect_stdout(buf2):
+                rc2 = cmd_lint(SimpleNamespace(file=str(p), search_dir=None, strict=True))
+            self.assertEqual(rc2, 2)
+            self.assertIn("W001", buf2.getvalue())
+            self.assertIn("W002", buf2.getvalue())
+
+    def test_run_records_history_replay_rollback(self):
+        import duckdb
+        from strata import exec as ex
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "h.strata"
+            src.write_text((EX / "daily_orders.strata").read_text())
+            proj = Project(parse_strata(src.read_text(), str(src)))
+            Checker(proj).check_all()
+            con = duckdb.connect()
+            for stmt in __import__("strata.seed", fromlist=["seed_sql"]).seed_sql()[0].split(";"):
+                if stmt.strip():
+                    con.execute(stmt)
+            applied, pins, _ = ex.run(con, proj, proj.typed, str(src))
+            self.assertEqual(applied, ["daily_orders"])
+            hist = ex.load_history(str(src))
+            self.assertEqual(len(hist), 1)
+            self.assertEqual(len(hist[0]["run_id"]), 12)
+            # replay finds it by prefix
+            self.assertIsNotNone(ex.find_run(str(src), hist[0]["run_id"][:7]))
+            # rollback repoints manifest to that run
+            ex.save_manifest(str(src), {"daily_orders": "deadbeefdeadbeef"})
+            from strata.cli import cmd_rollback
+            from types import SimpleNamespace
+            rc = cmd_rollback(SimpleNamespace(file=str(src), run_id=hist[0]["run_id"]))
+            self.assertEqual(rc, 0)
+            self.assertEqual(ex.load_manifest(str(src))["daily_orders"],
+                             hist[0]["fingerprints"]["daily_orders"])
