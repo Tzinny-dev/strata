@@ -146,7 +146,7 @@ def cmd_run(args):
         print("duckdb not available; run with the venv interpreter "
               "(/tmp/opencode/strata-venv/bin/python)", file=sys.stderr)
         return 2
-    con = duckdb.connect(getattr(args, "output", None) or None)
+    con = duckdb.connect(getattr(args, "output", None) or ":memory:")
     if args.seed:
         _run_seed(con, args.file)
     applied, pins, note = exec_mod.run(con, proj, tms, args.file,

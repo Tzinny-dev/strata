@@ -59,6 +59,16 @@ class TestExec(unittest.TestCase):
         applied2, pins2, note = ex.run(con, proj, tms, path, only_stale=True)
         self.assertEqual(applied2, [])
 
+    def test_run_sin_o_no_crash(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "daily_orders.strata")
+        Path(path).write_text((EX / "daily_orders.strata").read_text())
+        from strata.cli import cmd_run
+        from types import SimpleNamespace
+        rc = cmd_run(SimpleNamespace(file=path, seed=True, only_stale=False,
+                                    dialect="duckdb", output=None))
+        self.assertEqual(rc, 0)
+
     def test_run_output_persists_fresh_warehouse(self):
         """§13: `strata run -o warehouse.duckdb` (cli hook REAL L265/L149/L171)
         materializes byte-deterministic views into a REAL on-disk duckdb file
