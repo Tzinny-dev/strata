@@ -66,6 +66,19 @@ def _expr(e: ast.Node) -> str:
             items = ", ".join(_expr(i) for i in e.args[1].items)
             return f"{_expr(e.args[0])} in [{items}]"
         return f"{e.name}({', '.join(_expr(a) for a in e.args)})"
+    if isinstance(e, ast.Star):
+        return "*"
+    if isinstance(e, ast.WindowCall):
+        head = f"{e.name}({', '.join(_expr(a) for a in e.args)})"
+        parts = []
+        if e.over.partition_by:
+            parts.append("partition_by: [" + ", ".join(_expr(p) for p in e.over.partition_by) + "]")
+        if e.over.sort:
+            parts.append("sort: [" + ", ".join(
+                _expr(k) + (" desc" if desc else "") for k, desc in e.over.sort) + "]")
+        # `over ()` (no clauses) round-trips to itself; SQL reads it as the
+        # whole-set frame, so an empty clause list is a valid window too.
+        return f"{head} over ({', '.join(parts)})"
     if isinstance(e, ast.BinOp):
         return f"({_expr(e.left)} {e.op} {_expr(e.right)})"
     if isinstance(e, ast.UnOp):

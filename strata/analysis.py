@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from . import ast
+from . import functions
 from .types import (
-    StrataType, INT64, FLOAT64, STRING, BOOL, DATE, TIMESTAMP, UUID, JSON,
-    UNKNOWN, decimal, money, binary_type, Col,
+    StrataType, Inf, INT64, FLOAT64, STRING, BOOL, DATE, TIMESTAMP, UUID, JSON,
+    UNKNOWN, decimal, money, binary_type, unify, Col,
 )
 
 
@@ -31,7 +32,9 @@ def err(code: str, msg: str, span=None):
     return StrataError(msg, code=code, span=span)
 
 
-AGGREGATES = {"count", "sum", "avg", "max", "min"}
+# Function classification and signatures live in functions.py: one declaration,
+# read by both the typechecker (below) and the code generator (sqlgen).
+AGGREGATES = functions.AGGREGATES
 
 
 def _literal_type(value):
@@ -50,12 +53,6 @@ def _literal_type(value):
         return FLOAT64
     from .types import STRING
     return STRING
-
-
-@dataclass
-class Inf:
-    t: StrataType = UNKNOWN
-    nullable: bool = True
 
 
 @dataclass
@@ -442,34 +439,6 @@ def types_compat(exp: StrataType, got: StrataType) -> bool:
     return False
 
 
-def unify(t1: StrataType, t2: StrataType) -> StrataType:
-    """Least-upper-bound used by coalesce/case; numeric literals coerce into money/decimal."""
-    if t1 == t2:
-        return t1
-    if t1.name in ("decimal", "money") and t2.is_numeric():
-        return t1
-    if t2.name in ("decimal", "money") and t1.is_numeric():
-        return t2
-    if t1.name == "money" and t2.name == "money":
-        return t1
-    if t1.is_numeric() and t2.is_numeric():
-        if t1.name == "float64" or t2.name == "float64":
-            return FLOAT64
-        if t1.name == "decimal" or t2.name == "decimal":
-            return decimal()
-        return INT64
-    return UNKNOWN
-
-
-AGG_TYPE = {
-    "count": lambda a: Inf(INT64, False),
-    "sum": lambda a: Inf(a.t, a.nullable),
-    "avg": lambda a: Inf(FLOAT64, a.nullable),
-    "max": lambda a: a,
-    "min": lambda a: a,
-}
-
-
 def infer_binary(op: str, lt: Inf, rt: Inf, span=None) -> Inf:
     if op in ("==", "!=", "<", "<=", ">", ">=", "in"):
         if lt.t.is_numeric() and rt.t.is_numeric():
@@ -654,32 +623,84 @@ class _ModelState:
         if isinstance(e, ast.BinOp):
             return infer_binary(e.op, self.infer(e.left), self.infer(e.right), e.span)
         if isinstance(e, ast.Call):
-            return self.infer_call(e)
+            return self.infer_call(e, window_allowed=True)
+        if isinstance(e, ast.WindowCall):
+            return self.infer_window(e)
+        if isinstance(e, ast.Star):
+            raise err(functions.E_STRAY_STAR, "'*' is only valid as count(*)", e.span)
         raise err("E055", f"unsupported expression {type(e).__name__}", e.span)
 
-    def infer_call(self, e: ast.Call) -> Inf:
+    def infer_window(self, e: ast.WindowCall) -> Inf:
+        fn = functions.get(e.name)
+        if fn is None:
+            raise err("E059", f"unknown function {e.name!r}", e.span)
+        if not fn.window:
+            raise err(functions.E_WINDOW_PLACEMENT,
+                      f"{e.name}() is not a window function: it takes no over(...)", e.span)
+        if fn.aggregate and self.in_group:
+            # An aggregate already collapses the group; a window over it would
+            # stack two reductions on the same column — write the aggregate in
+            # an upstream model and window over that model instead.
+            raise err(functions.E_WINDOW_PLACEMENT,
+                      f"aggregate {e.name}() cannot take over(...) inside a group body", e.span)
+        star = [a for a in e.args if isinstance(a, ast.Star)]
+        if star:
+            raise err(functions.E_STRAY_STAR,
+                      f"'*' is only valid as count(*), not in {e.name}()", e.span)
+        for sub in e.args:
+            self._reject_nested_window(sub, e.span)
+        for part in e.over.partition_by:
+            self._reject_nested_window(part, e.span)
+            self.infer(part)
+        for key, _desc in e.over.sort:
+            self._reject_nested_window(key, e.span)
+            self.infer(key)
+        args = [self.infer(a) for a in e.args]
+        problem = functions.check(fn, args)
+        if problem is not None:
+            code, msg = problem
+            raise err(code, msg, e.span)
+        return fn.ret(args)
+
+    def _reject_nested_window(self, e: ast.Node, span):
+        if isinstance(e, ast.WindowCall):
+            raise err(functions.E_WINDOW_PLACEMENT, "a window cannot appear inside a window", span)
+        if isinstance(e, ast.Call):
+            for a in e.args:
+                self._reject_nested_window(a, span)
+        elif isinstance(e, (ast.BinOp,)):
+            self._reject_nested_window(e.left, span)
+            self._reject_nested_window(e.right, span)
+        elif isinstance(e, ast.UnOp):
+            self._reject_nested_window(e.operand, span)
+
+    def infer_call(self, e: ast.Call, window_allowed: bool = False) -> Inf:
         name = e.name
-        if name in AGGREGATES:
-            if not self.in_group:
-                raise err("E056", f"aggregate {name}() only allowed inside group body", e.span)
-            if not e.args:
-                raise err("E057", f"{name}() requires an argument", e.span)
-            return AGG_TYPE[name](self.infer(e.args[0]))
-        if name == "coalesce":
-            infs = [self.infer(a) for a in e.args]
-            t = infs[0].t if infs else UNKNOWN
-            for i in infs[1:]:
-                t = unify(t, i.t)
-                if t.name == "unknown":
-                    raise err("E058", f"coalesce type mismatch {unify(t, i.t)}", e.span)
-            return Inf(t, all(i.nullable for i in infs))
-        if name in ("upper", "lower"):
-            return Inf(STRING, self.infer(e.args[0]).nullable)
         if name == "cast":
+            # cast() takes a type name (not an expression) as its second
+            # argument, so it stays a language construct rather than a catalog
+            # entry; its arity is checked here.
+            if len(e.args) != 2:
+                raise err("E062", "cast() takes exactly 2 arguments", e.span)
             a = self.infer(e.args[0])
-            spec = str(e.args[1].value) if len(e.args) > 1 and isinstance(e.args[1], ast.Literal) else "string"
+            spec = str(e.args[1].value) if isinstance(e.args[1], ast.Literal) else "string"
             return Inf(type_from_spec(spec, []), a.nullable)
-        raise err("E059", f"unknown function {name!r}", e.span)
+        fn = functions.get(name)
+        if fn is None:
+            raise err("E059", f"unknown function {name!r}", e.span)
+        if fn.aggregate and not self.in_group:
+            raise err("E056", f"aggregate {name}() only allowed inside group body", e.span)
+        # Star is not an expression: reject a stray one before inferring args.
+        star = [a for a in e.args if isinstance(a, ast.Star)]
+        if star and not fn.accepts_star:
+            raise err(functions.E_STRAY_STAR,
+                      f"'*' is only valid as count(*), not in {name}()", e.span)
+        args = [Inf(INT64, False)] if star else [self.infer(a) for a in e.args]
+        problem = functions.check(fn, args, has_star=bool(star))
+        if problem is not None:
+            code, msg = problem
+            raise err(code, msg, e.span)
+        return fn.ret(args)
 
     # -- statements -----------------------------------------------------
     def stmt(self, s: ast.Stmt):
@@ -688,6 +709,8 @@ class _ModelState:
         elif isinstance(s, ast.JoinStmt):
             self.do_join(s)
         elif isinstance(s, ast.FilterStmt):
+            self._require_no_window(s.cond, s.span,
+                                    "having" if self.in_group else "filter")
             if self.in_group:
                 self.tm.plan.having.append(s.cond)
             else:
@@ -705,6 +728,7 @@ class _ModelState:
             self.do_group(s)
         elif isinstance(s, ast.SortStmt):
             for e, desc in s.keys:
+                self._require_no_window(e, s.span, "sort")
                 self.infer(e)
                 self.tm.plan.sorts.append((e, desc))
         elif isinstance(s, ast.TakeStmt):
@@ -736,6 +760,7 @@ class _ModelState:
         js = JoinSpec(index=idx, alias=s.table, node=node, kind=s.kind, on=s.on)
         self.tm.plan.inputs.append(inp)
         self.tm.plan.joins.append(js)
+        self._require_no_window(s.on, s.span, "join condition")
         self.infer(s.on)
         for name, col in inp.cols.items():
             key = f"__j{idx}_{name}"
@@ -745,11 +770,35 @@ class _ModelState:
             self.base_cols.append(BaseCol(name=key, expr=None))
 
     def do_let(self, s: ast.LetStmt):
+        self._require_no_window(s.expr, s.span, "let")
         inf = self.infer(s.expr)
         self.cols[s.name] = Col(name=s.name, t=inf.t, nullable=inf.nullable)
         self.own[s.name] = self.tm.name
         self.origins[s.name] = self._origin_of_expr(s.expr)
         self.base_cols.append(BaseCol(name=s.name, expr=s.expr))
+
+    def _require_no_window(self, e: ast.Node, span, where: str):
+        """Windows run after grouping in the outer query, so `let` (inner
+        subquery), `filter`, group keys and `sort` must not contain them."""
+        found = self._find_window(e)
+        if found is not None:
+            raise err(functions.E_WINDOW_PLACEMENT,
+                      f"over(...) is only allowed in select/derive/aggregate "
+                      f"outputs, not in {where} (found {found})", span)
+
+    def _find_window(self, e: ast.Node) -> Optional[str]:
+        if isinstance(e, ast.WindowCall):
+            return e.name
+        if isinstance(e, ast.Call):
+            for a in e.args:
+                hit = self._find_window(a)
+                if hit:
+                    return hit
+        elif isinstance(e, ast.BinOp):
+            return self._find_window(e.left) or self._find_window(e.right)
+        elif isinstance(e, ast.UnOp):
+            return self._find_window(e.operand)
+        return None
 
     def do_output(self, a: ast.OutAssign):
         inf = self.infer(a.expr)
@@ -763,6 +812,12 @@ class _ModelState:
                                         for o in self.origins.get(a.expr.name, [])]
                 return
             if not (isinstance(a.expr, ast.Call) and a.expr.name in AGGREGATES):
+                if isinstance(a.expr, ast.WindowCall):
+                    # Aggregates already reduced the group here; window the
+                    # upstream model's output instead (same rule as infer_window).
+                    raise err(functions.E_WINDOW_PLACEMENT,
+                              f"over(...) is not allowed inside a group body "
+                              f"(found {a.expr.name}); window over an upstream model", a.span)
                 raise err("E050", f"output {a.name!r} in group body must be an aggregate "
                                   f"or reference a group key", a.span)
             self.outputs.append(PlanOut(name=a.name, expr=a.expr))
@@ -774,6 +829,21 @@ class _ModelState:
     def _origin_of_expr(self, e: ast.Node) -> List[Origin]:
         if isinstance(e, ast.ColumnRef):
             return self.origin_of(e)
+        if isinstance(e, ast.WindowCall):
+            # Windows see one row per group (they run after GROUP BY), so the
+            # windowed expression keeps its kind on the argument origins while
+            # recording that a window produced them.
+            kind = "windowed"
+            out: List[Origin] = []
+            for a in e.args:
+                out.extend(self._origin_of_expr(a))
+            for p in e.over.partition_by:
+                out.extend(self._origin_of_expr(p))
+            for k, _desc in e.over.sort:
+                out.extend(self._origin_of_expr(k))
+            if not out:
+                out = [Origin(self.tm.name, f"<{e.name}>", "windowed")]
+            return [Origin(o.node, o.col, kind) for o in out]
         if isinstance(e, ast.Call):
             kind = "aggregated" if e.name in AGGREGATES else "derived"
             out: List[Origin] = []
@@ -791,6 +861,7 @@ class _ModelState:
     def do_group(self, s: ast.GroupStmt):
         self.in_group = True
         for k in s.keys:
+            self._require_no_window(k, s.span, "group keys")
             inf = self.infer(k)
             if isinstance(k, ast.ColumnRef):
                 name = k.name

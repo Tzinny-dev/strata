@@ -100,6 +100,36 @@ def binary_type(op: str, lt: StrataType, rt: StrataType) -> StrataType:
     return UNKNOWN
 
 
+@dataclass
+class Inf:
+    """Inferred expression type: a StrataType plus nullability.
+
+    Lives here (not in analysis) so the function catalog in functions.py can
+    describe return types without importing the checker.
+    """
+    t: StrataType = UNKNOWN
+    nullable: bool = True
+
+
+def unify(t1: StrataType, t2: StrataType) -> StrataType:
+    """Least-upper-bound used by coalesce/case; numeric literals coerce into money/decimal."""
+    if t1 == t2:
+        return t1
+    if t1.name in ("decimal", "money") and t2.is_numeric():
+        return t1
+    if t2.name in ("decimal", "money") and t1.is_numeric():
+        return t2
+    if t1.name == "money" and t2.name == "money":
+        return t1
+    if t1.is_numeric() and t2.is_numeric():
+        if t1.name == "float64" or t2.name == "float64":
+            return FLOAT64
+        if t1.name == "decimal" or t2.name == "decimal":
+            return decimal()
+        return INT64
+    return UNKNOWN
+
+
 # ------------------------------------------------------------ columns
 
 @dataclass

@@ -41,7 +41,7 @@ KEYWORDS: List[str] = [
     "nonnull", "unique", "primary_key", "protected", "enum",
     "classification", "partition_by", "freshness",
     "not", "and", "or", "in", "is", "null", "true", "false",
-    "for", "->", "=>", "test", "expect",
+    "for", "over", "->", "=>", "test", "expect",
 ]
 
 TYPE_KEYWORDS: List[str] = [
@@ -311,6 +311,18 @@ RULES["column-ref"] = ("bare or schema-qualified column", [
 
 RULES["call-expr"] = ("built-in or user call", [
     r'ident "(" expr-list? ")"',
+    r'ident "(" expr-list? ")" "over" "(" window-spec-list? ")"',
+])
+
+RULES["window-spec-list"] = ("over clauses, comma separated", [
+    "window-spec (:: \",\" window-spec)*",
+])
+
+RULES["window-spec"] = ("partition_by: [expr-list] | sort: [expr desc, ...]", [
+    r'"partition_by" ":" "[" "]"',
+    r'"partition_by" ":" "[" expr-list "]"',
+    r'"sort" ":" "[" "]"',
+    r'"sort" ":" "[" sort-key-list "]"',
 ])
 
 RULES["unary"] = ("unary operators (parser: - and not)", [

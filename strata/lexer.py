@@ -29,7 +29,7 @@ KEYWORDS = {
     "classification", "partition_by", "freshness",
     "nonnull",  # dedupe-safe
     "not", "and", "or", "in", "is", "null", "true", "false",
-    "for",
+    "for", "over",
     "test", "expect",  # model-level declarative tests (Fase 5)
 }
 

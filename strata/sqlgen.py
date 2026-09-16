@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import List
 
 from . import ast
+from . import functions
 from .analysis import TypedModel
 from .types import StrataType, INT64, FLOAT64, STRING, BOOL, DATE, TIMESTAMP, UUID, JSON
 from .dialects import Dialect, DUCKDB
@@ -87,18 +88,34 @@ class Translator:
                 return f"CAST({self.expr(e.args[0])} AS {self.dialect.cast_target(spec)})"
             if name == "in":
                 return self._in(e)
-            if name in ("count", "sum", "avg", "max", "min", "coalesce", "upper", "lower"):
-                return f"{name.upper()}({args})"
-            return self.fn_sql(name, args)
+            # Signature and spelling come from the one catalog both the
+            # typechecker and this generator read (functions.py).
+            if functions.get(name) is None:
+                raise RuntimeError(
+                    f"dialect {self.dialect.name!r} cannot express function {name}()"
+                    f" (declare it in functions.py or rewrite the model)")
+            return functions.emit_sql(name, args, self.dialect)
+        if isinstance(e, ast.WindowCall):
+            return self.window_sql(e)
+        if isinstance(e, ast.Star):
+            return "*"
         raise ValueError(f"cannot codegen {type(e).__name__}")
 
-    def fn_sql(self, name: str, args: str) -> str:
-        mapped = self.dialect.function_map.get(name)
-        if mapped is None:
-            raise RuntimeError(
-                f"dialect {self.dialect.name!r} cannot express function {name}()"
-                f" (add an alias to dialects.py or rewrite the model)")
-        return f"{mapped}({args})"
+    def window_sql(self, e: ast.WindowCall) -> str:
+        """`FN(args) OVER (PARTITION BY ... ORDER BY ...)` — standard in all
+        four dialects, so no dialect override is needed (the catalog default).
+        The typechecker owns legality; codegen only defends its invariant."""
+        if not functions.is_windowable(e.name):
+            raise RuntimeError(f"non-window function {e.name}() with over(...) reached codegen")
+        head = functions.emit_sql(
+            e.name, ", ".join(self.expr(a) for a in e.args), self.dialect)
+        frame: List[str] = []
+        if e.over.partition_by:
+            frame.append("PARTITION BY " + ", ".join(self.expr(p) for p in e.over.partition_by))
+        if e.over.sort:
+            frame.append("ORDER BY " + ", ".join(
+                self.expr(k) + (" DESC" if desc else "") for k, desc in e.over.sort))
+        return f"{head} OVER ({' '.join(frame)})" if frame else f"{head} OVER ()"
 
     def _in(self, e: ast.Call):
         # IN is represented as Call('in', [x, [a,b,c]])

@@ -476,6 +476,12 @@ class Parser:
             e = self.parse_expr()
             self.expect("SYM", ")")
             return e
+        if self.at("SYM", "*"):
+            # `*` in primary position: only meaningful as count(*) — the
+            # typechecker rejects a stray one (E064), so multiplication (which
+            # parses this position as its right operand) is unaffected.
+            self.advance()
+            return ast.Star(span=span)
         if self.at("KW", "model"):
             return self.parse_model_value()
 
@@ -495,10 +501,56 @@ class Parser:
                         if not self.match("SYM", ","):
                             break
                 self.expect("SYM", ")")
+                if self.at("KW", "over"):
+                    return self.parse_window_call(t.value, args, span)
                 return ast.Call(name=t.value, args=args, span=span)
             return ast.ColumnRef(name=t.value, span=span)
 
         raise ParseError(f"{self.path}:{t.line}:{t.col}: unexpected {t.value!r} in expression")
+
+    def parse_window_call(self, name: str, args: list, span) -> ast.WindowCall:
+        """`fn(args) over (partition_by: [...], sort: [expr desc, ...])`.
+
+        `over` is a reserved window keyword, never a bare call name; both
+        clauses are optional but the parentheses are not.
+        """
+        self.advance()  # over
+        self.expect("SYM", "(")
+        spec = ast.WindowSpec(span=self.span(self.cur()))
+        if not self.at("SYM", ")"):
+            # `over ()` (no clauses) is legal SQL: the frame is the whole set.
+            self._window_clause(spec)
+            if self.match("SYM", ","):
+                self._window_clause(spec)
+        self.expect("SYM", ")")
+        return ast.WindowCall(name=name, args=args, over=spec, span=span)
+
+    def _window_clause(self, spec: ast.WindowSpec):
+        kw = self.expect("ID" if self.at("ID") else "KW").value
+        if kw == "partition_by":
+            self.expect("SYM", ":")
+            self.expect("SYM", "[")
+            if not self.at("SYM", "]"):
+                while True:
+                    spec.partition_by.append(self.parse_expr())
+                    if not self.match("SYM", ","):
+                        break
+            self.expect("SYM", "]")
+        elif kw == "sort":
+            self.expect("SYM", ":")
+            self.expect("SYM", "[")
+            if not self.at("SYM", "]"):
+                while True:
+                    key = self.parse_expr()
+                    spec.sort.append((key, bool(self.match("KW", "desc"))))
+                    if not self.match("SYM", ","):
+                        break
+            self.expect("SYM", "]")
+        else:
+            t = self.cur()
+            raise ParseError(
+                f"{self.path}:{t.line}:{t.col}: expected 'partition_by:' or "
+                f"'sort:' in over(...), found {kw!r}")
 
     def parse_list(self, span):
         # [ ... ] or [ body for var in iter ]

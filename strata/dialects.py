@@ -94,10 +94,16 @@ def _sf_array(elem: str) -> str:
 
 
 # Functions that every dialect expresses identically, spelled how each
-# warehouse expects the CALL to look in SQL (DuckDB emits bare names).
+# warehouse expects the CALL to look in SQL. This map is the last word on
+# spelling: functions.py declares signatures, and a dialect overrides the
+# default spelling here (e.g. BigQuery naming a function differently).
+# Window functions spell identically everywhere (ROW_NUMBER, RANK, LAG, ...).
 _UNIVERSAL_FNS = {
-    "count": "count", "sum": "sum", "avg": "avg", "max": "max", "min": "min",
-    "coalesce": "coalesce", "upper": "upper", "lower": "lower",
+    "count": "COUNT", "sum": "SUM", "avg": "AVG", "max": "MAX", "min": "MIN",
+    "coalesce": "COALESCE", "upper": "UPPER", "lower": "LOWER", "concat": "CONCAT",
+    "row_number": "ROW_NUMBER", "rank": "RANK", "dense_rank": "DENSE_RANK",
+    "lag": "LAG", "lead": "LEAD", "first_value": "FIRST_VALUE",
+    "last_value": "LAST_VALUE",
 }
 
 DUCKDB = Dialect(

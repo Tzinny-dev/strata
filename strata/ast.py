@@ -32,6 +32,29 @@ class Call(Node):
 
 
 @dataclass
+class Star(Node):
+    """`*` as a call argument: only valid inside count(*)."""
+    pass
+
+
+@dataclass
+class WindowSpec(Node):
+    """The `over (...)` clause of a window call: partition columns plus the
+    ordering inside each partition, reusing the `sort` (expr, desc) shape."""
+    partition_by: List[Node] = field(default_factory=list)
+    sort: List[Tuple[Node, bool]] = field(default_factory=list)
+
+
+@dataclass
+class WindowCall(Node):
+    """`fn(args) over (partition_by: [...], sort: [...])`: a function applied
+    over a window, evaluated after grouping/aggregation in the outer query."""
+    name: str = ""
+    args: List[Node] = field(default_factory=list)
+    over: WindowSpec = None
+
+
+@dataclass
 class BinOp(Node):
     op: str = ""
     left: Node = None
