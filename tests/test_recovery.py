@@ -115,6 +115,93 @@ def test_recovery_preserves_intentional_rollback(pipeline):
     assert len(ex.load_history(module)) == 2
 
 
+def test_rollback_failure_keeps_views_and_manifest(pipeline):
+    con, project, tms, module, _ = pipeline
+    ex.run(con, project, tms, module)
+    first = ex.load_history(module)[0]
+    con.execute("UPDATE s SET id=2")
+    ex.run(con, project, tms, module)
+    with patch.object(ex, "save_manifest", side_effect=OSError("disk full")):
+        with pytest.raises(OSError, match="disk full"):
+            ex.rollback_to_run(con, first, module_path=module)
+    # Manifest write happens after commit -> views already repointed; the
+    # journaled event is recovered without touching views again.
+    assert con.execute("SELECT * FROM v_m").fetchall() == [(1,)]
+    pending = con.execute(
+        "SELECT count(*) FROM strata_commits WHERE NOT exported").fetchone()
+    assert pending == (1,)
+    assert len(ex.recover_metadata(con, module)) == 1
+    assert ex.load_manifest(module) == first["fingerprints"]
+    assert ex.recover_metadata(con, module) == []
+
+
+def test_rollback_recovery_survives_interrupted_export_and_reopen(pipeline):
+    con, project, tms, module, warehouse = pipeline
+    ex.run(con, project, tms, module)
+    first = ex.load_history(module)[0]
+    con.execute("UPDATE s SET id=2")
+    ex.run(con, project, tms, module)
+    # Interrupt export AFTER the transaction has committed. Closing and
+    # reopening verifies durability; this is not a simulated SIGKILL.
+    with patch.object(ex, "recover_metadata", side_effect=KeyboardInterrupt):
+        with pytest.raises(KeyboardInterrupt):
+            ex.rollback_to_run(con, first, module_path=module)
+    con.close()
+    with duckdb.connect(str(warehouse)) as reopened:
+        assert ex.recover_metadata(reopened, module) != []
+        assert ex.load_manifest(module) == first["fingerprints"]
+
+
+def test_rollback_without_module_path_skips_journal(pipeline):
+    con, project, tms, module, _ = pipeline
+    ex.run(con, project, tms, module)
+    first = ex.load_history(module)[0]
+    con.execute("UPDATE s SET id=2")
+    ex.run(con, project, tms, module)
+    ex.rollback_to_run(con, first)  # legacy signature: no journaling
+    assert con.execute("SELECT * FROM v_m").fetchall() == [(1,)]
+    assert ex.recover_metadata(con, module) == []
+
+
+def test_rollback_before_commit_preserves_publication(pipeline):
+    con, project, tms, module, _ = pipeline
+    ex.run(con, project, tms, module)
+    first = ex.load_history(module)[0]
+    con.execute("UPDATE s SET id=2")
+    ex.run(con, project, tms, module)
+    ex.save_manifest(module, {"m": "second-publication"})
+    before = ex.manifest_path(module).read_bytes()
+    real_record = ex._record_commit
+
+    def fail_after_insert(*args):
+        real_record(*args)
+        raise OSError("before commit")
+
+    with patch.object(ex, "_record_commit", side_effect=fail_after_insert):
+        with pytest.raises(OSError, match="before commit"):
+            ex.rollback_to_run(con, first, module_path=module)
+    assert con.execute("SELECT * FROM v_m").fetchall() == [(2,)]
+    assert ex.manifest_path(module).read_bytes() == before
+    assert con.execute("SELECT count(*) FROM strata_commits").fetchone() == (2,)
+    assert ex.recover_metadata(con, module) == []
+
+
+def test_cli_missing_snapshot_preserves_manifest(pipeline):
+    from strata.cli import main
+
+    con, project, tms, module, warehouse = pipeline
+    ex.run(con, project, tms, module)
+    first = ex.load_history(module)[0]
+    con.execute("UPDATE s SET id=2")
+    ex.run(con, project, tms, module)
+    con.execute(f"DROP TABLE {first['snapshots']['m']}")
+    ex.save_manifest(module, {"m": "second-publication"})
+    before = ex.manifest_path(module).read_bytes()
+    assert main(["rollback", module, first["run_id"], "-o", str(warehouse)]) == 1
+    assert ex.manifest_path(module).read_bytes() == before
+    assert con.execute("SELECT * FROM v_m").fetchall() == [(2,)]
+
+
 def test_recovery_is_scoped_to_module(pipeline, tmp_path):
     con, project, tms, module, _ = pipeline
     with patch.object(ex, "record_run", side_effect=OSError("disk full")):

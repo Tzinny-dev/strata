@@ -424,7 +424,7 @@ def publish_snapshots(con, names: List[str], run_id: str,
     return done
 
 
-def rollback_to_run(con, e: dict) -> List[str]:
+def rollback_to_run(con, e: dict, module_path: Optional[str] = None) -> List[str]:
     """Repoint live views to the snapshot tables recorded by a past run.
 
     Snapshots are materialized tables, so rollback never re-executes and is
@@ -450,6 +450,9 @@ def rollback_to_run(con, e: dict) -> List[str]:
             con.execute(f"CREATE OR REPLACE VIEW {promoted_name(name)} AS "
                         f"SELECT * FROM {snap}")
             done.append(promoted_name(name))
+        if module_path is not None:
+            event = dict(e, operation="rollback", rollback_of=e["run_id"])
+            _record_commit(con, module_path, event, e["run_id"])
         con.execute("COMMIT")
     except Exception:
         try:
@@ -457,6 +460,8 @@ def rollback_to_run(con, e: dict) -> List[str]:
         except Exception:
             pass
         raise
+    if module_path is not None:
+        recover_metadata(con, module_path)
     return done
 
 
@@ -630,7 +635,9 @@ def recover_metadata(con, module_path: str) -> list:
     recovered = []
     for event, raw in pending:
         entry = json.loads(raw)
-        if event not in known:
+        # Rollbacks reference existing runs; do not invent a new execution in
+        # history. Their full manifest is already in the transactional outbox.
+        if entry.get("operation") != "rollback" and event not in known:
             record_run(module_path, entry, run_id=entry["run_id"])
             known.add(event)
         # Do not undo an intentional rollback or another publication. Only
@@ -643,6 +650,108 @@ def recover_metadata(con, module_path: str) -> list:
         con.execute(f"UPDATE {COMMIT_REGISTRY} SET exported=true WHERE event_id=?", [event])
         recovered.append(event)
     return recovered
+
+
+INPUT_PREFIX = "input_"
+_RUN_TABLE_RE = re.compile(r"^(?:snap|input)_([0-9a-f]{12})_")
+
+
+def run_tables(con) -> Dict[str, str]:
+    """{snapshot table -> run id} over main-schema base tables."""
+    rows = con.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema='main' AND table_type='BASE TABLE'").fetchall()
+    out: Dict[str, str] = {}
+    for (tn,) in rows:
+        m = _RUN_TABLE_RE.match(tn)
+        if m:
+            out[tn] = m.group(1)
+    return out
+
+
+def pending_commit_runs(con, module_path: str) -> set:
+    """Runs whose metadata export is still outstanding (never collectable)."""
+    exists = con.execute("SELECT count(*) FROM information_schema.tables "
+                         "WHERE table_schema='main' AND table_name=?",
+                         [COMMIT_REGISTRY]).fetchone()[0]
+    if not exists:
+        return set()
+    rows = con.execute(f"SELECT entry FROM {COMMIT_REGISTRY} "
+                       "WHERE module_path=? AND NOT exported",
+                       [str(Path(module_path).resolve())]).fetchall()
+    out = set()
+    for (raw,) in rows:
+        try:
+            out.add(json.loads(raw)["run_id"])
+        except Exception:
+            raise PinError("corrupt pending commit entry (refusing to collect)")
+    return out
+
+
+def protected_runs(con, module_path: str, keep: int) -> set:
+    """Run ids a GC must preserve: recent, live, or metadata-pending."""
+    history = load_history(module_path)
+    runs = [e["run_id"] for e in history if e.get("snapshots")]
+    protected = set(runs[-keep:]) if keep > 0 else set()
+    live = [r[0] or "" for r in con.execute(
+        "SELECT sql FROM duckdb_views() WHERE schema_name='main'").fetchall()]
+    for tn, rid in run_tables(con).items():
+        if any(tn in sql for sql in live):
+            protected.add(rid)
+    return protected | pending_commit_runs(con, module_path)
+
+
+def gc_plan(con, module_path: str, keep: int = 2) -> dict:
+    """Compute snapshot garbage WITHOUT changing the warehouse.
+
+    Protected: the last `keep` runs with snapshots, every run referenced by a
+    live view, and every publication whose metadata export is still pending.
+    History is never pruned — a collected run stays on record, so rollback or
+    replay against it fails loud instead of silently reading wrong data.
+    """
+    if keep < 0:
+        raise PinError("keep must be >= 0")
+    protected = protected_runs(con, module_path, keep)
+    live = [r[0] or "" for r in con.execute(
+        "SELECT sql FROM duckdb_views() WHERE schema_name='main'").fetchall()]
+    drop, keep_tables = [], []
+    for tn, rid in sorted(run_tables(con).items()):
+        if rid in protected or any(tn in sql for sql in live):
+            keep_tables.append(tn)
+        else:
+            drop.append(tn)
+    history = load_history(module_path)
+    retired = sorted({e["run_id"] for e in history
+                      if e.get("snapshots") and e["run_id"] not in protected
+                      and all(s in drop for s in e["snapshots"].values())})
+    return {"keep_runs": sorted(protected), "drop_tables": drop,
+            "keep_tables": keep_tables, "retired_runs": retired,
+            "applied": False}
+
+
+def gc_snapshots(con, module_path: str, keep: int = 2,
+                 apply: bool = False) -> dict:
+    """Report (default) or drop unreferenced snapshot tables, all-or-nothing."""
+    plan = gc_plan(con, module_path, keep)
+    if not apply or not plan["drop_tables"]:
+        return plan
+    live = [r[0] or "" for r in con.execute(
+        "SELECT sql FROM duckdb_views() WHERE schema_name='main'").fetchall()]
+    con.execute("BEGIN TRANSACTION")
+    try:
+        for tn in plan["drop_tables"]:
+            if any(tn in sql for sql in live):
+                raise PinError(f"refusing to drop {tn!r}: referenced by a live view")
+            con.execute(f"DROP TABLE {tn}")
+        con.execute("COMMIT")
+    except Exception:
+        try:
+            con.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    plan["applied"] = True
+    return plan
 
 
 def _frozen_materialize(con, project, tms, entry, source_overrides=None,
@@ -666,7 +775,7 @@ def _frozen_materialize(con, project, tms, entry, source_overrides=None,
             # Separate namespace from output snapshots; hash avoids sanitized
             # source-name collisions.
             suffix = hashlib.sha256(name.encode()).hexdigest()[:16]
-            snap = f"input_{rid}_{suffix}"
+            snap = f"{INPUT_PREFIX}{rid}_{suffix}"
             kv = (source_overrides or {}).get(name, {})
             table = kv.get("dataset") or kv.get("table") or name
             quoted = '"' + table.replace('"', '""') + '"'

@@ -617,8 +617,6 @@ def cmd_rollback(args):
         print(f"error: E081: unknown run {args.run_id!r} (see strata replay)", file=sys.stderr)
         return 1
     fps = e.get("fingerprints", {})
-    exec_mod.save_manifest(args.file, fps)
-    print(f"rolled back manifest to run {e['run_id']} ({len(fps)} model(s) pinned)")
     if getattr(args, "output", None):
         try:
             import duckdb
@@ -633,19 +631,22 @@ def cmd_rollback(args):
         if e.get("snapshots"):
             # Snapshot-addressed rollback: repoint live views to the frozen
             # tables recorded by that run (immune to later source changes).
+            # The manifest repoints only AFTER the swap commits; the rollback
+            # event itself is journaled in the same transaction, so a crash
+            # between swap and file write is repaired by recover_metadata.
             try:
-                exec_mod.rollback_to_run(con, e)
-            except exec_mod.PinError as pe:
-                con.close()
+                exec_mod.rollback_to_run(con, e, module_path=args.file)
+            except (exec_mod.PinError, OSError, duckdb.Error) as pe:
                 print(f"error: E083: {pe}", file=sys.stderr)
                 return 1
-            con.close()
+            finally:
+                con.close()
             print(f"repointed live views v_* <- snapshots of run {e['run_id']} "
                   f"({len(e['snapshots'])} view(s))")
         else:
             # Pre-snapshot history: legacy staged-view repoint.
-            names = list(fps)
             branch = getattr(args, "branch", None) or e.get("branch", "main")
+            names = list(fps)
             have = {r[0] for r in con.execute(
                 "SELECT table_name FROM information_schema.tables WHERE table_schema='main'").fetchall()}
             missing = [n for n in names if exec_mod.staged_name(n, branch) not in have]
@@ -657,9 +658,55 @@ def cmd_rollback(args):
                 return 1
             exec_mod.swap_branch(con, names, branch)
             con.close()
+            exec_mod.save_manifest(args.file, fps)
             print(f"repointed live views v_* <- stg_{branch}__* ({len(names)} view(s))")
     else:
+        exec_mod.save_manifest(args.file, fps)
+        print(f"rolled back manifest to run {e['run_id']} ({len(fps)} model(s) pinned)")
         print("next strata run --only-stale will rebuild what diverged since")
+    return 0
+
+
+def cmd_gc(args):
+    """Snapshot retention: report (default) or drop (--apply) old run
+    snapshots. Protected: the last --keep runs, the run live in the views and
+    any publication whose metadata export is pending. History is never pruned,
+    so a collected run's rollback/replay fails loud instead of reading wrong
+    data."""
+    if not getattr(args, "output", None):
+        print("error: E084: --output <warehouse.duckdb> is required "
+              "(snapshots live in the warehouse)", file=sys.stderr)
+        return 1
+    if not Path(args.output).exists():
+        print(f"error: E083: warehouse {args.output!r} not found", file=sys.stderr)
+        return 1
+    try:
+        import duckdb
+    except ImportError:
+        print("duckdb not available; run with the venv interpreter", file=sys.stderr)
+        return 2
+    con = duckdb.connect(args.output)
+    try:
+        exec_mod.recover_metadata(con, args.file)  # export pending events first
+        plan = exec_mod.gc_snapshots(con, args.file, keep=args.keep,
+                                     apply=args.apply)
+    except (exec_mod.PinError, duckdb.Error) as e:
+        print(f"error: E084: {e}", file=sys.stderr)
+        return 1
+    finally:
+        con.close()
+    if args.json:
+        print(json.dumps(plan, indent=2, sort_keys=True))
+        return 0
+    print(f"retained runs: {', '.join(plan['keep_runs']) or '-'}")
+    verb = "dropped" if plan["applied"] else "would drop"
+    print(f"{verb} {len(plan['drop_tables'])} snapshot table(s)")
+    for tn in plan["drop_tables"]:
+        print(f"  - {tn}")
+    if plan["retired_runs"]:
+        print(f"runs losing rollback/replay: {', '.join(plan['retired_runs'])}")
+    if plan["drop_tables"] and not plan["applied"]:
+        print("re-run with --apply to drop them")
     return 0
 
 
@@ -789,6 +836,15 @@ def main(argv=None):
     p.add_argument("-o", "--output", default=None, help="warehouse file whose live v_* views to repoint")
     p.add_argument("--branch", default=None, help="staging branch to repoint from (default: run's recorded branch)")
     p.set_defaults(fn=cmd_rollback)
+
+    p = sub.add_parser("gc", help="snapshot retention: report (default) or drop (--apply) old run snapshots")
+    p.add_argument("file")
+    p.add_argument("-o", "--output", default=None, help="warehouse .duckdb file holding the snapshots")
+    p.add_argument("--keep", type=int, default=2,
+                   help="most recent runs to retain for rollback/replay (default: 2)")
+    p.add_argument("--apply", action="store_true", help="drop the reported tables (default: report only)")
+    p.add_argument("--json", action="store_true", help="machine-readable plan (agent supervision artifact)")
+    p.set_defaults(fn=cmd_gc)
 
     p = sub.add_parser("test", help="run declarative data tests against a module's models")
     p.add_argument("file")
