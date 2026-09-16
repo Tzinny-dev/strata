@@ -4,6 +4,9 @@
 # sql: duckdb
 
 
+# sql: postgres
+
+
 # sql: snowflake
 
 

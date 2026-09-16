@@ -23,7 +23,7 @@ from .sqlgen import full_sql
 from .diff import diff_projects, impact_radius, to_json_dict
 
 BENCH_DIR = Path(__file__).resolve().parent.parent / "bench"
-DIALECTS = ("duckdb", "snowflake", "bigquery")
+DIALECTS = ("duckdb", "postgres", "snowflake", "bigquery")
 
 
 def _run_module(root: Path, case: dict) -> list[str]:

@@ -1,3 +1,5 @@
+import glob
+import os
 import unittest
 from pathlib import Path
 
@@ -82,6 +84,40 @@ class TestFullSQLExecutableSyntax(unittest.TestCase):
         self.assertNotIn("t0.country AS country", sql)
 
 
+class TestPostgresDialect(unittest.TestCase):
+    """Fase 2 closure: the postgres adapter (spec listed it from day one).
+    Type map + quoting + fail-loud ANTI JOIN pinned as unit tests; the emitted
+    SQL is additionally validated against a real postgres server when one is
+    installed (test_postgres_live_e2e, skipped otherwise)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pg = get_dialect("postgres")
+
+    def test_registered_and_type_map(self):
+        self.assertEqual(self.pg.name, "postgres")
+        self.assertEqual(self.pg.sql_type("string"), "TEXT")
+        self.assertEqual(self.pg.sql_type("int64"), "BIGINT")
+        self.assertEqual(self.pg.sql_type("float64"), "DOUBLE PRECISION")
+        self.assertEqual(self.pg.sql_type("json"), "JSONB")
+        self.assertEqual(self.pg.cast_target("money"), "NUMERIC(38,2)")
+        self.assertEqual(self.pg.cast_target("decimal(10,4)"), "NUMERIC(10,4)")
+
+    def test_quoting_escapes_embedded_quotes(self):
+        self.assertEqual(self.pg.ident('weird"name'), '"weird""name"')
+
+    def test_daily_orders_sql(self):
+        proj = build("daily_orders.strata")
+        sql = sqlgen.model_sql(proj.typed["daily_orders"], dialect=self.pg)
+        self.assertIn("UPPER(t0.country) AS country", sql)
+        self.assertIn("FROM orders t0", sql)  # bare identifiers: pg-safe
+        self.assertIn("COALESCE(", sql)
+        self.assertIn("GROUP BY", sql)
+
+    def test_cast_to_json_targets_jsonb(self):
+        self.assertIn("JSONB", self.pg.cast_target("json"))
+
+
 class TestDialectFailLoud(unittest.TestCase):
     """The dialect adapter's fail-loud guarantee must hold at the codegen
     boundary, not just on the capability flag: compiling a plan whose ANTI JOIN
@@ -107,6 +143,85 @@ class TestDialectFailLoud(unittest.TestCase):
     def test_snowflake_anti_fails_loudly(self):
         with self.assertRaises(RuntimeError):
             sqlgen.model_sql(self.anti, dialect=SNOWFLAKE)
+
+
+class TestPostgresLiveE2E(unittest.TestCase):
+    """Same seed fixture, same emitted model SQL, REAL postgres server:
+    v_daily_orders must yield the exact 3-row result duckdb produces.
+    Skips when no postgres server installation is found (client-only or
+    CI without the server). Port raised above 55321 to dodge stray servers."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pgbin = cls._find_pgbin()
+
+    @staticmethod
+    def _find_pgbin():
+        import shutil
+        for cand in (shutil.which("initdb"),
+                     *[str(p) for p in sorted(glob.glob("/usr/lib/postgresql/*/bin/initdb"))]):
+            if cand and Path(cand).exists():
+                return Path(cand).resolve().parent
+        return None
+
+    def test_psql_roundtrip_matches_duckdb_rows(self):
+        if not self.pgbin:
+            self.skipTest("no postgres server installation found")
+        import subprocess
+        import tempfile
+        pgbin = self.pgbin
+        with tempfile.TemporaryDirectory() as td:
+            data, sock = Path(td) / "pg", Path(td) / "sock"
+            port, db = 55432, "strata_pg_e2e"
+            sock.mkdir()
+            env = dict(os.environ)
+            # pg_ctl spawns the postmaster, which INHERITS our stdio pipes and
+            # keeps them open forever -> subprocess.run(deadline) hangs waiting
+            # for EOF. Detach the server: DEVNULL streams + own session.
+            run = lambda *a: subprocess.run(*a, check=True, env=env,
+                                            stdin=subprocess.DEVNULL,
+                                            stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL)
+            run([str(pgbin / "initdb"), "-U", "strata", "-A", "trust",
+                 "-E", "UTF8", "--no-locale", str(data)])
+            subprocess.run([str(pgbin / "pg_ctl"), "-D", str(data), "-w", "-s",
+                            "-o", f"-p {port} -k {sock} -c listen_addresses=",
+                            "start"], check=True, env=env,
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, start_new_session=True)
+            try:
+                run([str(pgbin / "createdb"), "-h", str(sock), "-p", str(port),
+                     "-U", "strata", db])
+                psql = lambda sql: subprocess.run(
+                    [str(pgbin / "psql"), "-h", str(sock), "-p", str(port),
+                     "-U", "strata", "-d", db, "-v", "ON_ERROR_STOP=1", "-qAt",
+                     "-c", sql], check=True, capture_output=True, text=True,
+                    env=env).stdout
+                psql(
+                    "CREATE TABLE orders (order_id BIGINT, customer_id BIGINT, "
+                    "country TEXT, gross_amount_usd NUMERIC(38,2), is_test BOOLEAN, "
+                    "order_day DATE);\n"
+                    "CREATE TABLE refunds (order_id BIGINT, discount_usd NUMERIC(38,2), "
+                    "refunded_at TIMESTAMP);\n"
+                    "INSERT INTO orders VALUES (1,1001,'ES',120.00,FALSE,DATE '2026-09-01'),"
+                    "(2,1001,'ES',90.00,FALSE,DATE '2026-09-01'),"
+                    "(3,1002,'MX',200.00,FALSE,DATE '2026-09-02'),"
+                    "(4,1003,'BR',75.50,FALSE,DATE '2026-09-02'),"
+                    "(5,1004,'CO',40.00,TRUE,DATE '2026-09-03');\n"
+                    "INSERT INTO refunds VALUES (2,10.00,TIMESTAMP '2026-09-02 10:00:00'),"
+                    "(4,5.50,TIMESTAMP '2026-09-03 09:30:00');\n")
+                proj = build("daily_orders.strata")
+                pg = get_dialect("postgres")
+                psql(sqlgen.full_sql(proj.typed, list(proj.typed), dialect=pg))
+                rows = psql("SELECT country, order_day, order_id, gross_amount, "
+                            "net_amount FROM v_daily_orders ORDER BY order_day, country")
+                self.assertEqual([r.split("|") for r in rows.strip().splitlines()],
+                                 [["ES", "2026-09-01", "2", "210.00", "200.00"],
+                                  ["BR", "2026-09-02", "1", "75.50", "70.00"],
+                                  ["MX", "2026-09-02", "1", "200.00", "200.00"]])
+            finally:
+                subprocess.run([str(pgbin / "pg_ctl"), "-D", str(data), "-m",
+                                "immediate", "stop"], capture_output=True, env=env)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,19 @@ FROM base
 GROUP BY customer_id, country
 
 
+# sql: postgres
+CREATE OR REPLACE VIEW v_customer_revenue AS
+-- model customer_revenue -> contract OrderRevenue
+WITH base AS (
+SELECT t0.order_id, t0.customer_id, t0.gross_usd, t0.placed_at, t1.customer_id AS __j1_customer_id, t1.country AS __j1_country, t1.name AS __j1_name, t1.is_active AS __j1_is_active, t1.country AS country
+FROM orders t0
+  LEFT JOIN customers t1 ON (t0.customer_id = t1.customer_id)
+)
+SELECT customer_id AS customer_id, country AS country, SUM(gross_usd) AS revenue, COUNT(order_id) AS orders
+FROM base
+GROUP BY customer_id, country
+
+
 # sql: snowflake
 CREATE OR REPLACE VIEW v_customer_revenue AS
 -- model customer_revenue -> contract OrderRevenue

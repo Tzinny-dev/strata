@@ -429,7 +429,7 @@ def cmd_init(args):
                "identical re-runs produce byte-identical output).\n\n"
                "## Transform command contract (fails loud, see §7 E030)\n"
                "- `strata build <file>`   typecheck + contracts + lineage (no DB needed)\n"
-               "- `strata compile <file> --dialect bigquery|snowflake`  dialect-constrained SQL\n"
+               "- `strata compile <file> --dialect postgres|bigquery|snowflake`  dialect-constrained SQL\n"
                "- `strata plan <file> --seed`  self-pin content-addressed baseline\n"
                "- `strata lineage-diff <file> --change MODEL:COL`  blast radius of a change\n\n"
                "## Cross-team gate (MANDATORY before producer PR ships)\n"
@@ -621,7 +621,7 @@ def main(argv=None):
     p.add_argument("file")
     p.add_argument("model", nargs="*")
     p.add_argument("--dialect", default="duckdb",
-                   help="target warehouse: duckdb | bigquery | snowflake")
+                   help="target warehouse: duckdb | postgres | bigquery | snowflake")
     p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
     p.set_defaults(fn=cmd_compile)
 
@@ -675,7 +675,7 @@ def main(argv=None):
     p.add_argument("--search-dir", default=None,
                    help="extra dir resolving `import a.b` -> a/b.strata")
     p.add_argument("--dialect", default="duckdb",
-                   help="target warehouse: duckdb | bigquery | snowflake")
+                   help="target warehouse: duckdb | postgres | bigquery | snowflake")
     p.add_argument("--output", "-o",
                    help="persist the warehouse to this .duckdb file "
                         "(default: in-memory, discarded on exit)")
@@ -738,7 +738,7 @@ def main(argv=None):
     p.add_argument("file")
     p.add_argument("--dialect", default="duckdb",
                    help="target warehouse for the contract types gate: "
-                        "duckdb | bigquery | snowflake")
+                        "duckdb | postgres | bigquery | snowflake")
     p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
     p.set_defaults(fn=cmd_check)
 

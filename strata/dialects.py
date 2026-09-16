@@ -60,7 +60,9 @@ def _backtick(name: str) -> str:
 
 
 def _dquote(name: str) -> str:
-    return f'"{name}"'
+    # Escape embedded double quotes (SQL standard doubling); without this an
+    # identifier containing '"' emits broken SQL on postgres/snowflake.
+    return f'"{name.replace(chr(34), chr(34) * 2)}"'
 
 
 def _bare(name: str) -> str:
@@ -122,7 +124,24 @@ SNOWFLAKE = Dialect(
     function_map=_UNIVERSAL_FNS,
 )
 
-_DIALECTS = {d.name: d for d in (DUCKDB, BIGQUERY, SNOWFLAKE)}
+def _pg_dec(p: int, s: int) -> str:
+    return f"NUMERIC({p},{s})"
+
+
+# Postgres: double-quoted identifiers, TEXT for strings, JSONB for json
+# (the idiomatic postgres json column: indexable, deduplicated; plain JSON
+# only matters when key order/duplicates must be preserved, which the typed
+# DAG does not promise). No ANTI/SEMI JOIN keywords -> fail-loud like
+# BigQuery/Snowflake; rewrite the model with NOT EXISTS.
+POSTGRES = Dialect(
+    "postgres", _dquote,
+    {"int64": "BIGINT", "float64": "DOUBLE PRECISION", "string": "TEXT", "bool": "BOOLEAN",
+     "date": "DATE", "timestamp": "TIMESTAMP", "uuid": "UUID", "json": "JSONB"},
+    _pg_dec, "NUMERIC(38,2)", _array, supports_anti_semi=False,
+    function_map=_UNIVERSAL_FNS,
+)
+
+_DIALECTS = {d.name: d for d in (DUCKDB, POSTGRES, BIGQUERY, SNOWFLAKE)}
 
 
 def get_dialect(name: str) -> Dialect:
