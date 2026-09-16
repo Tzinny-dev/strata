@@ -30,6 +30,7 @@ KEYWORDS = {
     "nonnull",  # dedupe-safe
     "not", "and", "or", "in", "is", "null", "true", "false",
     "for",
+    "test", "expect",  # model-level declarative tests (Fase 5)
 }
 
 # type keywords map literal names -> builtin type

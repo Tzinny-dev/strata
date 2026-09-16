@@ -41,7 +41,7 @@ KEYWORDS: List[str] = [
     "nonnull", "unique", "primary_key", "protected", "enum",
     "classification", "partition_by", "freshness",
     "not", "and", "or", "in", "is", "null", "true", "false",
-    "for", "->", "=>",
+    "for", "->", "=>", "test", "expect",
 ]
 
 TYPE_KEYWORDS: List[str] = [
@@ -73,7 +73,22 @@ RULES["root"] = ("a .strata module: { top_decl }", ["top-decl*"])
 
 RULES["top-decl"] = ("one top-level declaration", [
     "source-decl", "contract-decl", "model-decl", "pipeline-decl",
-    "fn-decl", "import-decl",
+    "fn-decl", "import-decl", "test-decl",
+])
+RULES["test-decl"] = ("declarative data test on a model (expect row_count or expect <col> op literal)", [
+    r'"test" ident "{" expect-list? "}"',
+])
+RULES["expect-list"] = ("one or more expect clauses, semicolon separated", [
+    r'(expect (";" expect)*)?',
+])
+RULES["expect"] = ("a single expect clause", [
+    r'"expect" expect-target comparison-op literal',
+])
+RULES["expect-target"] = ("which quantity to check: row_count or a column name", [
+    r'"row_count" | ident',
+])
+RULES["comparison-op"] = ("comparison operators for test expectations", [
+    r'"==" | "!=" | "<" | ">" | "<=" | ">="',
 ])
 
 RULES["import-decl"] = ("import another .strata module", [

@@ -79,6 +79,8 @@ class Parser:
                 m.decls.append(self.parse_fn())
             elif self.at("KW", "pipeline"):
                 m.decls.append(self.parse_pipeline())
+            elif self.at("KW", "test"):
+                m.decls.append(self.parse_test())
             elif self.at("ID") and self.peek().value == "(":
                 # top-level generator call: fn(args) -> List<Model>
                 m.decls.append(ast.GeneratorDecl(call=self.parse_primary(), span=self.span(self.cur())))
@@ -89,6 +91,44 @@ class Parser:
                     f"(source|contract|model|fn|pipeline|import) but found {t.value!r}"
                 )
         return m
+
+    def parse_test(self) -> ast.TestDecl:
+        """`test <model> { expect <col> <op> <literal>; ... }` — declarative
+        per-model data tests (Fase 5). The rhs is a literal (typed at compile
+        time); `expect row_count == N` is the reserved aggregate form."""
+        kw = self.expect("KW", "test")
+        decl = ast.TestDecl(span=self.span(kw))
+        decl.model = self.expect("ID").value
+        self.expect("SYM", "{")
+        while not self.at("SYM", "}"):
+            self.expect("KW", "expect")
+            chk = ast.TestCheck(span=self.span(self.cur()))
+            name = self.expect("ID").value
+            if name == "row_count":
+                chk.kind = "row_count"
+            else:
+                chk.kind, chk.col = "expect", name
+            chk.op = {"==": "==", "!=": "!=", ">": ">", "<": "<",
+                      ">=": ">=", "<=": "<="}[self.expect("SYM").value]
+            t = self.cur()
+            if self.at("INT") or self.at("FLOAT"):
+                chk.value = self.advance().value
+            elif self.at("STR"):
+                chk.value = "".join(p[1] for p in self.advance().value)
+            elif self.match("KW", "true") or self.match("KW", "false"):
+                chk.value = t.value == "true"
+            elif self.match("KW", "null"):
+                chk.value = None
+            else:
+                raise ParseError(
+                    f"{self.path}:{t.line}:{t.col}: expected literal after "
+                    f"'{chk.col or chk.kind} {chk.op}' in expect")
+            if not self.match("SYM", ";"):
+                if not (self.at("KW", "expect") or self.at("SYM", "}")):
+                    self.expect("SYM", ";")
+            decl.checks.append(chk)
+        self.expect("SYM", "}")
+        return decl
 
     def parse_source(self) -> ast.SourceDecl:
         kw = self.expect("KW", "source")

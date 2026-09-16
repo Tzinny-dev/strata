@@ -204,6 +204,24 @@ class GeneratorDecl(Node):
 
 
 @dataclass
+class TestDecl(Node):
+    """Declarative test on a model: `test <model> { expect <expr>; ... }`.
+    Compile-time checked (column exists, comparable types, literal rhs) and
+    evaluated at run-time against the staged view of the model — a failing
+    test aborts the swap (fail-closed blue-green)."""
+    model: str = ""
+    checks: List["TestCheck"] = field(default_factory=list)
+
+
+@dataclass
+class TestCheck(Node):
+    kind: str = "expect"   # reserved: 'row_count'
+    col: Optional[str] = None
+    op: Optional[str] = None
+    value: object = None
+
+
+@dataclass
 class Module:
     path: str = ""
     decls: List[Node] = field(default_factory=list)

@@ -34,6 +34,24 @@ def err(code: str, msg: str, span=None):
 AGGREGATES = {"count", "sum", "avg", "max", "min"}
 
 
+def _literal_type(value):
+    """Inferred StrataType for a test literal (E094)."""
+    if isinstance(value, bool):
+        from .types import BOOL
+        return BOOL
+    if value is None:
+        from .types import UNKNOWN
+        return UNKNOWN
+    if isinstance(value, int):
+        from .types import INT64
+        return INT64
+    if isinstance(value, float):
+        from .types import FLOAT64
+        return FLOAT64
+    from .types import STRING
+    return STRING
+
+
 @dataclass
 class Inf:
     t: StrataType = UNKNOWN
@@ -255,6 +273,7 @@ class Project:
         self.models: Dict[str, ast.ModelDecl] = {}
         self.fns: Dict[str, ast.FnDecl] = {}
         self.pipelines: List[ast.PipelineDecl] = []
+        self.tests: Dict[str, List[ast.TestDecl]] = {}
         self.typed: Dict[str, TypedModel] = {}
         self.modules: Dict[str, ast.Module] = {module.path or "<strata>": module}
         self.imports: List[str] = []
@@ -296,6 +315,8 @@ class Project:
             self.contracts.setdefault(d.name, d)
         elif isinstance(d, ast.ModelDecl):
             self.models.setdefault(d.name, d)
+        elif isinstance(d, ast.TestDecl):
+            self.tests.setdefault(d.model, []).append(d)
         elif isinstance(d, ast.FnDecl):
             self.fns.setdefault(d.name, d)
         elif isinstance(d, ast.PipelineDecl):
@@ -488,6 +509,35 @@ class Checker:
             self.p.typed[n] = tm
             self.all_reads[n] = set(tm.reads)
         return self.p.typed
+
+    def check_tests(self, model_names=None):
+        """Validate declarative tests (E091-E094). Must be called after check_all."""
+        for tds in self.p.tests.values():
+            for td in tds:
+                mname = td.model
+                if mname not in self.p.typed:
+                    raise err("E091", f"test references non-existent model {mname!r}", td.span)
+                tm = self.p.typed[mname]
+                for c in td.checks:
+                    if c.kind == "row_count":
+                        continue
+                    if c.col and c.col not in tm.schema:
+                        raise err("E092",
+                                  f"test references unknown column {c.col!r} in model {mname!r}",
+                                  c.span)
+                    if c.op not in ("==", "!=", "<", ">", "<=", ">="):
+                        raise err("E093", f"test uses unsupported operator {c.op!r}", c.span)
+                    if c.col is None:
+                        continue
+                    col = tm.schema[c.col]
+                    # literal value must be comparable to column type
+                    lit_type = _literal_type(c.value)
+                    if lit_type != col.t:
+                        raise err("E094",
+                                  f"test value {c.value!r} has type {lit_type.name} "
+                                  f"but column {mname}.{c.col} is {col.t.name}",
+                                  c.span)
+        return sum(len(tds) for tds in self.p.tests.values())
 
     def _topo(self, names: List[str]) -> List[str]:
         visiting, done, out = set(), set(), []

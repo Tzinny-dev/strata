@@ -319,8 +319,50 @@ def cmd_dashboard(args):
     return 1 if diag else 0
 
 
+def cmd_test(args):
+    """strata test <file> [--model NAME] [--dialect D] [--output FILE] [--seed]
+    Compile the module, then execute any declarative `test` blocks against the
+    compiled views in a DuckDB warehouse (in-memory unless --output persists).
+
+    Exit 0 on all-green; exit 1 on any failing test (message to stderr). A
+    module with no `test` declarations is a no-op (exit 0) so the command is
+    safe to gate CI on unconditionally."""
+    proj = load(args.file,
+                search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
+    tms = check(proj)
+    ck = Checker(proj)
+    try:
+        ck.check_tests()
+    except StrataError as se:
+        print(f"error: {se.code}: {se}", file=sys.stderr)
+        return 1
+    try:
+        dialect = get_dialect(getattr(args, "dialect", "duckdb"))
+    except ValueError as ve:
+        print(str(ve), file=sys.stderr)
+        return 4
+    import duckdb
+    con = duckdb.connect(getattr(args, "output", None) or ":memory:")
+    if getattr(args, "seed", False):
+        _run_seed(con, args.file)
+    tested_models = [getattr(args, "model", None)] if getattr(args, "model", None) else None
+    exec_mod.materialize(con, proj, tms, names=tested_models, dialect=dialect,
+                         source_overrides=None, stage_only=False, branch="main")
+    try:
+        results = exec_mod.run_tests(con, proj, tms, tested_models, dialect, "main")
+    except exec_mod.StrataTestError as te:
+        print(f"test FAILED: {te}", file=sys.stderr)
+        con.close()
+        return 1
+    for r in results:
+        print(r)
+    if getattr(args, "output", None):
+        con.close()
+    return 0
+
+
 def cmd_check(args):
-    """§16: `strata check <file> [--dialect D]` -- autonomous CI guard, sibling
+    """§16: strata check <file> [--dialect D] -- autonomous CI guard, sibling
     of plan/lineage-diff. Runs the compiled-model gates (E0xx fail-loud) plus
     a fail-loud dialect probe, prints the typed contracts and pins each model
     declares, and exits 0 only when everything is green. It NEVER materializes:
@@ -734,14 +776,17 @@ def main(argv=None):
     p.add_argument("--branch", default=None, help="staging branch to repoint from (default: run's recorded branch)")
     p.set_defaults(fn=cmd_rollback)
 
+    p = sub.add_parser("test", help="run declarative data tests against a module's models")
+    p.add_argument("file")
+    p.add_argument("--model", default=None, help="only run tests for this model (default: all tested models)")
+    p.add_argument("--dialect", default="duckdb", help="warehouse for evaluation: duckdb | postgres | bigquery | snowflake")
+    p.add_argument("--output", "-o", help="persist warehouse to .duckdb (default: in-memory, discarded on exit)")
+    p.add_argument("--seed", action="store_true", help="load demo source fixtures before running tests")
+    p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b -> a/b.strata")
+    p.set_defaults(fn=cmd_test)
+
     p = sub.add_parser("check", help="validate a .strata artifact without materializing (CI guard)")
     p.add_argument("file")
-    p.add_argument("--dialect", default="duckdb",
-                   help="target warehouse for the contract types gate: "
-                        "duckdb | postgres | bigquery | snowflake")
-    p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
-    p.set_defaults(fn=cmd_check)
-
     args = ap.parse_args(argv)
     try:
         return args.fn(args)

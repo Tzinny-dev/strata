@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 
 from . import sqlgen
 from .dialects import DUCKDB
-from .analysis import Project, TypedModel, contract_field_col
+from .analysis import Project, TypedModel, StrataError, contract_field_col
 from .types import StrataType, STRING
 
 
@@ -218,6 +218,7 @@ def materialize(con, project: Project, tms: Dict[str, TypedModel],
         runtime_pins(con, project, tm, staged_name(name, branch), pins)
     if not stage_only:
         swap_branch(con, order, branch)
+        run_tests(con, project, tms, names, dialect, branch)
     return applied, pins
 
 
@@ -244,6 +245,71 @@ def swap_branch(con, names: List[str], branch: str = "main") -> List[str]:
             pass
         raise
     return done
+
+
+def run_tests(con, project: Project, tms: Dict[str, TypedModel],
+              names: Optional[List[str]] = None, dialect=DUCKDB,
+              branch: str = "main") -> List[str]:
+    """Run declarative tests against promoted live views, after the swap.
+
+    Each ``test <model> { ... }`` block is evaluated against ``v_<model>``.
+    Returns list of result lines (one per expect clause); raises
+    ``StrataTestError`` on first failure.  Used by ``run`` (post-swap) and
+    ``strata test`` (standalone).
+    """
+    if not project.tests:
+        return []
+    results: List[str] = []
+    tested_models = set(names) if names else {
+        td.model for tds in project.tests.values() for td in tds
+    }
+    for tds in project.tests.values():
+        for td in tds:
+            if td.model not in tested_models:
+                continue
+            tm = tms.get(td.model)
+            if tm is None:
+                raise StrataError(
+                    f"test references model not in compiled set: {td.model!r}",
+                    "E080",
+                )
+            view = promoted_name(td.model)
+            for check in td.checks:
+                if check.kind == "row_count":
+                    got = con.execute(f"SELECT count(*) FROM {view}").fetchone()[0]
+                    expected = int(check.value)
+                    if got != expected:
+                        raise StrataTestError(
+                            f"test {td.model}: row_count {got} != {expected}"
+                        )
+                    results.append(f"  ok  {td.model}: row_count == {got}")
+                else:
+                    col = tm.schema[check.col]
+                    # SELECT count(*) WHERE NOT (col op lit) — nonzero means violation
+                    sql = (
+                        f"SELECT count(*) FROM {view} "
+                        f"WHERE NOT ({check.col} {check.op} "
+                        f"{sqlgen._lit(check.value)})"
+                    )
+                    n_bad = con.execute(sql).fetchone()[0]
+                    total = con.execute(
+                        f"SELECT count(*) FROM {view}"
+                    ).fetchone()[0]
+                    if n_bad:
+                        raise StrataTestError(
+                            f"test {td.model}: {check.col} {check.op} "
+                            f"{check.value!r} violated for {n_bad}/{total} rows"
+                        )
+                    results.append(
+                        f"  ok  {td.model}: {check.col} {check.op} "
+                        f"{check.value!r}"
+                    )
+    return results
+
+
+class StrataTestError(StrataError):
+    """Raised when a declarative test assertion fails."""
+    pass
 
 
 def _apply_source_overrides(sql: str, project: Project,

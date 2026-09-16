@@ -117,6 +117,13 @@ def format_module(mod: ast.Module) -> str:
             out.append("}")
         elif isinstance(d, ast.FnDecl):
             out.append(f"fn {d.name}(...) -> ... {{ {_expr(d.body)} }}")
+        elif isinstance(d, ast.TestDecl):
+            out.append(f"test {d.model} {{")
+            for c in d.checks:
+                target = "row_count" if c.kind == "row_count" else c.col
+                rhs = _lit(c.value, "FLOAT" if isinstance(c.value, float) else None)
+                out.append(f"  expect {target} {c.op} {rhs},")
+            out.append("}")
         elif isinstance(d, ast.PipelineDecl):
             out.append(f"pipeline {d.name} {{")
             if d.env:
