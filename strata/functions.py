@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .types import (
-    Inf, StrataType, INT64, FLOAT64, STRING, UNKNOWN, unify,
+    Inf, StrataType, INT64, FLOAT64, STRING, BOOL, UNKNOWN, unify,
 )
 
 # error codes owned by this module
@@ -32,10 +32,19 @@ def _numeric(a: Inf) -> bool:
     return a.t.is_numeric() or a.t.is_money()
 
 
+def _kind_label(fn: Fn, i: int) -> str:
+    return fn.arg_kinds[i - 1] if i <= len(fn.arg_kinds) else fn.kind
+
+
+def _kind_label(fn: Fn, i: int) -> str:
+    return fn.arg_kinds[i - 1] if i <= len(fn.arg_kinds) else fn.kind
+
+
 _KINDS: Dict[str, Callable[[Inf], bool]] = {
     "any": lambda a: True,
     "numeric": _numeric,
     "string": lambda a: a.t == STRING,
+    "int": lambda a: a.t == INT64,
 }
 
 
@@ -53,7 +62,9 @@ class Fn:
     min_args: int
     ret: Callable[[List[Inf]], Inf]
     max_args: int = -1                 # -1 = unbounded
-    kind: str = "any"                  # any | numeric | string | coalesce
+    kind: str = "any"                  # default per-argument kind (see _KINDS)
+    arg_kinds: Tuple[str, ...] = ()    # per-position kind override, 1-based
+    ret_label: str = ""                # result-type label for the E063 message
     aggregate: bool = False            # only legal inside a group body
     window: bool = False               # legal under over(...)
     accepts_star: bool = False         # count(*)
@@ -110,13 +121,14 @@ def check(fn: Fn, args: List[Inf], has_star: bool = False) -> Optional[Tuple[str
             seen = ", ".join(str(a.t) for a in args)
             return ("E058", f"coalesce type mismatch ({seen})")
         return None
-    pred = _KINDS[fn.kind]
     for i, a in enumerate(args, 1):
         if a.t.name == "unknown":
             continue                   # NULL literal adapts to the other args
-        if not pred(a):
+        kind = _kind_label(fn, i)
+        if not _KINDS[kind](a):
+            label = fn.ret_label or kind
             return (E_ARG_TYPE,
-                    f"{fn.name}() argument {i} must be {fn.kind}, got {a.t}")
+                    f"{fn.name}() argument {i} must be {label}, got {a.t}")
     return None
 
 
@@ -152,6 +164,39 @@ FUNCTIONS: List[Fn] = [
        doc="lowercase string"),
     Fn("concat", 1, lambda a: Inf(STRING, any(i.nullable for i in a)),
        doc="string concatenation; any argument NULLs the result"),
+    Fn("length", 1, lambda a: Inf(INT64, a[0].nullable), max_args=1, kind="string",
+       doc="length of the string in characters (INT64)"),
+    Fn("substring", 2, lambda a: Inf(STRING, a[0].nullable), max_args=3, kind="string",
+       arg_kinds=("string", "int", "int"),
+       doc="substring(s, start[, length]); 1-based start, length optional"),
+    Fn("trim", 1, lambda a: Inf(STRING, a[0].nullable), max_args=1, kind="string",
+       doc="strip spaces from both ends"),
+    Fn("ltrim", 1, lambda a: Inf(STRING, a[0].nullable), max_args=1, kind="string",
+       doc="strip spaces from the left end"),
+    Fn("rtrim", 1, lambda a: Inf(STRING, a[0].nullable), max_args=1, kind="string",
+       doc="strip spaces from the right end"),
+    Fn("replace", 3, lambda a: Inf(STRING, any(i.nullable for i in a)), max_args=3,
+       kind="string", doc="replace every occurrence of arg 2 with arg 3"),
+    Fn("lpad", 3, lambda a: Inf(STRING, any(i.nullable for i in a)), max_args=3,
+       kind="string", arg_kinds=("string", "int", "string"),
+       doc="pad arg 1 on the left to arg 2 length with arg 3"),
+    Fn("rpad", 3, lambda a: Inf(STRING, any(i.nullable for i in a)), max_args=3,
+       kind="string", arg_kinds=("string", "int", "string"),
+       doc="pad arg 1 on the right to arg 2 length with arg 3"),
+    Fn("startswith", 2, lambda a: Inf(BOOL, any(i.nullable for i in a)), max_args=2,
+       kind="string", ret_label="bool",
+       doc="true when arg 1 starts with arg 2 (nullable if any argument is)"),
+    Fn("split_part", 3, lambda a: Inf(STRING, a[0].nullable), max_args=3, kind="string",
+       arg_kinds=("string", "string", "int"),
+       doc="arg 1 split by arg 2, part arg 3 (1-based; 0/out-of-range = empty string)"),
+    Fn("regexp_replace", 3, lambda a: Inf(STRING, any(i.nullable for i in a)),
+       max_args=3, kind="string", doc="replace regex arg 2 matches with arg 3"),
+    Fn("left", 2, lambda a: Inf(STRING, a[0].nullable), max_args=2, kind="string",
+       arg_kinds=("string", "int"),
+       doc="first arg 2 characters of arg 1"),
+    Fn("right", 2, lambda a: Inf(STRING, a[0].nullable), max_args=2, kind="string",
+       arg_kinds=("string", "int"),
+       doc="last arg 2 characters of arg 1"),
     Fn("row_number", 0, lambda a: Inf(INT64, False), max_args=0, window=True,
        doc="row number inside the window partition (1-based)"),
     Fn("rank", 0, lambda a: Inf(INT64, False), max_args=0, window=True,
@@ -203,6 +248,13 @@ def emit_sql(name: str, args_sql: str, dialect=None) -> str:
     A no-argument call to a star-accepting function (``count()``) emits
     ``COUNT(*)``: the knowledge that an empty count counts rows lives here,
     with the signature, not in the code generator.
+
+    Some catalog entries do not map 1:1 onto a spelled CALL: ``split_part``
+    has no native BigQuery function (emulated with SPLIT there, which returns
+    NULL for an out-of-range part instead of ''), so its dialect spelling is
+    handled here; ``substring`` is a keyword form shaped by ``sqlgen``. A
+    dialect that cannot express a function maps it to a ``*_UNAVAILABLE``
+    spelling, which fails loud here instead of emitting broken SQL.
     """
     fn = get(name)
     if fn is None:
@@ -211,5 +263,13 @@ def emit_sql(name: str, args_sql: str, dialect=None) -> str:
         args_sql = "*"
     spelling = None
     if dialect is not None:
+        if name == "split_part":
+            if dialect.function_map.get(name) == "SPLIT":
+                return "SPLIT(" + args_sql + ")"
+            return "SPLIT_PART(" + args_sql + ")"
         spelling = dialect.function_map.get(name)
+    if spelling is not None and spelling.endswith("_UNAVAILABLE"):
+        raise RuntimeError(
+            f"dialect {dialect.name!r} cannot express function {name}()"
+            f" (rewrite the model with expressible calls)")
     return f"{spelling or fn.sql_name}({args_sql})"

@@ -89,7 +89,22 @@ class Translator:
             if name == "in":
                 return self._in(e)
             # Signature and spelling come from the one catalog both the
-            # typechecker and this generator read (functions.py).
+            # typechecker and this generator read (functions.py). Two
+            # catalog entries do not map 1:1 onto a spelled CALL:
+            #  - substring is the SQL keyword form SUBSTRING(s FROM a [FOR
+            #    len]), not the comma form (not standard SQL);
+            #  - BigQuery has no SPLIT_PART: SPLIT(x, d)[SAFE_OFFSET(n - 1)]
+            #    degrades out-of-range parts to NULL instead of '' (fail-loud
+            #    instead of silently-wrong, like the ANTI/SEMI JOIN stance).
+            if name == "substring":
+                pieces = [self.expr(a) for a in e.args]
+                if len(pieces) == 3:
+                    return f"SUBSTRING({pieces[0]} FROM {pieces[1]} FOR {pieces[2]})"
+                return f"SUBSTRING({pieces[0]} FROM {pieces[1]})"
+            if name == "split_part" and self.dialect.function_map.get(name) == "SPLIT":
+                part = self.expr(e.args[2])
+                return (f"SPLIT({self.expr(e.args[0])}, {self.expr(e.args[1])})"
+                        f"[SAFE_OFFSET({part} - 1)]")
             if functions.get(name) is None:
                 raise RuntimeError(
                     f"dialect {self.dialect.name!r} cannot express function {name}()"

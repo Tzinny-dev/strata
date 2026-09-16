@@ -98,12 +98,19 @@ def _sf_array(elem: str) -> str:
 # spelling: functions.py declares signatures, and a dialect overrides the
 # default spelling here (e.g. BigQuery naming a function differently).
 # Window functions spell identically everywhere (ROW_NUMBER, RANK, LAG, ...).
+# split_part is special: BigQuery has no native SPLIT_PART, so it is
+# emulated with SPLIT(...)[SAFE_OFFSET(...)] in sqlgen (which returns NULL
+# for an out-of-range part instead of '').
 _UNIVERSAL_FNS = {
     "count": "COUNT", "sum": "SUM", "avg": "AVG", "max": "MAX", "min": "MIN",
     "coalesce": "COALESCE", "upper": "UPPER", "lower": "LOWER", "concat": "CONCAT",
     "row_number": "ROW_NUMBER", "rank": "RANK", "dense_rank": "DENSE_RANK",
     "lag": "LAG", "lead": "LEAD", "first_value": "FIRST_VALUE",
     "last_value": "LAST_VALUE",
+    "length": "LENGTH", "substring": "SUBSTRING", "trim": "TRIM",
+    "replace": "REPLACE", "left": "LEFT", "right": "RIGHT",
+    "regexp_replace": "REGEXP_REPLACE", "split_part": "SPLIT_PART",
+    "startswith": "STARTS_WITH",
 }
 
 DUCKDB = Dialect(
@@ -119,7 +126,13 @@ BIGQUERY = Dialect(
     {"int64": "INT64", "float64": "FLOAT64", "string": "STRING", "bool": "BOOL",
      "date": "DATE", "timestamp": "TIMESTAMP", "uuid": "STRING", "json": "JSON"},
     _bq_dec, "NUMERIC(38,2)", _bq_array, supports_anti_semi=False,
-    function_map=_UNIVERSAL_FNS,
+    # Standard GoogleSQL: no STARTS_WITH (pattern: prefix LIKE '...%'),
+    # no SPLIT_PART (emulated with SPLIT in functions.emit_sql), no LPAD/RPAD.
+    # Unavailable functions are mapped to a *_UNAVAILABLE spelling: codegen
+    # never emits it silently — the call raises (fail-loud dialect gap).
+    function_map={**_UNIVERSAL_FNS, "startswith": "LIKE_PREFIX",
+                  "split_part": "SPLIT", "lpad": "LPAD_UNAVAILABLE",
+                  "rpad": "RPAD_UNAVAILABLE"},
 )
 
 SNOWFLAKE = Dialect(
@@ -127,7 +140,8 @@ SNOWFLAKE = Dialect(
     {"int64": "BIGINT", "float64": "DOUBLE", "string": "VARCHAR", "bool": "BOOLEAN",
      "date": "DATE", "timestamp": "TIMESTAMP_NTZ", "uuid": "VARCHAR", "json": "VARIANT"},
     _sf_dec, "NUMBER(38,2)", _sf_array, supports_anti_semi=False,
-    function_map=_UNIVERSAL_FNS,
+    # Snowflake names startswith STARTSWITH (no underscore).
+    function_map={**_UNIVERSAL_FNS, "startswith": "STARTSWITH"},
 )
 
 def _pg_dec(p: int, s: int) -> str:

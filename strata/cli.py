@@ -857,6 +857,9 @@ def main(argv=None):
 
     p = sub.add_parser("check", help="validate a .strata artifact without materializing (CI guard)")
     p.add_argument("file")
+    p.add_argument("--dialect", default="duckdb",
+                   help="dialect probe target (default: duckdb)")
+    p.set_defaults(fn=cmd_check)
     args = ap.parse_args(argv)
     try:
         return args.fn(args)

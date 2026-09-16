@@ -108,7 +108,7 @@ class Lexer:
                 self._token("SYM", "${")
             elif ch.isalpha() or ch in "_":
                 self._ident()
-            elif ch in "{}[](),:;=.<>+-*/%":
+            elif ch in "{}[](),:;=.<>+-*/%|":
                 if any(self.text.startswith(s, self.pos) for s in SYMBOLS):
                     for s in sorted(SYMBOLS, key=len, reverse=True):
                         if self.text.startswith(s, self.pos):
@@ -119,10 +119,6 @@ class Lexer:
                 else:
                     self._advance()
                     self._token("SYM", ch)
-            elif ch == "|":
-                # lambda-pipe |x| handled as : in comprehension
-                self._advance()
-                self._token("SYM", "|")
             else:
                 raise LexError(f"unexpected character {ch!r} at {line}:{col}")
         self.tokens.append(Token("EOF", None, self.line, self.col))
