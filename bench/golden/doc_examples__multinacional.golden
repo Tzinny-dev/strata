@@ -1,0 +1,12 @@
+# build: examples/multinacional.strata
+
+
+# sql: duckdb
+
+
+# sql: snowflake
+
+
+# sql: bigquery
+
+

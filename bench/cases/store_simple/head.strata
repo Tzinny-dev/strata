@@ -1,0 +1,42 @@
+// bench/store_simple/head: same pipeline, narrower source contract --
+// country loses nonnull upstream while the model still promises nonnull.
+// The semantic diff must report BOTH the source narrowing and the model
+// failing to typecheck (UNCHECKED), and the bench exit code must be 1.
+source customers(ns: "crm", dataset: "dim_customers") {
+  columns: {
+    customer_id: int64 nonnull primary_key,
+    country:     string,
+    name:        string nonnull,
+    is_active:   bool,
+  }
+}
+
+source orders(ns: "erp", dataset: "fct_orders") {
+  columns: {
+    order_id:    int64 nonnull primary_key,
+    customer_id: int64 nonnull,
+    gross_usd:   money nonnull,
+    placed_at:   timestamp nonnull,
+  }
+}
+
+contract OrderRevenue {
+  customer_id : int64 nonnull
+  country     : string nonnull enum {ES, MX, CO, BR}
+  revenue     : money nonnull
+  orders      : int64 nonnull
+}
+
+model customer_revenue -> contract OrderRevenue {
+  owner: "bench"
+  reason: "revenue per customer is a protected finance export"
+  from orders
+  join_left customers on orders.customer_id == customers.customer_id
+  let country = customers.country
+  group {orders.customer_id, country} (
+    aggregate {
+      revenue = sum(orders.gross_usd),
+      orders  = count(orders.order_id),
+    }
+  )
+}

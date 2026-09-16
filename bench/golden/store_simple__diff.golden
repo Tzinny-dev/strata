@@ -1,0 +1,68 @@
+{
+  "base": "bench/cases/store_simple/base.strata",
+  "breaking": [
+    {
+      "breaking": true,
+      "col": "*",
+      "detail": "model failed to typecheck in head (schema unknown)",
+      "kind": "compile-error",
+      "model": "customer_revenue"
+    },
+    {
+      "breaking": true,
+      "col": "country",
+      "detail": "country: nonnull -> nullable (NULLs now admitted)",
+      "kind": "narrowed",
+      "model": "customers"
+    }
+  ],
+  "compile_errors": [
+    "E012: customer_revenue.country: contract nonnull but value nullable"
+  ],
+  "head": "bench/cases/store_simple/head.strata",
+  "models": [
+    {
+      "columns": [
+        {
+          "breaking": true,
+          "col": "*",
+          "detail": "model failed to typecheck in head (schema unknown)",
+          "kind": "compile-error",
+          "model": "customer_revenue"
+        }
+      ],
+      "fingerprint_new": "",
+      "fingerprint_old": "41aecf4a9a798e5e",
+      "kind": "compile-error",
+      "model": "customer_revenue"
+    },
+    {
+      "columns": [
+        {
+          "breaking": true,
+          "col": "country",
+          "detail": "country: nonnull -> nullable (NULLs now admitted)",
+          "kind": "narrowed",
+          "model": "customers"
+        },
+        {
+          "breaking": false,
+          "col": "country",
+          "detail": "country: [enum{BR,CO,ES,MX}] -> [-]",
+          "kind": "contract",
+          "model": "customers"
+        }
+      ],
+      "fingerprint_new": "",
+      "fingerprint_old": "",
+      "kind": "source-changed",
+      "model": "customers"
+    }
+  ],
+  "radius": [
+    [
+      "customer_revenue",
+      "country"
+    ]
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "cases": [
+    {"name": "doc_examples/daily_orders", "type": "module", "module": "examples/daily_orders.strata"},
+    {"name": "doc_examples/multinacional", "type": "module", "module": "examples/multinacional.strata"},
+    {"name": "store_simple/module", "type": "module", "module": "bench/cases/store_simple/base.strata"},
+    {"name": "store_simple/diff", "type": "diff", "base": "bench/cases/store_simple/base.strata", "head": "bench/cases/store_simple/head.strata"},
+    {"name": "broken/missing_field", "type": "module", "module": "bench/cases/broken/base.strata"}
+  ]
+}

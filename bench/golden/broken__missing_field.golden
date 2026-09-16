@@ -1,0 +1,2 @@
+# compile error (fail-loud)
+E010: model order_totals missing contract column 'country'

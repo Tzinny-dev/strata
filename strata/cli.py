@@ -12,6 +12,7 @@ from pathlib import Path
 from . import analysis
 from . import sqlgen
 from . import exec as exec_mod
+from . import bench as bench_mod
 from .dialects import get_dialect
 from .lexer import LexError
 from .parser import ParseError, parse_strata
@@ -36,8 +37,16 @@ def check(proj, model_names=None):
 def cmd_build(args):
     proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
     tms = check(proj, args.model)
+    names = args.model or list(tms)
+    print(render_build(proj, tms, names))
+    return 0
+
+
+def render_build(proj, tms, names):
+    """Deterministic build report: typed contracts + fingerprints + column
+    lineage. Shared by `cmd_build` and the bench golden runner (Fase 4)."""
     out = []
-    for name in (args.model or list(tms)):
+    for name in names:
         tm = tms[name]
         cols = ", ".join(c.describe() for c in tm.schema.values())
         out.append(f"model {name}" + (f" -> contract {tm.contract}" if tm.contract else ""))
@@ -48,15 +57,19 @@ def cmd_build(args):
             out.append(f"  lineage {cname} <- {o}")
         out.append(f"  reads        {sorted(tm.reads)}")
         out.append("")
-    print("\n".join(out).rstrip())
-    return 0
+    return "\n".join(out).rstrip()
 
 
 def cmd_compile(args):
     proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
     tms = check(proj, args.model)
+    try:
+        dialect = get_dialect(args.dialect)
+    except ValueError as ve:
+        print(f"error: {ve}", file=sys.stderr)
+        return 2
     names = args.model or (proj.model_names_for(None) or list(tms))
-    print(sqlgen.full_sql(tms, names, dialect=get_dialect(args.dialect)))
+    print(sqlgen.full_sql(tms, names, dialect=dialect))
     return 0
 
 
@@ -247,6 +260,13 @@ def cmd_run(args):
     if getattr(args, "output", None):
         con.close()
     return 0
+
+
+def cmd_bench(args):
+    """Fase 4: golden-file harness over deterministic artifacts (build, SQL
+    per dialect, semantic diff). `--update` re-blesses after an INTENTIONAL
+    compiler change; a mismatch without it is exit 1."""
+    return bench_mod.run_cases(root=args.root, update=args.update)
 
 
 def cmd_check(args):
@@ -562,6 +582,13 @@ def main(argv=None):
                         "(self-pinning: identical re-runs see nothing stale)")
     p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
     p.set_defaults(fn=cmd_plan)
+
+    p = sub.add_parser("bench", help="golden-file artifacts: supervision + regression")
+    p.add_argument("--update", action="store_true",
+                   help="re-bless golden files after an intentional compiler change")
+    p.add_argument("--root", default=".",
+                   help="project root that case module paths resolve against")
+    p.set_defaults(fn=cmd_bench)
 
     p = sub.add_parser("lineage-diff", help="print lineage + blast radius")
     p.add_argument("file")

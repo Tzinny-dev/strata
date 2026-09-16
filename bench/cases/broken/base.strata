@@ -1,0 +1,25 @@
+// bench/broken: intentionally fails contract verification (missing
+// nonnull field `country` required by the contract). Pins the fail-loud
+// compile-error path as a golden artifact.
+source orders(ns: "erp", dataset: "fct_orders") {
+  columns: {
+    order_id:    int64 nonnull,
+    customer_id: int64 nonnull,
+    gross_usd:   money nonnull,
+  }
+}
+
+contract OrderTotals {
+  order_id : int64 nonnull
+  total    : money nonnull
+  country  : string nonnull
+}
+
+model order_totals -> contract OrderTotals {
+  from orders
+  group {orders.order_id} (
+    aggregate {
+      total = sum(orders.gross_usd),
+    }
+  )
+}

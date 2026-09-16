@@ -1,0 +1,57 @@
+# build: examples/daily_orders.strata
+model daily_orders -> contract OrderMetrics
+  fingerprint  34c39a7edb23b932
+  outputs      order_id: int64 nonnull, customer_id: int64 nonnull, country: string nonnull, order_day: date nonnull, gross_amount: money(USD) nonnull, net_amount: money(USD) nonnull
+  lineage order_id <- orders.order_id [aggregated]
+  lineage customer_id <- orders.customer_id [aggregated]
+  lineage country <- orders.country [grouped]
+  lineage order_day <- orders.order_day [grouped]
+  lineage gross_amount <- orders.gross_amount_usd [aggregated]
+  lineage net_amount <- orders.gross_amount_usd [aggregated], refunds.discount_usd [aggregated]
+  reads        [('daily_orders', 'country'), ('daily_orders', 'discount'), ('daily_orders', 'gross'), ('orders', 'country'), ('orders', 'customer_id'), ('orders', 'gross_amount_usd'), ('orders', 'is_test'), ('orders', 'order_day'), ('orders', 'order_id'), ('refunds', 'discount_usd'), ('refunds', 'order_id')]
+
+# sql: duckdb
+CREATE OR REPLACE VIEW v_daily_orders AS
+-- model daily_orders -> contract OrderMetrics
+WITH base AS (
+SELECT t0.order_id, t0.customer_id, t0.gross_amount_usd, t0.is_test, t0.order_day, t1.order_id AS __j1_order_id, t1.discount_usd AS __j1_discount_usd, t1.refunded_at AS __j1_refunded_at, UPPER(t0.country) AS country, t0.gross_amount_usd AS gross, COALESCE(t1.discount_usd, 0) AS discount
+FROM orders t0
+  LEFT JOIN refunds t1 ON (t0.order_id = t1.order_id)
+WHERE (COALESCE(t0.is_test, FALSE) = FALSE)
+)
+SELECT country AS country, order_day AS order_day, COUNT(order_id) AS order_id, MAX(customer_id) AS customer_id, SUM(gross) AS gross_amount, SUM((gross - discount)) AS net_amount
+FROM base
+GROUP BY country, order_day
+ORDER BY order_day, country
+
+
+# sql: snowflake
+CREATE OR REPLACE VIEW v_daily_orders AS
+-- model daily_orders -> contract OrderMetrics
+WITH base AS (
+SELECT t0.order_id, t0.customer_id, t0.gross_amount_usd, t0.is_test, t0.order_day, t1.order_id AS __j1_order_id, t1.discount_usd AS __j1_discount_usd, t1.refunded_at AS __j1_refunded_at, UPPER(t0.country) AS country, t0.gross_amount_usd AS gross, COALESCE(t1.discount_usd, 0) AS discount
+FROM orders t0
+  LEFT JOIN refunds t1 ON (t0.order_id = t1.order_id)
+WHERE (COALESCE(t0.is_test, FALSE) = FALSE)
+)
+SELECT country AS country, order_day AS order_day, COUNT(order_id) AS order_id, MAX(customer_id) AS customer_id, SUM(gross) AS gross_amount, SUM((gross - discount)) AS net_amount
+FROM base
+GROUP BY country, order_day
+ORDER BY order_day, country
+
+
+# sql: bigquery
+CREATE OR REPLACE VIEW v_daily_orders AS
+-- model daily_orders -> contract OrderMetrics
+WITH base AS (
+SELECT t0.order_id, t0.customer_id, t0.gross_amount_usd, t0.is_test, t0.order_day, t1.order_id AS __j1_order_id, t1.discount_usd AS __j1_discount_usd, t1.refunded_at AS __j1_refunded_at, UPPER(t0.country) AS country, t0.gross_amount_usd AS gross, COALESCE(t1.discount_usd, 0) AS discount
+FROM orders t0
+  LEFT JOIN refunds t1 ON (t0.order_id = t1.order_id)
+WHERE (COALESCE(t0.is_test, FALSE) = FALSE)
+)
+SELECT country AS country, order_day AS order_day, COUNT(order_id) AS order_id, MAX(customer_id) AS customer_id, SUM(gross) AS gross_amount, SUM((gross - discount)) AS net_amount
+FROM base
+GROUP BY country, order_day
+ORDER BY order_day, country
+
+
