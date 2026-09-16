@@ -1,6 +1,6 @@
 """strata -- command line interface.
 
-One binary: build / plan / compile / run / lineage-diff / plan / init / seed.
+One binary: build / plan / compile / run / lineage-diff / bench / grammar / dashboard / init / seed.
 """
 from __future__ import annotations
 
@@ -192,24 +192,16 @@ def _semantic_diff(base_path: str, head_path: str,
             if e:
                 print(f"note: {side} module does not typecheck ({e}) -- "
                       "diff covers the models that compiled")
-    brk = [c for mc in changes for c in mc.columns if c.breaking]
-    if json_mode:
-        print(json.dumps(to_json_dict(base_path, head_path, changes, radius), indent=2))
-    else:
-        if not changes:
-            print("semantic diff: identical (no column-level changes)")
-            return 0
-        for line in render(changes, radius):
-            print(line)
-    if brk:
+    if not json_mode and brk:
         print(f"\nE030: {len(brk)} breaking column change(s): "
               + ", ".join(f"{c.model}.{c.col} ({c.kind})" for c in brk))
         if radius:
             print(f"  -> {len(radius)} downstream consumer column(s) affected: "
                   + ", ".join(f"{n}.{c}" for n, c in sorted(radius)))
         print("  -> producer PR must NOT ship this change (cross-team contract)")
-        return 1
-    return 0
+        # --json stdout stays a pure machine artifact: the breaking set is in
+        # d["breaking"] and the exit code carries the verdict (1 = breaking).
+    return 1 if brk else 0
 
 
 def cmd_run(args):
@@ -293,6 +285,38 @@ def cmd_grammar(args):
     sys.stdout.write("\n".join(lines))
     sys.stdout.write(grammar.emit_gbnf())
     return 0
+
+
+def cmd_dashboard(args):
+    """Fase 4: one-screen supervision surface over a module (spec tooling row
+    `strata dashboard`): typed models + contracts + fingerprints, DAG edges,
+    staleness vs manifest, content-addressed run history and the protected-
+    consumer blast surface. Render-only: no DB, deterministic, sorted. On a
+    module that does not typecheck it still renders what compiled (fail-loud
+    exit 1 with the diagnostic, same philosophy as the semantic diff)."""
+    from .dashboard import build_dashboard, render
+
+    path = args.file
+    proj = load(path, search_dirs=([args.search_dir] if getattr(args, "search_dir", None) else None))
+    diag = None
+    try:
+        tms = check(proj)
+    except StrataError as se:
+        diag = f"{se.code}: {se}"
+        tms = proj.typed  # partial: whatever compiled before the error
+    d = build_dashboard(proj, tms, path,
+                        history=exec_mod.load_history(path),
+                        manifest=exec_mod.load_manifest(path))
+    if diag:
+        d["compile_error"] = diag
+    if getattr(args, "json", False):
+        print(json.dumps(d, indent=2, sort_keys=True))
+    else:
+        print(render(d))
+        if diag:
+            print(f"note: module does not typecheck ({diag}) -- "
+                  "dashboard covers the models that compiled")
+    return 1 if diag else 0
 
 
 def cmd_check(args):
@@ -620,6 +644,14 @@ def main(argv=None):
     p.add_argument("--doc", action="store_true",
                    help="prefix each rule with its spec sentence as a comment")
     p.set_defaults(fn=cmd_grammar)
+
+    p = sub.add_parser("dashboard",
+                       help="one-screen supervision surface: models, contracts, DAG, staleness, runs, blast surface")
+    p.add_argument("file")
+    p.add_argument("--json", action="store_true",
+                   help="machine-readable dashboard (agent supervision artifact)")
+    p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
+    p.set_defaults(fn=cmd_dashboard)
 
     p = sub.add_parser("lineage-diff", help="print lineage + blast radius")
     p.add_argument("file")
