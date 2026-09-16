@@ -269,6 +269,32 @@ def cmd_bench(args):
     return bench_mod.run_cases(root=args.root, update=args.update)
 
 
+def cmd_grammar(args):
+    """Fase 4: emit the Strata grammar as llama.cpp GBNF for constrained decoding.
+
+    The grammar is grammar-as-code (strata/grammar.py) kept in lockstep with the
+    lexer by tests/test_grammar.py; this command validates it fail-loud (exit 2)
+    and then prints the GBNF text ready to feed a constrained sampler. --doc
+    annotates every rule with its spec sentence for human supervision.
+    """
+    from . import grammar
+    problems = grammar.validate()
+    if problems:
+        for pr in problems:
+            print(f"error: grammar inconsistency: {pr}", file=sys.stderr)
+        return 2
+    if not args.doc:
+        sys.stdout.write(grammar.emit_gbnf())
+        return 0
+    lines = ["# Strata GBNF grammar (spec/grammar.md, parser-authoritative)", ""]
+    for name, (doc, _alts) in grammar.RULES.items():
+        lines.append(f"# {name.replace('-', '_')}: {doc}")
+    lines.append("")
+    sys.stdout.write("\n".join(lines))
+    sys.stdout.write(grammar.emit_gbnf())
+    return 0
+
+
 def cmd_check(args):
     """§16: `strata check <file> [--dialect D]` -- autonomous CI guard, sibling
     of plan/lineage-diff. Runs the compiled-model gates (E0xx fail-loud) plus
@@ -589,6 +615,11 @@ def main(argv=None):
     p.add_argument("--root", default=".",
                    help="project root that case module paths resolve against")
     p.set_defaults(fn=cmd_bench)
+
+    p = sub.add_parser("grammar", help="emit the Strata grammar as llama.cpp GBNF (constrained decoding)")
+    p.add_argument("--doc", action="store_true",
+                   help="prefix each rule with its spec sentence as a comment")
+    p.set_defaults(fn=cmd_grammar)
 
     p = sub.add_parser("lineage-diff", help="print lineage + blast radius")
     p.add_argument("file")
