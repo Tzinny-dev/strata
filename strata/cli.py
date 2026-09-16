@@ -5,6 +5,7 @@ One binary: build / plan / compile / run / lineage-diff / plan / init / seed.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -110,7 +111,12 @@ def _fail_loud_contracts(proj, tms, changes, radius):
 
 
 def cmd_lineage(args):
-    proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
+    base_path = args.file
+    if getattr(args, "head2", None):
+        return _semantic_diff(base_path, args.head2,
+                              search_dir=getattr(args, "search_dir", None),
+                              json_mode=getattr(args, "json", False))
+    proj = load(base_path, search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
     tms = check(proj)
     down = build_down_edges(tms)
     print("lineage (column-level dependency edges):")
@@ -134,6 +140,62 @@ def cmd_lineage(args):
                   f"{', '.join(f'{n}.{c}' for n, c in sorted(radius))}")
             print("  -> producer PR must NOT ship this change (cross-team contract)")
             return 1
+    return 0
+
+
+def _semantic_diff(base_path: str, head_path: str,
+                   search_dir: str | None = None, json_mode: bool = False):
+    """Fase 4: `strata lineage-diff base.strata head.strata` -- column-level
+    semantic diff between two module versions (spec/compiler-design.md §7
+    `ref1..ref2`): added/removed/retyped/narrowed per column + downstream
+    impact from the BASE lineage graph. Exit 1 + E030 when breaking."""
+    from .diff import diff_projects, impact_radius, render, to_json_dict
+
+    def _load_checked(p):
+        proj = load(p, search_dirs=([search_dir] if search_dir else None))
+        diag = None
+        try:
+            check(proj)
+        except StrataError as se:
+            diag = f"{se.code}: {se}"
+        return proj, diag
+
+    base_proj, base_diag = _load_checked(base_path)
+    head_proj, head_diag = _load_checked(head_path)
+    changes = diff_projects(base_proj, head_proj)
+    radius = impact_radius(base_proj.typed, changes)
+    brk = [c for mc in changes for c in mc.columns if c.breaking]
+    if json_mode:
+        d = to_json_dict(base_path, head_path, changes, radius)
+        d["compile_errors"] = [e for e in (base_diag, head_diag) if e]
+        print(json.dumps(d, indent=2))
+    else:
+        if not changes and not (base_diag or head_diag):
+            print("semantic diff: identical (no column-level changes)")
+            return 0
+        for line in render(changes, radius):
+            print(line)
+        for side, e in (("base", base_diag), ("head", head_diag)):
+            if e:
+                print(f"note: {side} module does not typecheck ({e}) -- "
+                      "diff covers the models that compiled")
+    brk = [c for mc in changes for c in mc.columns if c.breaking]
+    if json_mode:
+        print(json.dumps(to_json_dict(base_path, head_path, changes, radius), indent=2))
+    else:
+        if not changes:
+            print("semantic diff: identical (no column-level changes)")
+            return 0
+        for line in render(changes, radius):
+            print(line)
+    if brk:
+        print(f"\nE030: {len(brk)} breaking column change(s): "
+              + ", ".join(f"{c.model}.{c.col} ({c.kind})" for c in brk))
+        if radius:
+            print(f"  -> {len(radius)} downstream consumer column(s) affected: "
+                  + ", ".join(f"{n}.{c}" for n, c in sorted(radius)))
+        print("  -> producer PR must NOT ship this change (cross-team contract)")
+        return 1
     return 0
 
 
@@ -503,7 +565,11 @@ def main(argv=None):
 
     p = sub.add_parser("lineage-diff", help="print lineage + blast radius")
     p.add_argument("file")
+    p.add_argument("head2", nargs="?", default=None,
+                   help="optional second module: column-level semantic diff file..head2")
     p.add_argument("--change", help="source col change to simulate, e.g. crm.orders:order_id")
+    p.add_argument("--json", action="store_true",
+                   help="machine-readable diff (agent supervision artifact)")
     p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
     p.set_defaults(fn=cmd_lineage)
 
