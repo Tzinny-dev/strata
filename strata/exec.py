@@ -9,6 +9,10 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import os
+import re
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -31,38 +35,83 @@ def history_path(module_path: str) -> Path:
     return p.parent / (p.stem + HISTORY_SUFFIX)
 
 
-def record_run(module_path: str, entry: dict) -> dict:
+def _run_id(entry: dict) -> str:
+    """Content-addressed run identity. Excludes 'run_id' itself and the
+    derived/phase fields (snapshot names are derived from the id; the
+    pending/complete phase is not part of identity)."""
+    payload = json.dumps(
+        {k: v for k, v in entry.items()
+         if k not in ("run_id", "snapshots", "input_snapshots", "status")},
+        sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()[:12]
+
+
+def _atomic_write(path: Path, text: str):
+    """Replace a metadata file only after its complete contents are durable.
+
+    Single-writer prototype; concurrent filesystem writers are not supported.
+    """
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def record_run(module_path: str, entry: dict, run_id: str = None) -> dict:
     """Append a content-addressed run record; return it (with run_id)."""
     hp = history_path(module_path)
-    payload = json.dumps({k: v for k, v in entry.items() if k != "run_id"}, sort_keys=True)
     entry = dict(entry)
-    entry["run_id"] = hashlib.sha256(payload.encode()).hexdigest()[:12]
+    entry["run_id"] = run_id or _run_id(entry)
     entry["at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    with hp.open("a") as f:
-        f.write(json.dumps(entry, sort_keys=True) + "\n")
+    _atomic_write(hp, hp.read_text() + json.dumps(entry, sort_keys=True) + "\n"
+                  if hp.exists() else json.dumps(entry, sort_keys=True) + "\n")
     return entry
 
 
-def load_history(module_path: str) -> list:
+def load_history(module_path: str, lenient: bool = False) -> list:
+    """Reads the append-only history newest-last.
+
+    Strictness matters here: a malformed line means unreadable records after
+    it, which would silently hide runs from `replay`/`rollback`. Fail loud
+    (RuntimeError) by default; lenient=True skips bad lines (recovery only)."""
     hp = history_path(module_path)
     if not hp.exists():
         return []
     out = []
-    for line in hp.read_text().splitlines():
+    for lineno, line in enumerate(hp.read_text().splitlines(), 1):
         line = line.strip()
-        if line:
-            try:
-                out.append(json.loads(line))
-            except Exception:
-                pass
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception as exc:
+            if lenient:
+                continue
+            raise RuntimeError(
+                f"unreadable run history at {hp}: line {lineno}: {exc}") from exc
     return out
 
 
 def find_run(module_path: str, run_id: str) -> Optional[dict]:
-    for e in load_history(module_path):
-        if e.get("run_id") == run_id or e.get("run_id", "").startswith(run_id):
+    matches = [e for e in load_history(module_path)
+               if e.get("run_id", "").startswith(run_id)]
+    # Prefer the latest non-pending phase: a pending record was superseded by
+    # its completion (or abandoned by recovery).
+    for e in reversed(matches):
+        if e.get("status") != "pending":
             return e
-    return None
+    return matches[-1] if matches else None
 
 
 def manifest_path(module_path: str) -> Path:
@@ -81,7 +130,7 @@ def load_manifest(path: str) -> Dict[str, str]:
 
 
 def save_manifest(path: str, fingerprints: Dict[str, str]):
-    manifest_path(path).write_text(json.dumps(fingerprints, indent=2, sort_keys=True))
+    _atomic_write(manifest_path(path), json.dumps(fingerprints, indent=2, sort_keys=True))
 
 
 def stale_models(tms: Dict[str, TypedModel], path: str) -> List[str]:
@@ -98,15 +147,75 @@ def _contract_decl(project: Project, tm: TypedModel):
     return cd
 
 
+def physical_schema(con, view: str) -> dict:
+    """Actual physical schema of a staged view/table: {column: storage type}.
+
+    Phase-C input: the compiled plan is trusted, the warehouse is not. An
+    upstream table that drifted behind the declared source schema must be
+    caught here, before anything is published."""
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", view):
+        raise PinError(f"physical schema check FAILED: unsafe view name {view!r}")
+    rows = con.execute(
+        "SELECT column_name, data_type FROM information_schema.columns "
+        f"WHERE table_schema = 'main' AND table_name = '{view}' "
+        "ORDER BY ordinal_position").fetchall()
+    if not rows:
+        raise PinError(
+            f"physical schema check FAILED: view {view!r} has no columns (does it exist?)")
+    return {name: dtype for name, dtype in rows}
+
+
+# Integral storage types whose values widen losslessly into int64. Narrowing
+# (e.g. BIGINT promised, VARCHAR found) is never accepted implicitly.
+_INT64_PHYSICAL = {"BIGINT", "INTEGER", "HUGEINT"}
+
+
+def _physical_types(t: StrataType) -> set:
+    """Acceptable warehouse storage types for a declared Strata type."""
+    if t.name == "int64":
+        return set(_INT64_PHYSICAL)
+    if t.name == "float64":
+        return {"DOUBLE", "REAL"}
+    if t.name == "string":
+        return {"VARCHAR"}
+    if t.name == "bool":
+        return {"BOOLEAN"}
+    if t.name == "date":
+        return {"DATE"}
+    if t.name == "timestamp":
+        return {"TIMESTAMP", "TIMESTAMP WITHOUT TIME ZONE"}
+    if t.name == "uuid":
+        return {"UUID"}
+    if t.name == "json":
+        return {"JSON"}
+    if t.name == "decimal":
+        return {f"DECIMAL({t.precision},{t.scale})"}
+    if t.name == "money":
+        return {"DECIMAL(38,2)"}
+    if t.name == "array" and t.elem is not None:
+        return {elem + "[]" for elem in _physical_types(t.elem)}
+    return set()
+
+
 def runtime_pins(con, project: Project, tm: TypedModel, view: str, report: List[str]):
     if not tm.contract:
         return
     cd = _contract_decl(project, tm)
+    physical = physical_schema(con, view)
     for f in cd.fields:
         exp = contract_field_col(f)
 
         def bad(why):
             raise PinError(f"phase-C pin FAILED [{tm.name}.{f.name}] {why}")
+
+        if f.name not in physical:
+            bad("column missing from materialized schema")
+        allowed = _physical_types(exp.t)
+        if not allowed:
+            bad(f"no physical type check defined for contract type {exp.t}")
+        if physical[f.name] not in allowed:
+            bad(f"physical type {physical[f.name]!r} incompatible with contract {exp.t}")
+        report.append(f"  ok  {tm.name}.{f.name}: {physical[f.name]} (schema)")
 
         if f.nonnull:
             n = con.execute(f"SELECT count(*) FROM {view} WHERE {f.name} IS NULL").fetchone()[0]
@@ -162,7 +271,8 @@ def list_branches(con) -> List[str]:
 def materialize(con, project: Project, tms: Dict[str, TypedModel],
                 names: Optional[List[str]] = None, sort_by_deps=True,
                 dialect=DUCKDB, source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
-                branch: str = "main", stage_only: bool = False):
+                branch: str = "main", stage_only: bool = False,
+                run_id: Optional[str] = None, manage_transaction: bool = True):
     """Create/recreate views v_<name> in topological order; return pin report.
 
     `source_overrides` ({source: {ns, dataset, ...}}) rewrites the compiled
@@ -187,7 +297,7 @@ def materialize(con, project: Project, tms: Dict[str, TypedModel],
             decl = project.sources.get(src)
             if decl is None:
                 raise PinError(f"source override for unknown source {src!r}")
-            default = decl.resource.get("dataset", src)
+            default = src  # SQL codegen emits the logical source name.
             if default == target:
                 continue
             if default not in read_sql and target not in read_sql:
@@ -217,8 +327,19 @@ def materialize(con, project: Project, tms: Dict[str, TypedModel],
         applied.append(name)
         runtime_pins(con, project, tm, staged_name(name, branch), pins)
     if not stage_only:
-        swap_branch(con, order, branch)
-        run_tests(con, project, tms, names, dialect, branch)
+        # Publish into run-addressed snapshot TABLES (data frozen at this
+        # run's moment) when the run identity is known; legacy staged-view
+        # swap otherwise (standalone `strata test` path).
+        if run_id is not None:
+            def validate_snapshots():
+                for name in order:
+                    runtime_pins(con, project, tms[name], snapshot_name(run_id, name), [])
+                run_tests(con, project, tms, order, dialect, branch)
+            publish_snapshots(con, order, run_id, branch, validate=validate_snapshots,
+                              manage_transaction=manage_transaction)
+        else:
+            swap_branch(con, order, branch)
+            run_tests(con, project, tms, names, dialect, branch)
     return applied, pins
 
 
@@ -245,6 +366,124 @@ def swap_branch(con, names: List[str], branch: str = "main") -> List[str]:
             pass
         raise
     return done
+
+
+SNAP_PREFIX = "snap_"
+
+
+def snapshot_name(run_id: str, name: str) -> str:
+    """Run-addressed snapshot TABLE: snap_<run_id>_<model>."""
+    safe = "".join(c if (c.isalnum() or c == "_") else "_" for c in name)
+    return f"{SNAP_PREFIX}{run_id}_{safe}"
+
+
+def publish_snapshots(con, names: List[str], run_id: str,
+                      branch: str = "main", validate=None,
+                      manage_transaction: bool = True) -> List[str]:
+    """Freeze a run's staged results into run-addressed TABLES and repoint the
+    live views at them, in ONE transaction: either the whole run publishes or
+    the last-known-good stays untouched. Unlike the staging views (which read
+    through to mutable sources), a snapshot never changes after it is taken —
+    that is what rollback restores."""
+    if not re.match(r"^[0-9a-f]{12}$", run_id):
+        raise PinError(f"unsafe run id for snapshot naming: {run_id!r}")
+    done: List[str] = []
+    if manage_transaction:
+        con.execute("BEGIN TRANSACTION")
+    try:
+        for name in names:
+            snap = snapshot_name(run_id, name)
+            staged = staged_name(name, branch)
+            exists = con.execute(
+                "SELECT table_type FROM information_schema.tables "
+                "WHERE table_schema='main' AND table_name=?", [snap]).fetchone()
+            if exists:
+                if exists[0] != "BASE TABLE":
+                    raise PinError(f"snapshot {snap!r} is not a table")
+                if physical_schema(con, snap) != physical_schema(con, staged):
+                    raise PinError(f"snapshot identity conflict: {snap}")
+                different = con.execute(
+                    f"SELECT EXISTS ((SELECT * FROM {snap} EXCEPT ALL SELECT * FROM {staged}) "
+                    f"UNION ALL (SELECT * FROM {staged} EXCEPT ALL SELECT * FROM {snap}))"
+                ).fetchone()[0]
+                if different:
+                    raise PinError(f"snapshot identity conflict: {snap}")
+            else:
+                con.execute(f"CREATE TABLE {snap} AS SELECT * FROM {staged}")
+            con.execute(f"CREATE OR REPLACE VIEW {promoted_name(name)} AS "
+                        f"SELECT * FROM {snap}")
+            done.append(snap)
+        if validate is not None:
+            validate()
+        if manage_transaction:
+            con.execute("COMMIT")
+    except Exception:
+        if manage_transaction:
+            con.execute("ROLLBACK")
+        raise
+    return done
+
+
+def rollback_to_run(con, e: dict) -> List[str]:
+    """Repoint live views to the snapshot tables recorded by a past run.
+
+    Snapshots are materialized tables, so rollback never re-executes and is
+    immune to source changes since the run. Fail-loud if any snapshot table
+    was dropped (rollback must never invent data)."""
+    snaps = e.get("snapshots") or {}
+    if not snaps:
+        raise PinError(
+            f"run {e.get('run_id', '?')!r} has no recorded snapshots "
+            "(pre-snapshot history: use staged-view rollback)")
+    have = {r[0] for r in con.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema='main'").fetchall()}
+    missing = sorted(t for t in snaps.values() if t not in have)
+    if missing:
+        raise PinError(
+            f"snapshot table(s) missing: {', '.join(missing)} — rollback "
+            "cannot repoint to data that does not exist (fail-loud)")
+    done: List[str] = []
+    con.execute("BEGIN TRANSACTION")
+    try:
+        for name, snap in sorted(snaps.items()):
+            con.execute(f"CREATE OR REPLACE VIEW {promoted_name(name)} AS "
+                        f"SELECT * FROM {snap}")
+            done.append(promoted_name(name))
+        con.execute("COMMIT")
+    except Exception:
+        try:
+            con.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    return done
+
+
+def source_fingerprints(con, project: Project, source_overrides=None) -> Dict[str, str]:
+    """Hash schemas and sorted JSON rows of the effective source relations.
+
+    Prototype implementation: a full scan/sort, including duplicate rows.
+    Resolution matches SQL codegen (source name unless explicitly overridden).
+    A missing source is an error, never a reusable 'missing' fingerprint.
+    """
+    out: Dict[str, str] = {}
+    overrides = source_overrides or {}
+    for name in sorted(project.sources):
+        kv = overrides.get(name, {})
+        table = kv.get("dataset") or kv.get("table") or name
+        quoted = '"' + table.replace('"', '""') + '"'
+        schema = con.execute(f"DESCRIBE SELECT * FROM {quoted}").fetchall()
+        digest = hashlib.sha256(json.dumps(schema, default=str).encode())
+        rows = con.execute(f"SELECT to_json(t) FROM {quoted} t ORDER BY 1")
+        while batch := rows.fetchmany(1024):
+            for (row,) in batch:
+                data = row.encode()
+                digest.update(len(data).to_bytes(8, "big"))
+                digest.update(data)
+        out[name] = digest.hexdigest()
+    return out
+
 
 
 def run_tests(con, project: Project, tms: Dict[str, TypedModel],
@@ -324,8 +563,7 @@ def _apply_source_overrides(sql: str, project: Project,
     n = 0
     for src, kv in overrides.items():
         target = kv.get("dataset") or kv.get("table") or src
-        decl = project.sources.get(src)
-        default = decl.resource.get("dataset", src) if decl else src
+        default = src  # Match gen_base_subquery, not source metadata.
         if default == target:
             continue
         for frm, to in ((f"FROM {default} ", f"FROM {target} "),
@@ -357,31 +595,165 @@ def _dep_order(tms: Dict[str, TypedModel], names: List[str]) -> List[str]:
     return out
 
 
+COMMIT_REGISTRY = "strata_commits"
+
+
+def _record_commit(con, module_path, entry, rid):
+    """Transactional outbox: one event per publication, not per content id."""
+    con.execute(f"CREATE TABLE IF NOT EXISTS {COMMIT_REGISTRY} ("
+                "event_id VARCHAR PRIMARY KEY, module_path VARCHAR, "
+                "committed_at TIMESTAMP, entry JSON, exported BOOLEAN)")
+    event = uuid.uuid4().hex
+    payload = dict(entry, run_id=rid, commit_id=event)
+    con.execute(f"INSERT INTO {COMMIT_REGISTRY} VALUES (?, ?, now(), ?, false)",
+                [event, str(Path(module_path).resolve()), json.dumps(payload)])
+
+
+def recover_metadata(con, module_path: str) -> list:
+    """Export committed but unacknowledged events. Single writer required.
+
+    A file replacement can succeed before acknowledgement fails: commit_id
+    deduplicates that retry. Corrupt legacy history fails loudly. No registry
+    is created by a read; legacy warehouses remain untouched.
+    """
+    exists = con.execute("SELECT count(*) FROM information_schema.tables "
+                         "WHERE table_schema='main' AND table_name=?",
+                         [COMMIT_REGISTRY]).fetchone()[0]
+    if not exists:
+        return []
+    pending = con.execute(
+        f"SELECT event_id, entry FROM {COMMIT_REGISTRY} "
+        "WHERE module_path=? AND NOT exported ORDER BY committed_at, event_id",
+        [str(Path(module_path).resolve())]).fetchall()
+    history = load_history(module_path)
+    known = {e.get("commit_id") for e in history}
+    recovered = []
+    for event, raw in pending:
+        entry = json.loads(raw)
+        if event not in known:
+            record_run(module_path, entry, run_id=entry["run_id"])
+            known.add(event)
+        # Do not undo an intentional rollback or another publication. Only
+        # export the manifest if the recorded snapshots are still live.
+        live = dict(con.execute("SELECT view_name, sql FROM duckdb_views() "
+                                "WHERE schema_name='main'").fetchall())
+        if all(snap in (live.get(promoted_name(n)) or "")
+               for n, snap in entry["snapshots"].items()):
+            save_manifest(module_path, entry["fingerprints"])
+        con.execute(f"UPDATE {COMMIT_REGISTRY} SET exported=true WHERE event_id=?", [event])
+        recovered.append(event)
+    return recovered
+
+
+def _frozen_materialize(con, project, tms, entry, source_overrides=None,
+                        expected_sources=None, module_path=None):
+    """Capture inputs and publish outputs in the same DuckDB transaction.
+
+    A complete publication event is committed with the snapshots. The caller
+    exports filesystem metadata afterwards through recover_metadata.
+    """
+    con.execute("BEGIN TRANSACTION")
+    try:
+        if entry["dialect"] != "duckdb":
+            raise PinError("frozen execution currently supports only DuckDB")
+        entry["source_fingerprints"] = source_fingerprints(con, project, source_overrides)
+        if expected_sources is not None and entry["source_fingerprints"] != expected_sources:
+            raise PinError("input snapshot content changed since recorded run")
+        entry["snapshot_format"] = 2
+        rid = _run_id(entry)
+        inputs = {}
+        for name in sorted(project.sources):
+            # Separate namespace from output snapshots; hash avoids sanitized
+            # source-name collisions.
+            suffix = hashlib.sha256(name.encode()).hexdigest()[:16]
+            snap = f"input_{rid}_{suffix}"
+            kv = (source_overrides or {}).get(name, {})
+            table = kv.get("dataset") or kv.get("table") or name
+            quoted = '"' + table.replace('"', '""') + '"'
+            con.execute(f"CREATE TABLE IF NOT EXISTS {snap} AS SELECT * FROM {quoted}")
+            inputs[name] = snap
+        frozen = {name: {"dataset": snap} for name, snap in inputs.items()}
+        if source_fingerprints(con, project, frozen) != entry["source_fingerprints"]:
+            raise PinError("input snapshot identity conflict")
+        order = _dep_order(tms, entry["names"])
+        used = {inp.node for n in order for inp in tms[n].plan.inputs if inp.is_source}
+        applied, pins = materialize(
+            con, project, tms, entry["names"],
+            source_overrides={n: v for n, v in frozen.items() if n in used},
+            branch=entry["branch"], run_id=rid, manage_transaction=False)
+        entry["input_snapshots"] = inputs
+        entry["snapshots"] = {n: snapshot_name(rid, n) for n in applied}
+        entry["physical_schemas"] = {n: physical_schema(con, snap)
+                                     for n, snap in entry["snapshots"].items()}
+        entry["applied"] = applied
+        entry["pins"] = pins
+        if module_path is not None:
+            _record_commit(con, module_path, entry, rid)
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+    return applied, pins, rid
+
+
 def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
         only_stale: bool = False, names: Optional[List[str]] = None,
         dialect=DUCKDB, source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
         branch: str = "main", stage_only: bool = False):
     if names is None:
         names = list(tms)
+    for src in source_overrides or {}:
+        if src not in project.sources:
+            raise PinError(f"source override for unknown source {src!r}")
+    if not stage_only:
+        # Export any publication whose metadata write crashed last time
+        # BEFORE reading history for staleness decisions.
+        recover_metadata(con, module_path)
+    source_fps = source_fingerprints(con, project, source_overrides)
     if only_stale:
-        stale = set(stale_models(tms, module_path))
-        names = [n for n in names if n in stale] or []
+        history = load_history(module_path)
+        previous = next((e for e in reversed(history)
+                         if e.get("snapshots") and e.get("branch") == branch), None)
+        data_changed = (previous is None or
+                        previous.get("source_fingerprints") != source_fps or
+                        previous.get("source_overrides", {}) != (source_overrides or {}))
+        stale = set(tms) if data_changed else set(stale_models(tms, module_path))
+        # A rollback (or a different warehouse) may not expose the last run.
+        live = dict(con.execute("SELECT view_name, sql FROM duckdb_views() "
+                                "WHERE schema_name='main'").fetchall())
+        if previous:
+            for name in names:
+                snap = previous.get("snapshots", {}).get(name)
+                if not snap or snap not in live.get(promoted_name(name), ""):
+                    stale.add(name)
+        names = [n for n in names if n in stale]
         if not names:
             return [], [], "everything up to date (nothing to do)"
-    applied, pins = materialize(con, project, tms, names, dialect=dialect,
-                                source_overrides=source_overrides, branch=branch,
-                                stage_only=stage_only)
-    fps = {n: tm.fingerprint for n, tm in tms.items()}
-    save_manifest(module_path, fps)
-    record_run(module_path, {
-        "fingerprints": fps,
-        "applied": applied,
-        "pins": pins,
+    # Identity includes data; snapshots are never overwritten on a repeated id.
+    entry = {
+        "fingerprints": {n: tm.fingerprint for n, tm in tms.items()},
         "names": names,
         "dialect": getattr(dialect, "name", str(dialect)),
         "source_overrides": source_overrides or {},
         "branch": branch,
-    })
+        "source_fingerprints": source_fps,
+    }
+    if stage_only:
+        rid = _run_id(entry)
+        applied, pins = materialize(con, project, tms, names, dialect=dialect,
+                                    source_overrides=source_overrides, branch=branch,
+                                    stage_only=True)
+    else:
+        applied, pins, rid = _frozen_materialize(con, project, tms, entry,
+                                                 source_overrides,
+                                                 module_path=module_path)
+    entry["applied"] = applied
+    entry["pins"] = pins
+    if stage_only:
+        save_manifest(module_path, entry["fingerprints"])
+        record_run(module_path, entry, run_id=rid)
+    else:
+        recover_metadata(con, module_path)
     return applied, pins, None
 
 
@@ -416,25 +788,34 @@ def execute_run(con, project: Project, tms: Dict[str, TypedModel], module_path: 
     source_overrides and model set come from the RECORD, not from flags, so
     the replay reproduces the recorded environment exactly. The new run is
     appended with `replay_of` for lineage (history stays append-only)."""
+    recover_metadata(con, module_path)  # restore history before looking up the run
     e = verify_run(module_path, run_id)
     branch = e.get("branch", "main")
     overrides = e.get("source_overrides") or None
+    inputs = e.get("input_snapshots")
+    if inputs is None:
+        raise PinError("run has no frozen inputs; historical replay is unavailable")
+    if set(inputs) != set(project.sources):
+        raise PinError("incomplete input snapshot inventory")
+    have = {r[0] for r in con.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema='main' AND table_type='BASE TABLE'").fetchall()}
+    if any(snap not in have for snap in inputs.values()):
+        raise PinError("input snapshot table(s) missing")
+    frozen = {name: {"dataset": snap} for name, snap in inputs.items()}
     names = e.get("names") or list(tms)
-    names = [n for n in names if n in tms]
-    applied, pins = materialize(con, project, tms, names, dialect=dialect,
-                                source_overrides=overrides, branch=branch)
-    fps = {n: tm.fingerprint for n, tm in tms.items()}
-    save_manifest(module_path, fps)
-    record_run(module_path, {
-        "fingerprints": fps,
-        "applied": applied,
-        "pins": pins,
+    entry = {
+        "fingerprints": {n: tm.fingerprint for n, tm in tms.items()},
         "names": names,
         "dialect": e.get("dialect", getattr(dialect, "name", str(dialect))),
         "source_overrides": overrides or {},
         "branch": branch,
         "replay_of": e["run_id"],
-    })
+    }
+    applied, pins, rid = _frozen_materialize(
+        con, project, tms, entry, frozen,
+        expected_sources=e.get("source_fingerprints"), module_path=module_path)
+    recover_metadata(con, module_path)
     return applied, pins, e
 
 

@@ -182,6 +182,7 @@ class FnDecl(Node):
     name: str = ""
     params: List[Tuple[str, str]] = field(default_factory=list)
     body: Node = None
+    return_type: str = ""
 
 
 @dataclass

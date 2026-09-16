@@ -111,8 +111,10 @@ class Parser:
             chk.op = {"==": "==", "!=": "!=", ">": ">", "<": "<",
                       ">=": ">=", "<=": "<="}[self.expect("SYM").value]
             t = self.cur()
-            if self.at("INT") or self.at("FLOAT"):
-                chk.value = self.advance().value
+            if self.at("INT"):
+                chk.value = int(self.advance().value)
+            elif self.at("FLOAT"):
+                chk.value = float(self.advance().value)
             elif self.at("STR"):
                 chk.value = "".join(p[1] for p in self.advance().value)
             elif self.match("KW", "true") or self.match("KW", "false"):
@@ -392,7 +394,7 @@ class Parser:
                     break
         self.expect("SYM", ")")
         self.expect("SYM", "->")
-        self.parse_type_str()  # return type annotation (List<Model>)
+        decl.return_type = "".join(self.parse_type_str())
         braced = bool(self.match("SYM", "{"))
         decl.body = self.parse_expr()
         if braced:

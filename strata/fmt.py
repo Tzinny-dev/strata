@@ -1,16 +1,30 @@
 """Strata canonical formatter: AST -> text (idempotent)."""
 from __future__ import annotations
+from decimal import Decimal
+from math import isfinite
+
 from . import ast
+from .lexer import KEYWORDS, TYPE_KEYWORDS
 
 def _q(s: str) -> str:
-    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    # Escape literal interpolation markers; TemplateStr emits its variables separately.
+    escaped = (s.replace("\\", "\\\\").replace('"', '\\"')
+               .replace("\n", "\\n").replace("\t", "\\t").replace("${", "\\${"))
+    return '"' + escaped + '"'
+
+def _model_name(name: str) -> str:
+    if (name and (name[0].isalpha() or name[0] == "_")
+            and all(c.isalnum() or c == "_" for c in name)
+            and name not in KEYWORDS and name not in TYPE_KEYWORDS):
+        return name
+    return _q(name)
 
 def _field(f: ast.ContractField) -> str:
     t = f.type_spec
     if f.type_spec == "decimal":
         t = f"decimal({f.params[0]}, {f.params[1]})"
     elif f.type_spec == "array":
-        t = f"array<{f.params[0]}>"
+        t = f"array({f.params[0]})"
     elif f.type_spec == "money" and f.params:
         t = f"money({f.params[0]})"
     bits = [t]
@@ -23,8 +37,8 @@ def _field(f: ast.ContractField) -> str:
     if f.protected:
         bits.append("protected")
     if f.enum:
-        bits.append("enum {" + ", ".join(f.enum) + "}")
-    if f.classification:
+        bits.append("enum {" + ", ".join(v if v.isidentifier() else _q(v) for v in f.enum) + "}")
+    if f.classification is not None:
         bits.append(f"classification: {_q(f.classification)}")
     return f"{f.name} : {' '.join(bits)}"
 
@@ -33,10 +47,18 @@ def _expr(e: ast.Node) -> str:
         if isinstance(e.value, bool):
             return "true" if e.value else "false"
         if e.value is None:
-            return "none"
+            return "null"
         if isinstance(e.value, str):
             return _q(e.value)
-        return str(e.value)
+        if isinstance(e.value, float):
+            if not isfinite(e.value):
+                raise ValueError("float literal must be finite")
+            # The lexer accepts decimal notation, not scientific notation.
+            text = format(Decimal(str(e.value)), "f")
+            return text if "." in text else text + ".0"
+        if isinstance(e.value, int):
+            return str(e.value)
+        raise ValueError(f"unsupported literal: {type(e.value).__name__}")
     if isinstance(e, ast.ColumnRef):
         return f"{e.qualifier}.{e.name}" if e.qualifier else e.name
     if isinstance(e, ast.Call):
@@ -50,7 +72,28 @@ def _expr(e: ast.Node) -> str:
         return "(not " + _expr(e.operand) + ")" if e.op == "not" else "(-" + _expr(e.operand) + ")"
     if isinstance(e, ast.ListExpr):
         return "[" + ", ".join(_expr(i) for i in e.items) + "]"
-    return "..."
+    if isinstance(e, ast.TemplateStr):
+        parts = []
+        for kind, value in e.parts:
+            if kind == "lit":
+                parts.append(_q(value)[1:-1])
+            elif kind == "var":
+                parts.append("${" + value + "}")
+            else:
+                raise ValueError(f"unsupported template part: {kind!r}")
+        return '"' + "".join(parts) + '"'
+    if isinstance(e, ast.ListComprehension):
+        return f"[{_expr(e.body)} for {e.var} in {_expr(e.iterable)}]"
+    if isinstance(e, ast.ModelValue):
+        head = f"model {_expr(e.name)}"
+        if e.contract:
+            head += f" -> contract {e.contract}"
+        lines = [head + " {"]
+        lines.extend(f"  {key}: {_q(value)}" for key, value in e.attrs.items())
+        lines.extend(_stmts(e.stmts, "  "))
+        lines.append("}")
+        return "\n".join(lines)
+    raise ValueError(f"unsupported expression: {type(e).__name__}")
 
 def _stmts(stmts, ind: str):
     out = []
@@ -78,10 +121,12 @@ def _stmts(stmts, ind: str):
             out.extend(_stmts(s.body, ind + "  "))
             out.append(f"{ind})")
         elif isinstance(s, ast.SortStmt):
-            keys = ", ".join(("-" if d else "") + _expr(e) for e, d in s.keys)
+            keys = ", ".join(_expr(e) + (" desc" if d else "") for e, d in s.keys)
             out.append(f"{ind}sort {{{keys}}}")
         elif isinstance(s, ast.TakeStmt):
             out.append(f"{ind}take {s.limit}" if s.limit is not None else f"{ind}take {s.start}..{s.end}")
+        else:
+            raise ValueError(f"unsupported statement: {type(s).__name__}")
     return out
 
 def format_module(mod: ast.Module) -> str:
@@ -109,20 +154,23 @@ def format_module(mod: ast.Module) -> str:
                 out.append(f"  {_field(f)},")
             out.append("}")
         elif isinstance(d, ast.ModelDecl):
-            head = f"model {d.name}" + (f" -> contract {d.contract}" if d.contract else "")
+            head = f"model {_model_name(d.name)}" + (f" -> contract {d.contract}" if d.contract else "")
             out.append(head + " {")
             for k, v in d.attrs.items():
                 out.append(f'  {k}: {_q(v)}')
             out.extend(_stmts(d.stmts, "  "))
             out.append("}")
         elif isinstance(d, ast.FnDecl):
-            out.append(f"fn {d.name}(...) -> ... {{ {_expr(d.body)} }}")
+            params = ", ".join(f"{name}: {type_name}" for name, type_name in d.params)
+            if not d.return_type:
+                raise ValueError(f"function {d.name!r} has no return type annotation")
+            out.append(f"fn {d.name}({params}) -> {d.return_type} {{ {_expr(d.body)} }}")
         elif isinstance(d, ast.TestDecl):
             out.append(f"test {d.model} {{")
             for c in d.checks:
                 target = "row_count" if c.kind == "row_count" else c.col
-                rhs = _lit(c.value, "FLOAT" if isinstance(c.value, float) else None)
-                out.append(f"  expect {target} {c.op} {rhs},")
+                rhs = _expr(ast.Literal(value=c.value))
+                out.append(f"  expect {target} {c.op} {rhs};")
             out.append("}")
         elif isinstance(d, ast.PipelineDecl):
             out.append(f"pipeline {d.name} {{")
@@ -138,5 +186,7 @@ def format_module(mod: ast.Module) -> str:
             out.append("}")
         elif isinstance(d, ast.GeneratorDecl):
             out.append(_expr(d.call))
+        else:
+            raise ValueError(f"unsupported declaration: {type(d).__name__}")
         out.append("")
     return "\n".join(out).rstrip() + "\n"

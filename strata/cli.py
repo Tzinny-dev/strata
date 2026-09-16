@@ -630,20 +630,34 @@ def cmd_rollback(args):
                   "(nothing to repoint)", file=sys.stderr)
             return 1
         con = duckdb.connect(args.output)
-        names = list(fps)
-        branch = getattr(args, "branch", None) or e.get("branch", "main")
-        have = {r[0] for r in con.execute(
-            "SELECT table_name FROM information_schema.tables WHERE table_schema='main'").fetchall()}
-        missing = [n for n in names if exec_mod.staged_name(n, branch) not in have]
-        if missing:
+        if e.get("snapshots"):
+            # Snapshot-addressed rollback: repoint live views to the frozen
+            # tables recorded by that run (immune to later source changes).
+            try:
+                exec_mod.rollback_to_run(con, e)
+            except exec_mod.PinError as pe:
+                con.close()
+                print(f"error: E083: {pe}", file=sys.stderr)
+                return 1
             con.close()
-            print(f"error: E083: staged view(s) missing for branch {branch!r}: "
-                  f"{', '.join(missing)} — rollback cannot repoint to data that "
-                  "does not exist (fail-loud, no silent replay)", file=sys.stderr)
-            return 1
-        exec_mod.swap_branch(con, names, branch)
-        con.close()
-        print(f"repointed live views v_* <- stg_{branch}__* ({len(names)} view(s))")
+            print(f"repointed live views v_* <- snapshots of run {e['run_id']} "
+                  f"({len(e['snapshots'])} view(s))")
+        else:
+            # Pre-snapshot history: legacy staged-view repoint.
+            names = list(fps)
+            branch = getattr(args, "branch", None) or e.get("branch", "main")
+            have = {r[0] for r in con.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema='main'").fetchall()}
+            missing = [n for n in names if exec_mod.staged_name(n, branch) not in have]
+            if missing:
+                con.close()
+                print(f"error: E083: staged view(s) missing for branch {branch!r}: "
+                      f"{', '.join(missing)} — rollback cannot repoint to data that "
+                      "does not exist (fail-loud, no silent replay)", file=sys.stderr)
+                return 1
+            exec_mod.swap_branch(con, names, branch)
+            con.close()
+            print(f"repointed live views v_* <- stg_{branch}__* ({len(names)} view(s))")
     else:
         print("next strata run --only-stale will rebuild what diverged since")
     return 0
