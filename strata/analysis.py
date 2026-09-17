@@ -721,14 +721,33 @@ class _ModelState:
             code, msg = problem
             raise err(code, msg, e.span)
         if fn.collection:
-            self.tm.plan.collection_arg_types[id(e)] = (
-                fn.ret(args).t if name == "array_construct" else args[0].t)
+            # array_prepend's array is the second argument; json_build has no
+            # array base (its type is the return type).  Everything else uses
+            # args[0] as the collection base.
+            if name == "array_construct":
+                base_t = fn.ret(args).t
+            elif name == "json_build":
+                base_t = fn.ret(args).t
+            elif name == "array_prepend":
+                base_t = args[1].t
+            else:
+                base_t = args[0].t
+            self.tm.plan.collection_arg_types[id(e)] = base_t
         if fn.literal_key:
             key = e.args[1]
             if not isinstance(key, ast.Literal) or not functions.valid_json_key(key.value):
                 raise err(functions.E_JSON_KEY,
                           f'{name}() requires a literal object key matching [A-Za-z_][A-Za-z0-9_]*',
                           key.span)
+        if name == "json_build":
+            for i in range(0, len(e.args), 2):
+                key = e.args[i]
+                if not isinstance(key, ast.Literal) or not isinstance(key.value, str) \
+                        or not functions.valid_json_key(key.value):
+                    raise err(functions.E_JSON_KEY,
+                              f"json_build() key at position {i + 1} must be a "
+                              "simple ASCII identifier literal",
+                              key.span)
         return fn.ret(args)
 
     # -- date functions (date_add/date_sub/date_trunc/date_diff) -----------

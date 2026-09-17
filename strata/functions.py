@@ -137,8 +137,12 @@ def check(fn: Fn, args: List[Inf], has_star: bool = False) -> Optional[Tuple[str
             seen = ", ".join(str(a.t) for a in args)
             return ("E058", f"coalesce type mismatch ({seen})")
         return None
-    if fn.name in ("array_construct", "array_contains", "array_concat"):
+    if fn.name in ("array_construct", "array_contains", "array_concat",
+                   "array_append", "array_prepend", "array_remove",
+                   "array_index_of", "array_sort"):
         return _check_array_operation(fn, args)
+    if fn.name == "json_build":
+        return _check_json_build(fn, args)
     # Collection access needs a known container type (especially array_get's
     # element return type). A nullable typed column is fine, an untyped NULL is not.
     if fn.collection and args[0].t == UNKNOWN:
@@ -163,22 +167,52 @@ def _constructed_type(args: List[Inf]) -> StrataType:
     return array(next(a.t for a in args if a.t != UNKNOWN))
 
 
+def _check_json_build(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
+    if len(args) % 2 != 0:
+        return (E_ARITY,
+                "json_build() requires key/value pairs (even argument count)")
+    for i in range(0, len(args), 2):
+        # NULL keys are rejected by the literal-key check in infer_call; here
+        # we only validate that non-NULL keys are string-typed.
+        if args[i].t.name == "unknown":
+            continue
+        if args[i].t != STRING:
+            return E_ARG_TYPE, "json_build() keys must be strings"
+    return None
+
+
 def _check_array_operation(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
-    """Dependent signatures without implicit coercions or nested arrays."""
-    if fn.name == "array_construct":
-        known = [a.t for a in args if a.t != UNKNOWN]
-        if not known or known[0].name not in ARRAY_ELEMENTS or any(t != known[0] for t in known):
-            return (E_ARG_TYPE, "array_construct() requires homogeneous scalar elements and at least one known type")
+    if fn.name in ("array_append", "array_prepend", "array_remove", "array_index_of"):
+        base = args[0].t if fn.name != "array_prepend" else args[1].t
+        needle = args[1] if fn.name != "array_prepend" else args[0]
+        if base.name != "array" or base.elem is None or base.elem.name not in ARRAY_ELEMENTS:
+            return E_ARG_TYPE, f"{fn.name}() requires a typed one-dimensional array"
+        if base.elem == JSON:
+            return E_ARG_TYPE, f"{fn.name}() does not support JSON-typed arrays"
+        if needle.t not in (base.elem, UNKNOWN):
+            return E_ARG_TYPE, f"{fn.name}() needle type {needle.t} does not match array element {base.elem}"
         return None
-    base = args[0].t
-    if base.name != "array" or base.elem is None or base.elem.name not in ARRAY_ELEMENTS:
-        return (E_ARG_TYPE, f"{fn.name}() requires a typed one-dimensional array")
-    other = args[1].t
-    if fn.name == "array_concat":
-        if other != base:
-            return (E_ARG_TYPE, f"array_concat() requires identical array types, got {base} and {other}")
-    elif base.elem == JSON or other not in (base.elem, UNKNOWN):
-        return (E_ARG_TYPE, "array_contains() requires a matching scalar value; JSON equality is not supported")
+    if fn.name in ("array_construct", "array_contains", "array_concat"):
+        known = [a.t for a in args if a.t != UNKNOWN]
+        if fn.name == "array_construct":
+            if not known or known[0].name not in ARRAY_ELEMENTS or any(t != known[0] for t in known):
+                return E_ARG_TYPE, "array_construct() requires homogeneous scalar elements and at least one known type"
+        else:
+            base = args[0].t
+            if base.name != "array" or base.elem is None or base.elem.name not in ARRAY_ELEMENTS:
+                return E_ARG_TYPE, f"{fn.name}() requires a typed one-dimensional array"
+            other = args[1].t
+            if fn.name == "array_concat":
+                if other != base:
+                    return E_ARG_TYPE, f"array_concat() requires identical array types, got {base} and {other}"
+            elif base.elem == JSON or other not in (base.elem, UNKNOWN):
+                return E_ARG_TYPE, "array_contains() requires a matching scalar value; JSON equality is not supported"
+        return None
+    if fn.name in ("array_sort",):
+        base = args[0].t
+        if base.name != "array" or base.elem is None or base.elem.name not in ("int64", "float64", "string", "bool", "date", "timestamp"):
+            return E_ARG_TYPE, "array_sort() requires a typed one-dimensional array of comparable scalar elements"
+        return None
     return None
 
 
@@ -274,6 +308,29 @@ FUNCTIONS: List[Fn] = [
     Fn("array_concat", 2, lambda a: Inf(a[0].t, any(i.nullable for i in a)),
        max_args=2, collection=True,
        doc="concatenate same-typed arrays in order, preserving duplicates; NULL array returns NULL"),
+    Fn("array_append", 2, lambda a: Inf(a[0].t, True),
+       max_args=2, collection=True,
+       doc="append a scalar element to the end of a typed array; NULL tip/NULL array returns NULL"),
+    Fn("array_prepend", 2, lambda a: Inf(a[1].t, True),
+       max_args=2, collection=True,
+       doc="prepend a scalar element to the start of a typed array; NULL value/NULL array returns NULL"),
+    Fn("array_remove", 2, lambda a: Inf(a[0].t, True),
+       max_args=2, collection=True,
+       doc="remove all matching elements from a typed array; NULL needle has no effect, NULL array returns NULL"),
+    Fn("array_index_of", 2, lambda a: Inf(INT64, True),
+       max_args=2, collection=True,
+       doc="0-based position of the needle, normal across warehouses; NULL array/needle/no match returns NULL; NULL elements interrupt the scan"),
+    Fn("array_sort", 1, lambda a: Inf(a[0].t, True), max_args=1,
+       collection=True,
+       doc="stable ascending sort of a typed scalar array; NULL array returns NULL, NULL elements remain in unspecified order"),
+        Fn("json_build", 2, lambda a: Inf(JSON, True), max_args=-1,
+       collection=True, arg_kinds=("string", "any"),
+       doc="construct a JSON object from key/value pairs; simple ASCII keys; NULL values become JSON null, NULL keys are rejected"),
+    Fn("json_is_null", 1, lambda a: Inf(BOOL, True),
+       kind="json", collection=True, doc="true only for a JSON null value; SQL NULL returns NULL"),
+    Fn("json_get", 2, lambda a: Inf(JSON, True), max_args=2,
+       arg_kinds=("json", "string"), collection=True, literal_key=True,
+       doc="JSON member by literal simple key; missing member is SQL NULL, JSON null preserved"),
     Fn("json_get", 2, lambda a: Inf(JSON, True), max_args=2,
        arg_kinds=("json", "string"), collection=True, literal_key=True,
        doc="JSON member by literal simple key; missing member is SQL NULL, JSON null preserved"),

@@ -131,6 +131,45 @@ class Translator:
             raise RuntimeError(f"{name}() requires typed collection codegen")
         if len(e.args) < fn.min_args or (fn.max_args >= 0 and len(e.args) > fn.max_args):
             raise RuntimeError(f"malformed {name}() reached codegen")
+
+        # --- json_build: construct a JSON object from key/value pairs ---
+        if name == "json_build":
+            parts = []
+            for i in range(0, len(e.args), 2):
+                key = e.args[i]
+                val = e.args[i + 1]
+                if not isinstance(key, ast.Literal) or not isinstance(key.value, str):
+                    raise RuntimeError(f"json_build() key must be a string literal")
+                if not functions.valid_json_key(key.value):
+                    raise RuntimeError(f"json_build() invalid key: {key.value!r}")
+                parts.append(f"'{key.value}', {self.expr(val)}")
+            inner = ", ".join(parts)
+            if d == "duckdb":
+                return f"json_object({inner})"
+            elif d == "postgres":
+                return f"json_build_object({inner})"
+            elif d == "bigquery":
+                return f"JSON_OBJECT({inner})"
+            else:
+                return f"OBJECT_CONSTRUCT({inner})"
+
+        # --- json_is_null: distinguish JSON null from SQL NULL ---
+        if name == "json_is_null":
+            value = self.expr(e.args[0])
+            if d == "duckdb":
+                return (f"CASE WHEN {value} IS NULL THEN NULL "
+                        f"WHEN JSON_TYPE({value}) = 'NULL' THEN TRUE ELSE FALSE END")
+            elif d == "postgres":
+                return (f"CASE WHEN {value} IS NULL THEN NULL "
+                        f"WHEN {value}::jsonb = 'null'::jsonb THEN TRUE ELSE FALSE END")
+            elif d == "bigquery":
+                return (f"CASE WHEN {value} IS NULL THEN NULL "
+                        f"WHEN JSON_TYPE({value}) = 'NULL' THEN TRUE ELSE FALSE END")
+            else:
+                return (f"CASE WHEN {value} IS NULL THEN NULL "
+                        f"WHEN IS_NULL_VALUE({value}) THEN TRUE ELSE FALSE END")
+
+        # --- array_construct: homogeneous typed array literal ---
         if name == "array_construct":
             target = self.dialect.sql_type(base_t.elem.name)
             if target is None:
@@ -141,38 +180,14 @@ class Translator:
             if d == "snowflake":
                 return f"ARRAY_CONSTRUCT({args})"
             return f"{'ARRAY' if d == 'postgres' else ''}[{args}]"
-        base = self.expr(e.args[0])
-        if name in ("array_contains", "array_concat"):
-            other = self.expr(e.args[1])
-            if name == "array_concat":
-                if d == "duckdb":
-                    value = f"LIST_CONCAT({base}, {other})"
-                elif d == "postgres":
-                    value = f"ARRAY_CAT({base}, {other})"
-                elif d == "bigquery":
-                    value = f"ARRAY_CONCAT({base}, {other})"
-                else:
-                    value = f"ARRAY_CAT({base}, {other})"
-            else:
-                # Give an untyped NULL needle its element type for native
-                # polymorphic functions (notably Snowflake TO_VARIANT).
-                target = self.dialect.sql_type(base_t.elem.name)
-                needle = f"CAST({other} AS {target})"
-                if d == "duckdb":
-                    value = f"LIST_CONTAINS({base}, {needle})"
-                elif d == "postgres":
-                    value = f"COALESCE({needle} = ANY({base}), FALSE)"
-                elif d == "bigquery":
-                    value = f"COALESCE({needle} IN UNNEST({base}), FALSE)"
-                else:
-                    value = f"ARRAY_CONTAINS(TO_VARIANT({needle}), {base})"
-            return (f"CASE WHEN ({base}) IS NULL OR ({other}) IS NULL "
-                    f"THEN NULL ELSE {value} END")
+
+        # --- json_get / json_value: literal-key member access ---
         if fn.literal_key:
             key = e.args[1]
             if not isinstance(key, ast.Literal) or not functions.valid_json_key(key.value):
                 raise RuntimeError(f"{name}() requires a simple literal object key")
             path = _lit("$." + key.value)
+            base = self.expr(e.args[0])
             if d == "bigquery":
                 return f"{'JSON_QUERY' if name == 'json_get' else 'JSON_VALUE'}({base}, {path})"
             if d == "duckdb":
@@ -193,10 +208,125 @@ class Translator:
             if name == "json_get":
                 return value
             return f"CASE WHEN {kind} IN ({allowed}) THEN {scalar} ELSE NULL END"
+
+        # --- array functions: determine base (array) and other (non-array) ---
+        # array_prepend(scalar, array): array is args[1], scalar is args[0]
+        # all others: array is args[0], other is args[1]
+        if name == "array_prepend":
+            base = self.expr(e.args[1])
+            other = self.expr(e.args[0])
+        else:
+            base = self.expr(e.args[0])
+            other = self.expr(e.args[1]) if len(e.args) > 1 else None
+        target = self.dialect.sql_type(base_t.elem.name)
+
+        # --- array_concat: concatenate same-typed arrays ---
+        if name == "array_concat":
+            if d == "duckdb":
+                value = f"LIST_CONCAT({base}, {other})"
+            elif d == "postgres":
+                value = f"ARRAY_CAT({base}, {other})"
+            elif d == "bigquery":
+                value = f"ARRAY_CONCAT({base}, {other})"
+            else:
+                value = f"ARRAY_CAT({base}, {other})"
+            return (f"CASE WHEN ({base}) IS NULL OR ({other}) IS NULL "
+                    f"THEN NULL ELSE {value} END")
+
+        # --- array_contains: membership test ---
+        if name == "array_contains":
+            # Give an untyped NULL needle its element type for native
+            # polymorphic functions (notably Snowflake TO_VARIANT).
+            needle = f"CAST({other} AS {target})"
+            if d == "duckdb":
+                value = f"LIST_CONTAINS({base}, {needle})"
+            elif d == "postgres":
+                value = f"COALESCE({needle} = ANY({base}), FALSE)"
+            elif d == "bigquery":
+                value = f"COALESCE({needle} IN UNNEST({base}), FALSE)"
+            else:
+                value = f"ARRAY_CONTAINS(TO_VARIANT({needle}), {base})"
+            return (f"CASE WHEN ({base}) IS NULL OR ({other}) IS NULL "
+                    f"THEN NULL ELSE {value} END")
+
+        # --- array_append / array_prepend: scalar concat to array end/start ---
+        if name in ("array_append", "array_prepend"):
+            needle = f"CAST({other} AS {target})"
+            if name == "array_append":
+                if d == "duckdb":
+                    value = f"LIST_APPEND({base}, {needle})"
+                elif d == "postgres":
+                    value = f"ARRAY_APPEND({base}, {needle})"
+                elif d == "bigquery":
+                    value = f"ARRAY_CONCAT({base}, [CAST({other} AS {target})])"
+                else:
+                    value = f"ARRAY_APPEND({base}, TO_VARIANT({other}))"
+            else:  # array_prepend
+                if d == "duckdb":
+                    value = f"LIST_PREPEND({needle}, {base})"
+                elif d == "postgres":
+                    value = f"ARRAY_PREPEND({needle}, {base})"
+                elif d == "bigquery":
+                    value = f"ARRAY_CONCAT([CAST({other} AS {target})], {base})"
+                else:
+                    value = f"ARRAY_PREPEND(TO_VARIANT({other}), {base})"
+            return (f"CASE WHEN ({base}) IS NULL OR ({other}) IS NULL "
+                    f"THEN NULL ELSE {value} END")
+
+        # --- array_remove: remove all matching elements ---
+        if name == "array_remove":
+            needle = f"CAST({other} AS {target})"
+            if d == "duckdb":
+                # IS DISTINCT FROM keeps NULL elements when needle is non-NULL;
+                # the CASE wrapper makes NULL needle a no-op.
+                value = f"LIST_FILTER({base}, x -> x IS DISTINCT FROM {needle})"
+            elif d == "postgres":
+                value = f"ARRAY_REMOVE({base}, {needle})"
+            elif d == "bigquery":
+                value = f"ARRAY_FILTER({base}, x -> x IS NOT DISTINCT FROM {needle})"
+            else:
+                value = f"ARRAY_REMOVE({base}, TO_VARIANT({other}))"
+            # NULL base -> NULL; NULL needle -> no effect (return base)
+            return (f"CASE WHEN ({base}) IS NULL THEN NULL "
+                    f"WHEN ({other}) IS NULL THEN ({base}) "
+                    f"ELSE {value} END")
+
+        # --- array_index_of: 0-based position, NULL if not found ---
+        if name == "array_index_of":
+            needle = f"CAST({other} AS {target})"
+            if d == "duckdb":
+                value = f"list_position({base}, {needle}) - 1"
+            elif d == "postgres":
+                value = f"array_position({base}, {needle}) - 1"
+            elif d == "bigquery":
+                value = (f"(SELECT MIN(o) FROM UNNEST({base}) AS v WITH OFFSET o "
+                         f"WHERE v = {needle})")
+            else:
+                value = f"ARRAY_POSITION({base}, TO_VARIANT({needle}))"
+            # list_position / array_position returns NULL when not found,
+            # so the -1 naturally produces NULL.
+            return (f"CASE WHEN ({base}) IS NULL OR ({other}) IS NULL "
+                    f"THEN NULL ELSE {value} END")
+
+        # --- array_sort: stable ascending ---
+        if name == "array_sort":
+            if d == "duckdb":
+                value = f"ARRAY_SORT({base})"
+            elif d == "postgres":
+                value = (f"(SELECT ARRAY_AGG(v ORDER BY v) FROM UNNEST({base}) AS v)")
+            elif d == "bigquery":
+                value = f"ARRAY(SELECT x FROM UNNEST({base}) AS x ORDER BY x)"
+            else:
+                value = f"ARRAY_SORT({base}, TRUE, FALSE)"
+            return f"CASE WHEN ({base}) IS NULL THEN NULL ELSE {value} END"
+
+        # --- array_length ---
         length = (f"CARDINALITY({base})" if d == "postgres" else
                   f"ARRAY_SIZE({base})" if d == "snowflake" else f"ARRAY_LENGTH({base})")
         if name == "array_length":
             return f"CAST({length} AS {self.dialect.sql_type('int64')})"
+
+        # --- array_get: 0-based element access ---
         index = self.expr(e.args[1])
         # Guard before translating to a one-based index: no negative indexing
         # and no int64 overflow for e.g. 9223372036854775807 + 1.
