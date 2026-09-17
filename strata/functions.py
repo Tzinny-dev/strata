@@ -19,7 +19,7 @@ import re
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .types import (
-    Inf, StrataType, INT64, FLOAT64, STRING, BOOL, JSON, UNKNOWN, unify,
+    Inf, StrataType, INT64, FLOAT64, STRING, BOOL, JSON, UNKNOWN, array, unify,
 )
 
 # error codes owned by this module
@@ -137,6 +137,8 @@ def check(fn: Fn, args: List[Inf], has_star: bool = False) -> Optional[Tuple[str
             seen = ", ".join(str(a.t) for a in args)
             return ("E058", f"coalesce type mismatch ({seen})")
         return None
+    if fn.name in ("array_construct", "array_contains", "array_concat"):
+        return _check_array_operation(fn, args)
     # Collection access needs a known container type (especially array_get's
     # element return type). A nullable typed column is fine, an untyped NULL is not.
     if fn.collection and args[0].t == UNKNOWN:
@@ -149,6 +151,34 @@ def check(fn: Fn, args: List[Inf], has_star: bool = False) -> Optional[Tuple[str
             label = fn.ret_label or kind
             return (E_ARG_TYPE,
                     f"{fn.name}() argument {i} must be {label}, got {a.t}")
+    return None
+
+
+# Keep this slice aligned with the simple element types supported in schemas.
+ARRAY_ELEMENTS = frozenset({"int64", "float64", "string", "bool", "date",
+                            "timestamp", "uuid", "json"})
+
+
+def _constructed_type(args: List[Inf]) -> StrataType:
+    return array(next(a.t for a in args if a.t != UNKNOWN))
+
+
+def _check_array_operation(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
+    """Dependent signatures without implicit coercions or nested arrays."""
+    if fn.name == "array_construct":
+        known = [a.t for a in args if a.t != UNKNOWN]
+        if not known or known[0].name not in ARRAY_ELEMENTS or any(t != known[0] for t in known):
+            return (E_ARG_TYPE, "array_construct() requires homogeneous scalar elements and at least one known type")
+        return None
+    base = args[0].t
+    if base.name != "array" or base.elem is None or base.elem.name not in ARRAY_ELEMENTS:
+        return (E_ARG_TYPE, f"{fn.name}() requires a typed one-dimensional array")
+    other = args[1].t
+    if fn.name == "array_concat":
+        if other != base:
+            return (E_ARG_TYPE, f"array_concat() requires identical array types, got {base} and {other}")
+    elif base.elem == JSON or other not in (base.elem, UNKNOWN):
+        return (E_ARG_TYPE, "array_contains() requires a matching scalar value; JSON equality is not supported")
     return None
 
 
@@ -236,6 +266,14 @@ FUNCTIONS: List[Fn] = [
     Fn("right", 2, lambda a: Inf(STRING, a[0].nullable), max_args=2, kind="string",
        arg_kinds=("string", "int"),
        doc="last arg 2 characters of arg 1"),
+    Fn("array_construct", 1, lambda a: Inf(_constructed_type(a), False),
+       collection=True, doc="homogeneous scalar array; NULL elements preserved, at least one typed element"),
+    Fn("array_contains", 2, lambda a: Inf(BOOL, any(i.nullable for i in a)),
+       max_args=2, collection=True,
+       doc="membership by scalar equality; NULL array or needle returns NULL; NULL elements do not match"),
+    Fn("array_concat", 2, lambda a: Inf(a[0].t, any(i.nullable for i in a)),
+       max_args=2, collection=True,
+       doc="concatenate same-typed arrays in order, preserving duplicates; NULL array returns NULL"),
     Fn("json_get", 2, lambda a: Inf(JSON, True), max_args=2,
        arg_kinds=("json", "string"), collection=True, literal_key=True,
        doc="JSON member by literal simple key; missing member is SQL NULL, JSON null preserved"),

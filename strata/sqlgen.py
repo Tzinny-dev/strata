@@ -129,9 +129,45 @@ class Translator:
         base_t = self.plan.collection_arg_types.get(id(e))
         if base_t is None:
             raise RuntimeError(f"{name}() requires typed collection codegen")
-        if len(e.args) != fn.min_args:
+        if len(e.args) < fn.min_args or (fn.max_args >= 0 and len(e.args) > fn.max_args):
             raise RuntimeError(f"malformed {name}() reached codegen")
+        if name == "array_construct":
+            target = self.dialect.sql_type(base_t.elem.name)
+            if target is None:
+                raise RuntimeError(f"dialect {d!r} cannot construct array of {base_t.elem}")
+            # Cast each element, including NULL, so warehouse inference cannot
+            # disagree with the homogeneous Strata element type.
+            args = ", ".join(f"CAST({self.expr(a)} AS {target})" for a in e.args)
+            if d == "snowflake":
+                return f"ARRAY_CONSTRUCT({args})"
+            return f"{'ARRAY' if d == 'postgres' else ''}[{args}]"
         base = self.expr(e.args[0])
+        if name in ("array_contains", "array_concat"):
+            other = self.expr(e.args[1])
+            if name == "array_concat":
+                if d == "duckdb":
+                    value = f"LIST_CONCAT({base}, {other})"
+                elif d == "postgres":
+                    value = f"ARRAY_CAT({base}, {other})"
+                elif d == "bigquery":
+                    value = f"ARRAY_CONCAT({base}, {other})"
+                else:
+                    value = f"ARRAY_CAT({base}, {other})"
+            else:
+                # Give an untyped NULL needle its element type for native
+                # polymorphic functions (notably Snowflake TO_VARIANT).
+                target = self.dialect.sql_type(base_t.elem.name)
+                needle = f"CAST({other} AS {target})"
+                if d == "duckdb":
+                    value = f"LIST_CONTAINS({base}, {needle})"
+                elif d == "postgres":
+                    value = f"COALESCE({needle} = ANY({base}), FALSE)"
+                elif d == "bigquery":
+                    value = f"COALESCE({needle} IN UNNEST({base}), FALSE)"
+                else:
+                    value = f"ARRAY_CONTAINS(TO_VARIANT({needle}), {base})"
+            return (f"CASE WHEN ({base}) IS NULL OR ({other}) IS NULL "
+                    f"THEN NULL ELSE {value} END")
         if fn.literal_key:
             key = e.args[1]
             if not isinstance(key, ast.Literal) or not functions.valid_json_key(key.value):

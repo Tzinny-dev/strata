@@ -721,7 +721,8 @@ class _ModelState:
             code, msg = problem
             raise err(code, msg, e.span)
         if fn.collection:
-            self.tm.plan.collection_arg_types[id(e)] = args[0].t
+            self.tm.plan.collection_arg_types[id(e)] = (
+                fn.ret(args).t if name == "array_construct" else args[0].t)
         if fn.literal_key:
             key = e.args[1]
             if not isinstance(key, ast.Literal) or not functions.valid_json_key(key.value):
