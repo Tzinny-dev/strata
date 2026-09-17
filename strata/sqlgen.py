@@ -82,6 +82,11 @@ class Translator:
             return f"({self.expr(e.left)} {op} {self.expr(e.right)})"
         if isinstance(e, ast.Call):
             name = e.name
+            fn = functions.get(name)
+            if fn is not None and fn.collection:
+                return self._collection_call(e, fn)
+            if fn is not None and fn.unit_names is not None:
+                return self._date_call(e, name)
             args = ", ".join(self.expr(a) for a in e.args)
             if name == "cast":
                 spec = e.args[1].value if len(e.args) > 1 and isinstance(e.args[1], ast.Literal) else "string"
@@ -115,6 +120,175 @@ class Translator:
         if isinstance(e, ast.Star):
             return "*"
         raise ValueError(f"cannot codegen {type(e).__name__}")
+
+    def _collection_call(self, e: ast.Call, fn: functions.Fn) -> str:
+        """Portable object-member and one-dimensional array access."""
+        d, name = self.dialect.name, fn.name
+        if d not in ("duckdb", "postgres", "bigquery", "snowflake"):
+            raise RuntimeError(f"dialect {d!r} cannot express {name}()")
+        base_t = self.plan.collection_arg_types.get(id(e))
+        if base_t is None:
+            raise RuntimeError(f"{name}() requires typed collection codegen")
+        if len(e.args) != fn.min_args:
+            raise RuntimeError(f"malformed {name}() reached codegen")
+        base = self.expr(e.args[0])
+        if fn.literal_key:
+            key = e.args[1]
+            if not isinstance(key, ast.Literal) or not functions.valid_json_key(key.value):
+                raise RuntimeError(f"{name}() requires a simple literal object key")
+            path = _lit("$." + key.value)
+            if d == "bigquery":
+                return f"{'JSON_QUERY' if name == 'json_get' else 'JSON_VALUE'}({base}, {path})"
+            if d == "duckdb":
+                value = f"JSON_EXTRACT({base}, {path})"
+                scalar = f"JSON_EXTRACT_STRING({base}, {path})"
+                kind = f"JSON_TYPE({value})"
+                allowed = "'VARCHAR', 'BOOLEAN', 'BIGINT', 'UBIGINT', 'DOUBLE'"
+            elif d == "postgres":
+                value = f"({base} -> {_lit(key.value)})"
+                scalar = f"({base} ->> {_lit(key.value)})"
+                kind = f"JSONB_TYPEOF({value})"
+                allowed = "'string', 'boolean', 'number'"
+            else:
+                value = f"GET({base}, {_lit(key.value)})"
+                scalar = f"CAST({value} AS VARCHAR)"
+                kind = f"TYPEOF({value})"
+                allowed = "'VARCHAR', 'BOOLEAN', 'INTEGER', 'DECIMAL', 'DOUBLE'"
+            if name == "json_get":
+                return value
+            return f"CASE WHEN {kind} IN ({allowed}) THEN {scalar} ELSE NULL END"
+        length = (f"CARDINALITY({base})" if d == "postgres" else
+                  f"ARRAY_SIZE({base})" if d == "snowflake" else f"ARRAY_LENGTH({base})")
+        if name == "array_length":
+            return f"CAST({length} AS {self.dialect.sql_type('int64')})"
+        index = self.expr(e.args[1])
+        # Guard before translating to a one-based index: no negative indexing
+        # and no int64 overflow for e.g. 9223372036854775807 + 1.
+        if d == "duckdb":
+            value = f"LIST_EXTRACT({base}, ({index}) + 1)"
+        elif d == "postgres":
+            value = f"({base})[CAST(({index}) + ARRAY_LOWER({base}, 1) AS INTEGER)]"
+        elif d == "bigquery":
+            value = f"({base})[SAFE_OFFSET({index})]"
+        else:
+            value = f"GET({base}, {index})"
+            if base_t.elem != JSON:
+                target = self.dialect.sql_type(base_t.elem.name)
+                if target is None:
+                    raise RuntimeError(f"dialect {d!r} cannot express array_get of {base_t.elem}")
+                value = f"CAST({value} AS {target})"
+        return (f"CASE WHEN ({index}) >= 0 AND ({index}) < {length} "
+                f"THEN {value} ELSE NULL END")
+
+    def _date_call(self, e: ast.Call, name: str) -> str:
+        """Calendar arithmetic; timestamps are UTC civil time, weeks start Monday."""
+        d = self.dialect
+        if d.name not in ("duckdb", "postgres", "bigquery", "snowflake"):
+            raise RuntimeError(f"dialect {d.name!r} cannot express {name}()")
+        base_t = self.plan.date_arg_types.get(id(e))
+        if base_t is None:
+            raise RuntimeError(
+                f"{name}() reached codegen untyped (plan.date_arg_types is "
+                f"missing the call); the typechecker must run first")
+        args = e.args
+        shifting = name in ("date_add", "date_sub")
+        if len(args) != (3 if name == "date_diff" else 2):
+            raise RuntimeError(f"malformed {name}() reached codegen")
+        unit_arg = args[-1]
+        if shifting:
+            if not isinstance(unit_arg, ast.Kwarg):
+                raise RuntimeError(f"{name}() requires a unit keyword and amount")
+            unit = unit_arg.name
+        else:
+            if not isinstance(unit_arg, ast.Literal) or not isinstance(unit_arg.value, str):
+                raise RuntimeError(f"{name}() requires a literal unit")
+            unit = unit_arg.value
+        problem = functions.check_date_call(functions.get(name), unit)
+        if problem is not None:
+            raise RuntimeError(problem[1])
+        if shifting:
+            return self._shift(name, args[0], unit, self.expr(unit_arg.value), base_t)
+        unit = "week" if unit == "weeks" else unit
+        base = self.expr(args[0])
+        if name == "date_trunc":
+            if d.name == "bigquery":
+                part = "WEEK(MONDAY)" if unit == "week" else unit.upper()
+                if base_t.name == "timestamp":
+                    return f"TIMESTAMP_TRUNC({base}, {part}, 'UTC')"
+                return f"DATE_TRUNC({base}, {part})"
+            sql = (self._monday(base) if d.name == "snowflake" and unit == "week"
+                   else f"DATE_TRUNC('{unit}', {base})")
+            # DuckDB can return DATE even for TIMESTAMP truncation.
+            return f"CAST({sql} AS {d.cast_target(base_t.name)})"
+        if name != "date_diff":
+            raise RuntimeError(f"no date emitter for {name}()")
+        return self._date_diff(base, self.expr(args[1]), unit)
+
+    def _monday(self, sql: str) -> str:
+        """Monday midnight, independent of Snowflake's WEEK_START setting."""
+        if self.dialect.name == "snowflake":
+            return f"DATEADD(day, 1 - DAYOFWEEKISO({sql}), DATE_TRUNC('day', {sql}))"
+        return f"DATE_TRUNC('week', {sql})"
+
+    def _date_diff(self, start: str, end: str, unit: str) -> str:
+        """Count crossed calendar boundaries, not elapsed whole durations."""
+        d = self.dialect
+        if d.name == "bigquery":
+            part = "WEEK(MONDAY)" if unit == "week" else unit.upper()
+            # BigQuery TIMESTAMP -> DATE uses UTC; DATE_DIFF counts civil boundaries.
+            sql = f"DATE_DIFF(CAST({end} AS DATE), CAST({start} AS DATE), {part})"
+        elif unit == "week" and d.name in ("duckdb", "postgres", "snowflake"):
+            a, b = (f"CAST({self._monday(s)} AS DATE)" for s in (start, end))
+            days = f"DATEDIFF(day, {a}, {b})" if d.name == "snowflake" else f"({b} - {a})"
+            sql = f"({days} / 7)"
+        elif d.name == "duckdb":
+            sql = f"DATE_DIFF('{unit}', {start}, {end})"
+        elif d.name == "snowflake":
+            sql = f"DATEDIFF({unit}, {start}, {end})"
+        elif d.name == "postgres":
+            if unit == "day":
+                sql = f"(CAST({end} AS DATE) - CAST({start} AS DATE))"
+            else:
+                def index(s):
+                    year = f"EXTRACT(YEAR FROM {s})"
+                    if unit == "year":
+                        return year
+                    scale = 12 if unit == "month" else 4
+                    return f"({year} * {scale} + EXTRACT({unit.upper()} FROM {s}))"
+                sql = f"({index(end)} - {index(start)})"
+        else:
+            raise RuntimeError(f"dialect {d.name!r} cannot express date_diff()")
+        return f"CAST({sql} AS {d.cast_target('int64')})"
+
+    def _shift(self, name: str, base: ast.Node, unit: str, amount: str, base_t) -> str:
+        """Shift by a calendar interval, preserving the analyzed base type."""
+        d = self.dialect
+        u = unit[:-1].upper()  # plural kwarg -> singular interval unit
+        op = "-" if name == "date_sub" else "+"
+        base_sql = self.expr(base)
+        if d.name == "duckdb":
+            sql = f"({base_sql} {op} ({amount}) * INTERVAL 1 {u})"
+        elif d.name == "postgres":
+            interval = "3 MONTH" if u == "QUARTER" else f"1 {u}"
+            sql = f"({base_sql} {op} ({amount}) * INTERVAL '{interval}')"
+        elif d.name == "bigquery":
+            suffix = "SUB" if name == "date_sub" else "ADD"
+            if base_t.name == "timestamp":
+                return (f"TIMESTAMP(DATETIME_{suffix}(DATETIME({base_sql}, 'UTC'), "
+                        f"INTERVAL ({amount}) {u}), 'UTC')")
+            sql = f"DATE_{suffix}({base_sql}, INTERVAL ({amount}) {u})"
+        elif d.name == "snowflake":
+            n = f"-({amount})" if name == "date_sub" else f"({amount})"
+            sql = f"DATEADD({u}, {n}, {base_sql})"
+        else:
+            raise RuntimeError(f"dialect {d.name!r} cannot express {name}()")
+        return self._as_date_if_base(sql, base_t)
+
+    def _as_date_if_base(self, sql: str, base_t) -> str:
+        """DuckDB/Postgres interval arithmetic promotes DATE; restore its type."""
+        if base_t.name == "date" and self.dialect.name in ("duckdb", "postgres"):
+            return f"CAST({sql} AS DATE)"
+        return sql
 
     def window_sql(self, e: ast.WindowCall) -> str:
         """`FN(args) OVER (PARTITION BY ... ORDER BY ...)` — standard in all
@@ -168,7 +342,7 @@ def gen_base_subquery(plan, dialect=DUCKDB, upstream_prefix: str = "v_") -> str:
         froms.append(f"{kind} {jtable} t{j.index} ON {on_sql}")
     base = "SELECT " + ", ".join(selects) + "\nFROM " + "\n  ".join(froms)
     if plan.preds:  # pre-aggregation filters live in base subquery for cleanliness
-        t2 = Translator(plan, _RAW)
+        t2 = Translator(plan, _RAW, dialect=dialect)
         base += "\nWHERE " + " AND ".join(t2.expr(p) for p in plan.preds)
     
     return base

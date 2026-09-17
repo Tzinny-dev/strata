@@ -32,6 +32,17 @@ class Call(Node):
 
 
 @dataclass
+class Kwarg(Node):
+    """`name: value` argument inside a call: e.g. `date_add(d, years: 1)`.
+
+    Not a general keyword-argument mechanism — the callee declares which
+    keyword names it accepts (the typechecker rejects the rest).
+    """
+    name: str = ""
+    value: Node = None
+
+
+@dataclass
 class Star(Node):
     """`*` as a call argument: only valid inside count(*)."""
     pass

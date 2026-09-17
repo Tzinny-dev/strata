@@ -497,7 +497,23 @@ class Parser:
                 self.advance()
                 if not self.at("SYM", ")"):
                     while True:
-                        args.append(self.parse_expr())
+                        # Keyword values remain ordinary expressions. Both
+                        # argument forms share the comma/closing-paren path.
+                        if self.at("ID") and self.peek(1).kind == "SYM" and self.peek(1).value == ":":
+                            key_tok = self.advance()
+                            self.advance()  # ':'
+                            args.append(ast.Kwarg(name=key_tok.value, value=self.parse_expr(),
+                                                  span=self.span(key_tok)))
+                        else:
+                            arg = self.parse_expr()
+                            # Only the unit slot interprets bare identifiers
+                            # symbolically; columns named day/month elsewhere
+                            # retain their ordinary meaning.
+                            unit_slot = ((t.value == "date_trunc" and len(args) == 1)
+                                         or (t.value == "date_diff" and len(args) == 2))
+                            if unit_slot and isinstance(arg, ast.ColumnRef) and arg.qualifier is None:
+                                arg = ast.Literal(value=arg.name, span=arg.span)
+                            args.append(arg)
                         if not self.match("SYM", ","):
                             break
                 self.expect("SYM", ")")

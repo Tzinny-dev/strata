@@ -66,7 +66,7 @@ class TestCatalogShape(unittest.TestCase):
         self.assertNotIn("upper", functions.AGGREGATES)
 
     def test_only_declared_functions_speak_sql(self):
-        self.assertIsNone(functions.get("date_add"))
+        self.assertIsNone(functions.get("nullif_zero"))
         self.assertEqual(functions.emit_sql("upper", "x", DUCKDB), "UPPER(x)")
 
 
@@ -191,7 +191,7 @@ class TestSqlSpelling(unittest.TestCase):
 
     def test_codegen_refuses_functions_the_catalog_does_not_declare(self):
         with self.assertRaises(RuntimeError):
-            functions.emit_sql("date_add", "x", None)
+            functions.emit_sql("nullif_zero", "x", None)
 
 
 class TestStringFunctions(unittest.TestCase):

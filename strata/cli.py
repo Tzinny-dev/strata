@@ -38,6 +38,15 @@ def cmd_build(args):
     proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
     tms = check(proj, args.model)
     names = args.model or list(tms)
+    if getattr(args, "strict", False):
+        # Strict contract mode (§1): a typed model without a declared
+        # contract fails the build (E014) instead of passing silently —
+        # verify_contract only checks models that declare one.
+        bare = [n for n, tm in tms.items() if not tm.contract]
+        if bare:
+            print("error: E014: strict mode requires every built model to declare "
+                  f"-> contract: {', '.join(sorted(bare))}", file=sys.stderr)
+            return 2
     print(render_build(proj, tms, names))
     return 0
 
@@ -718,6 +727,8 @@ def main(argv=None):
     p.add_argument("file")
     p.add_argument("model", nargs="*")
     p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
+    p.add_argument("--strict", action="store_true",
+                   help="fail (E014) unless every built model declares -> contract")
     p.set_defaults(fn=cmd_build)
 
     p = sub.add_parser("compile", help="emit SQL")

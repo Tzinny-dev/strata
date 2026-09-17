@@ -309,9 +309,14 @@ RULES["column-ref"] = ("bare or schema-qualified column", [
     r'ident ("." ident)?',
 ])
 
+RULES["kwarg"] = ("named call argument", [r'ident ":" expr'])
+RULES["call-arg"] = ("positional or named argument", ["expr", "kwarg"])
+RULES["call-args"] = ("comma-separated call arguments", [
+    r'call-arg ("," call-arg)*',
+])
 RULES["call-expr"] = ("built-in or user call", [
-    r'ident "(" expr-list? ")"',
-    r'ident "(" expr-list? ")" "over" "(" window-spec-list? ")"',
+    r'ident "(" call-args? ")"',
+    r'ident "(" call-args? ")" "over" "(" window-spec-list? ")"',
 ])
 
 RULES["window-spec-list"] = ("over clauses, comma separated", [

@@ -66,6 +66,8 @@ def _expr(e: ast.Node) -> str:
             items = ", ".join(_expr(i) for i in e.args[1].items)
             return f"{_expr(e.args[0])} in [{items}]"
         return f"{e.name}({', '.join(_expr(a) for a in e.args)})"
+    if isinstance(e, ast.Kwarg):
+        return f"{e.name}: {_expr(e.value)}"
     if isinstance(e, ast.Star):
         return "*"
     if isinstance(e, ast.WindowCall):

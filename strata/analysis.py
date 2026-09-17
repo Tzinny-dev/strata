@@ -17,7 +17,7 @@ from . import ast
 from . import functions
 from .types import (
     StrataType, Inf, INT64, FLOAT64, STRING, BOOL, DATE, TIMESTAMP, UUID, JSON,
-    UNKNOWN, decimal, money, binary_type, unify, Col,
+    UNKNOWN, decimal, money, array, binary_type, unify, Col,
 )
 
 
@@ -109,6 +109,12 @@ class Plan:
     sorts: List[Tuple[ast.Node, bool]] = field(default_factory=list)
     limit: Optional[Tuple[Optional[int], Optional[int]]] = None
     grouped: bool = False
+    # id(ast.Call) -> StrataType of the temporal base argument, filled by the
+    # date-function typing path: sqlgen needs it to know where DATE must be
+    # preserved (DuckDB/Postgres promote to TIMESTAMP on month/year math).
+    date_arg_types: Dict[int, StrataType] = field(default_factory=dict)
+    # Container type for collection calls; Snowflake GET needs an element cast.
+    collection_arg_types: Dict[int, StrataType] = field(default_factory=dict)
 
 
 @dataclass
@@ -141,6 +147,8 @@ def type_from_spec(spec: str, params: List[object]) -> StrataType:
     if spec == "money":
         return money(params[0] if params else "USD")
     if spec == "array":
+        if len(params) != 1 or params[0] not in TYPE_FROM_KW:
+            raise err("E063", "array elements must be a supported scalar type (nested/parameterized types are not supported)")
         return array(TYPE_FROM_KW[params[0]])
     return UNKNOWN
 
@@ -253,6 +261,9 @@ class FnEvaluator:
             return e
         if isinstance(e, ast.Call):
             e.args = [self._subst_expr(a, env) for a in e.args]
+            return e
+        if isinstance(e, ast.Kwarg):
+            e.value = self._subst_expr(e.value, env)
             return e
         return e
 
@@ -626,6 +637,9 @@ class _ModelState:
             return self.infer_call(e, window_allowed=True)
         if isinstance(e, ast.WindowCall):
             return self.infer_window(e)
+        if isinstance(e, ast.Kwarg):
+            raise err(functions.E_DATE_ARG,
+                      "keyword arguments are only allowed as date_add/date_sub units", e.span)
         if isinstance(e, ast.Star):
             raise err(functions.E_STRAY_STAR, "'*' is only valid as count(*)", e.span)
         raise err("E055", f"unsupported expression {type(e).__name__}", e.span)
@@ -671,11 +685,15 @@ class _ModelState:
         elif isinstance(e, (ast.BinOp,)):
             self._reject_nested_window(e.left, span)
             self._reject_nested_window(e.right, span)
+        elif isinstance(e, ast.Kwarg):
+            self._reject_nested_window(e.value, span)
         elif isinstance(e, ast.UnOp):
             self._reject_nested_window(e.operand, span)
 
     def infer_call(self, e: ast.Call, window_allowed: bool = False) -> Inf:
         name = e.name
+        if name == "cast" and any(isinstance(a, ast.Kwarg) for a in e.args):
+            raise err(functions.E_DATE_ARG, "cast() does not accept keyword arguments", e.span)
         if name == "cast":
             # cast() takes a type name (not an expression) as its second
             # argument, so it stays a language construct rather than a catalog
@@ -695,11 +713,67 @@ class _ModelState:
         if star and not fn.accepts_star:
             raise err(functions.E_STRAY_STAR,
                       f"'*' is only valid as count(*), not in {name}()", e.span)
+        if name in ("date_add", "date_sub", "date_trunc", "date_diff"):
+            return self.infer_date_call(e, fn)
         args = [Inf(INT64, False)] if star else [self.infer(a) for a in e.args]
         problem = functions.check(fn, args, has_star=bool(star))
         if problem is not None:
             code, msg = problem
             raise err(code, msg, e.span)
+        if fn.collection:
+            self.tm.plan.collection_arg_types[id(e)] = args[0].t
+        if fn.literal_key:
+            key = e.args[1]
+            if not isinstance(key, ast.Literal) or not functions.valid_json_key(key.value):
+                raise err(functions.E_JSON_KEY,
+                          f'{name}() requires a literal object key matching [A-Za-z_][A-Za-z0-9_]*',
+                          key.span)
+        return fn.ret(args)
+
+    # -- date functions (date_add/date_sub/date_trunc/date_diff) -----------
+    # A date call carries a *symbolic unit* (kwarg name or unit literal) plus
+    # a base argument whose type decides the SQL shape per dialect, so it is
+    # typed apart from plain-argument functions: same arity/kind rules as the
+    # catalog (functions.check), the unit checked against the function's
+    # unit_names, and the base argument's type recorded on the Plan so codegen
+    # knows where DATE must be preserved across dialects that promote to
+    # TIMESTAMP with month/year arithmetic (DuckDB/Postgres).
+
+    def infer_date_call(self, e: ast.Call, fn: "functions.Fn") -> Inf:
+        # Check arity before indexing; symbolic units never resolve as columns.
+        if len(e.args) != fn.min_args:
+            raise err(functions.E_ARITY,
+                      f"{fn.name}() takes exactly {fn.min_args} arguments", e.span)
+        base = self.infer(e.args[0])
+        if base.t not in (DATE, TIMESTAMP):
+            raise err(functions.E_ARG_TYPE,
+                      f"{fn.name}() argument 1 must be date or timestamp, got {base.t}", e.span)
+        if fn.name in ("date_add", "date_sub"):
+            kw = e.args[1]
+            if not isinstance(kw, ast.Kwarg):
+                raise err(functions.E_DATE_ARG,
+                          f"{fn.name}() requires a unit kwarg, e.g. days: 1", e.span)
+            unit = kw.name
+            args = [base, self.infer(kw.value)]
+        else:
+            unit_arg = e.args[-1]
+            if not isinstance(unit_arg, ast.Literal) or not isinstance(unit_arg.value, str):
+                raise err(functions.E_DATE_ARG,
+                          f"{fn.name}() requires a symbolic unit or string literal", e.span)
+            unit = unit_arg.value
+            args = [base]
+            if fn.name == "date_diff":
+                second = self.infer(e.args[1])
+                if base.t != second.t:
+                    raise err(functions.E_DATE_TYPE,
+                              "date_diff() arguments must share one temporal type", e.span)
+                args.append(second)
+            args.append(Inf(STRING, False))
+        problem = functions.check_date_call(fn, unit) or functions.check(fn, args)
+        if problem is not None:
+            code, msg = problem
+            raise err(code, msg, e.span)
+        self.tm.plan.date_arg_types[id(e)] = base.t
         return fn.ret(args)
 
     # -- statements -----------------------------------------------------
@@ -796,6 +870,8 @@ class _ModelState:
                     return hit
         elif isinstance(e, ast.BinOp):
             return self._find_window(e.left) or self._find_window(e.right)
+        elif isinstance(e, ast.Kwarg):
+            return self._find_window(e.value)
         elif isinstance(e, ast.UnOp):
             return self._find_window(e.operand)
         return None
@@ -852,6 +928,10 @@ class _ModelState:
             if not out:
                 out = [Origin(self.tm.name, f"<{e.name}>", "derived")]
             return [Origin(o.node, o.col, kind) for o in out]
+        if isinstance(e, ast.Kwarg):
+            # Keyword argument (date unit): lineage follows the value; the
+            # unit name itself is compile-time vocabulary, not data.
+            return self._origin_of_expr(e.value)
         if isinstance(e, ast.BinOp):
             return self._origin_of_expr(e.left) + self._origin_of_expr(e.right)
         if isinstance(e, ast.UnOp):

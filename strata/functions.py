@@ -15,10 +15,11 @@ differently overrides this catalog; the catalog is the default.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .types import (
-    Inf, StrataType, INT64, FLOAT64, STRING, BOOL, UNKNOWN, unify,
+    Inf, StrataType, INT64, FLOAT64, STRING, BOOL, JSON, UNKNOWN, unify,
 )
 
 # error codes owned by this module
@@ -26,14 +27,19 @@ E_ARITY = "E062"
 E_ARG_TYPE = "E063"
 E_STRAY_STAR = "E064"
 E_WINDOW_PLACEMENT = "E065"
+E_DATE_UNIT = "E071"
+E_DATE_ARG = "E072"
+E_DATE_TYPE = "E073"
+E_JSON_KEY = "E074"
+
+
+def valid_json_key(value) -> bool:
+    """Portable first slice: literal ASCII object keys, not path expressions."""
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value) is not None
 
 
 def _numeric(a: Inf) -> bool:
     return a.t.is_numeric() or a.t.is_money()
-
-
-def _kind_label(fn: Fn, i: int) -> str:
-    return fn.arg_kinds[i - 1] if i <= len(fn.arg_kinds) else fn.kind
 
 
 def _kind_label(fn: Fn, i: int) -> str:
@@ -45,6 +51,9 @@ _KINDS: Dict[str, Callable[[Inf], bool]] = {
     "numeric": _numeric,
     "string": lambda a: a.t == STRING,
     "int": lambda a: a.t == INT64,
+    "temporal": lambda a: a.t.name in ("date", "timestamp"),
+    "json": lambda a: a.t == JSON,
+    "array": lambda a: a.t.name == "array" and a.t.elem is not None,
 }
 
 
@@ -70,6 +79,9 @@ class Fn:
     accepts_star: bool = False         # count(*)
     sql: Optional[str] = None          # SQL spelling; default upper(name)
     doc: str = ""
+    unit_names: Optional[frozenset] = None   # date fns: legal unit spellings
+    collection: bool = False          # requires typed collection codegen
+    literal_key: bool = False         # simple JSON object key, not JSONPath
 
     @property
     def sql_name(self) -> str:
@@ -104,7 +116,11 @@ def check(fn: Fn, args: List[Inf], has_star: bool = False) -> Optional[Tuple[str
     """Return (code, message) when the call is malformed, else None.
 
     Pure on purpose: the checker owns error construction and spans, so this
-    module stays free of the analysis layer.
+    module stays free of the analysis layer. Date functions (``date_add``/
+    ``date_sub``/``date_trunc``/``date_diff``) carry a ``unit_names`` table;
+    their symbolic-unit validation lives in ``check_date_call`` because a
+    unit is not an argument kind — it is a keyword name (``years: 1``) or a
+    unit literal (``month``) spelled per warehouse at codegen.
     """
     if has_star:
         if not fn.accepts_star:
@@ -121,6 +137,10 @@ def check(fn: Fn, args: List[Inf], has_star: bool = False) -> Optional[Tuple[str
             seen = ", ".join(str(a.t) for a in args)
             return ("E058", f"coalesce type mismatch ({seen})")
         return None
+    # Collection access needs a known container type (especially array_get's
+    # element return type). A nullable typed column is fine, an untyped NULL is not.
+    if fn.collection and args[0].t == UNKNOWN:
+        return (E_ARG_TYPE, f"{fn.name}() requires a typed container, not an untyped NULL")
     for i, a in enumerate(args, 1):
         if a.t.name == "unknown":
             continue                   # NULL literal adapts to the other args
@@ -132,6 +152,17 @@ def check(fn: Fn, args: List[Inf], has_star: bool = False) -> Optional[Tuple[str
     return None
 
 
+def check_date_call(fn: Fn, unit: str) -> Optional[Tuple[str, str]]:
+    """Validate the symbolic unit of a date call (`years: 1` kwarg name or
+    `month` unit literal). Split from ``check`` because the unit is not an
+    expression argument — the caller (analysis) extracts it from the AST."""
+    if fn.unit_names is not None and unit not in fn.unit_names:
+        return (E_DATE_UNIT,
+                f"{fn.name}() unit {unit!r} is not supported (have: "
+                f"{', '.join(sorted(fn.unit_names))})")
+    return None
+
+
 # ---------------------------------------------------------------- the catalog
 
 def _same(a: List[Inf]) -> Inf:
@@ -140,6 +171,14 @@ def _same(a: List[Inf]) -> Inf:
 
 def _unified(a: List[Inf]) -> Inf:
     return Inf(_unify_all(a), all(i.nullable for i in a))
+
+
+# Legal units per date function. `date_add`/`date_sub` take the unit as a
+# kwarg name (`date_add(d, years: 1)`); `date_trunc`/`date_diff` take it as
+# the unit literal (`date_trunc(d, month)`, `date_diff(a, b, day)`). One
+# language surface per family; per-dialect spelling lives in sqlgen.
+DATE_ADD_UNITS = frozenset({"years", "quarters", "months", "weeks", "days"})
+DATE_TRUNC_UNITS = frozenset({"year", "quarter", "month", "week", "day"})
 
 
 FUNCTIONS: List[Fn] = [
@@ -197,6 +236,39 @@ FUNCTIONS: List[Fn] = [
     Fn("right", 2, lambda a: Inf(STRING, a[0].nullable), max_args=2, kind="string",
        arg_kinds=("string", "int"),
        doc="last arg 2 characters of arg 1"),
+    Fn("json_get", 2, lambda a: Inf(JSON, True), max_args=2,
+       arg_kinds=("json", "string"), collection=True, literal_key=True,
+       doc="JSON member by literal simple key; missing member is SQL NULL, JSON null preserved"),
+    Fn("json_value", 2, lambda a: Inf(STRING, True), max_args=2,
+       arg_kinds=("json", "string"), collection=True, literal_key=True,
+       doc="JSON scalar member as text; missing, JSON null and containers return SQL NULL"),
+    Fn("array_length", 1, lambda a: Inf(INT64, a[0].nullable), max_args=1,
+       kind="array", collection=True,
+       doc="number of elements, including NULL elements; empty array is zero"),
+    Fn("array_get", 2, lambda a: Inf(a[0].t.elem, True), max_args=2,
+       arg_kinds=("array", "int"), collection=True,
+       doc="zero-based element access; NULL, negative and out-of-range indices return NULL"),
+    Fn("date_add", 2, lambda a: Inf(a[0].t, any(i.nullable for i in a)), max_args=2, kind="temporal",
+       arg_kinds=("temporal", "int"),
+       unit_names=DATE_ADD_UNITS,
+       doc="arg 1 shifted by arg 2 units (keyword arg: date_add(d, years: 1)); "
+           "unit keywords: years, quarters, months, weeks, days; returns the argument type"),
+    Fn("date_sub", 2, lambda a: Inf(a[0].t, any(i.nullable for i in a)), max_args=2, kind="temporal",
+       arg_kinds=("temporal", "int"),
+       unit_names=DATE_ADD_UNITS,
+       doc="arg 1 shifted back by arg 2 units (keyword arg: date_sub(d, days: 3)); "
+           "same unit keywords as date_add; returns the argument type"),
+    Fn("date_trunc", 2, _same,
+       max_args=2, kind="temporal", arg_kinds=("temporal", "string"),
+       unit_names=DATE_TRUNC_UNITS,
+       doc="arg 1 truncated to the arg 2 granularity (unit literal: "
+           "date_trunc(d, month)); units: year, quarter, month, week, day; "
+           "a DATE stays a DATE"),
+    Fn("date_diff", 3, lambda a: Inf(INT64, a[0].nullable or a[1].nullable), max_args=3,
+       kind="temporal", arg_kinds=("temporal", "temporal", "string"),
+       unit_names=DATE_TRUNC_UNITS | {"weeks"},
+       doc="calendar boundaries crossed from arg 1 to arg 2 (date_diff(a, b, day)); "
+           "weeks start Monday; result INT64"),
     Fn("row_number", 0, lambda a: Inf(INT64, False), max_args=0, window=True,
        doc="row number inside the window partition (1-based)"),
     Fn("rank", 0, lambda a: Inf(INT64, False), max_args=0, window=True,
@@ -259,6 +331,10 @@ def emit_sql(name: str, args_sql: str, dialect=None) -> str:
     fn = get(name)
     if fn is None:
         raise RuntimeError(f"undeclared function {name}() reached codegen")
+    if fn.collection:
+        raise RuntimeError(f"{name}() requires typed collection codegen, not a plain SQL call")
+    if fn.unit_names is not None:
+        raise RuntimeError(f"{name}() requires typed date codegen, not a plain SQL call")
     if not args_sql and fn.accepts_star:
         args_sql = "*"
     spelling = None
