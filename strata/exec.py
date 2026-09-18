@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import sqlgen
-from .dialects import DUCKDB
+from .dialects import DUCKDB, get_dialect, physical_type
 from .analysis import Project, TypedModel, StrataError, contract_field_col
 from .types import StrataType, STRING
 
@@ -271,6 +271,27 @@ def runtime_pins(con, project: Project, tm: TypedModel, view: str, report: List[
             if dups:
                 bad(f"expected {('primary_key' if f.primary else 'unique')} but {dups} duplicate values")
             report.append(f"  ok  {tm.name}.{f.name}: {'primary_key' if f.primary else 'unique'}")
+
+
+def check_physical_schema(dialect: str, tms: Dict[str, TypedModel]) -> Dict[str, List[str]]:
+    """Validate that every declared column type is expressible in dialect.
+
+    No execution: reads `TypedModel.schema` and the `Dialect` type map.
+    Returns {model: [unsupported_type, ...]} (empty = all green).
+    Raises ValueError if the dialect itself is unknown.
+    """
+    d = get_dialect(dialect)
+    out: Dict[str, List[str]] = {}
+    for name, tm in tms.items():
+        bad: List[str] = []
+        for col_name, col in tm.schema.items():
+            try:
+                physical_type(d, col.t)
+            except ValueError as e:
+                bad.append(f"{col_name}: {e}")
+        if bad:
+            out[name] = bad
+    return out
 
 
 BRANCH_SEP = "__"

@@ -11,6 +11,9 @@ from __future__ import annotations
 from typing import Dict, Optional
 
 
+from .types import StrataType
+
+
 class Dialect:
     def __init__(self, name: str, quote_ident, type_map: Dict[str, str],
                  decimal, money: str, array, supports_anti_semi: bool,
@@ -169,3 +172,24 @@ def get_dialect(name: str) -> Dialect:
         return _DIALECTS[name]
     except KeyError:
         raise ValueError(f"unknown dialect {name!r} (have: {', '.join(_DIALECTS)})") from None
+
+
+def physical_type(dialect: Dialect, t: StrataType) -> str:
+    """Return the physical storage type for a StrataType in dialect.
+
+    Raises ValueError if the type cannot be expressed in the dialect
+    (e.g. an array of an unsupported element, or an unknown base type)."""
+    if t.name == "unknown":
+        raise ValueError(f"dialect {dialect.name}: cannot express unknown type")
+    if t.name == "decimal":
+        return dialect.decimal_sql(t.precision, t.scale)
+    if t.name == "money":
+        return dialect.money
+    if t.name == "array":
+        if t.elem is None:
+            raise ValueError(f"dialect {dialect.name}: array without element type")
+        return dialect.array_sql(physical_type(dialect, t.elem))
+    sql = dialect.sql_type(t.name)
+    if sql is None:
+        raise ValueError(f"dialect {dialect.name}: no physical type for {t.name}")
+    return sql

@@ -73,8 +73,15 @@ def render_build(proj, tms, names):
 def cmd_compile(args):
     proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
     tms = check(proj, args.model)
+    dialect = getattr(args, "dialect", "duckdb")
+    bad = exec_mod.check_physical_schema(dialect, tms)
+    if bad:
+        for name, issues in bad.items():
+            for iss in issues:
+                print(f"error: E070: {dialect}: model {name}: {iss}", file=sys.stderr)
+        return 2
     try:
-        dialect = get_dialect(args.dialect)
+        dialect = get_dialect(dialect)
     except ValueError as ve:
         print(f"error: {ve}", file=sys.stderr)
         return 2
@@ -218,6 +225,20 @@ def cmd_run(args):
     search = ([args.search_dir] if getattr(args, "search_dir", None) else [])
     proj = load(args.file, search_dirs=search or None)
     tms = check(proj)
+    try:
+        dialect_obj = get_dialect(getattr(args, "dialect", "duckdb"))
+    except ValueError as ve:
+        print(str(ve), file=sys.stderr)
+        return 4
+    dialect_name = getattr(args, "dialect", "duckdb")
+    # Fail-loud physical schema check: every declared type expressible.
+    bad = exec_mod.check_physical_schema(dialect_name, tms)
+    if bad:
+        for name, issues in bad.items():
+            for iss in issues:
+                print(f"error: E070: {dialect_name}: model {name}: {iss}", file=sys.stderr)
+        return 4
+    dialect = dialect_obj
     pipeline = proj.pipeline_by_name(getattr(args, "pipeline", None))
     wanted = proj.model_names_for(pipeline, include_generated=True) if pipeline else None
     overrides = proj.pipeline_sources(pipeline.name if pipeline else None)
@@ -351,18 +372,26 @@ def cmd_test(args):
     proj = load(args.file,
                 search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
     tms = check(proj)
+    try:
+        dialect_obj = get_dialect(getattr(args, "dialect", "duckdb"))
+    except ValueError as ve:
+        print(str(ve), file=sys.stderr)
+        return 4
+    dialect_name = getattr(args, "dialect", "duckdb")
+    # Fail-loud physical schema check before test materialization.
+    bad = exec_mod.check_physical_schema(dialect_name, tms)
+    if bad:
+        for name, issues in bad.items():
+            for iss in issues:
+                print(f"error: E070: {dialect_name}: model {name}: {iss}", file=sys.stderr)
+        return 4
+    dialect = dialect_obj
     ck = Checker(proj)
     try:
         ck.check_tests()
     except StrataError as se:
         print(f"error: {se.code}: {se}", file=sys.stderr)
         return 1
-    try:
-        dialect = get_dialect(getattr(args, "dialect", "duckdb"))
-    except ValueError as ve:
-        print(str(ve), file=sys.stderr)
-        return 4
-    import duckdb
     con = duckdb.connect(getattr(args, "output", None) or ":memory:")
     if getattr(args, "seed", False):
         _run_seed(con, args.file)
@@ -391,10 +420,19 @@ def cmd_check(args):
     proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
     tms = check(proj)
     try:
-        dialect = get_dialect(getattr(args, "dialect", "duckdb"))
+        dialect_obj = get_dialect(getattr(args, "dialect", "duckdb"))
     except ValueError as ve:
         print(str(ve), file=sys.stderr)
         return 4
+    dialect_name = getattr(args, "dialect", "duckdb")
+    # Fail-loud physical schema check: every declared type expressible.
+    bad = exec_mod.check_physical_schema(dialect_name, tms)
+    if bad:
+        for name, issues in bad.items():
+            for iss in issues:
+                print(f"error: E070: {dialect_name}: model {name}: {iss}", file=sys.stderr)
+        return 4
+    dialect = dialect_obj
     for name in sorted(tms):
         tm = tms[name]
         cols = ", ".join(c.describe() for c in tm.schema.values()) or "(no columns)"
