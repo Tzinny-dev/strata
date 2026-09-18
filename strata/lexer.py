@@ -24,7 +24,7 @@ KEYWORDS = {
     "source", "contract", "model", "pipeline", "fn", "import", "->", "=>",
     "from", "join_left", "join_inner", "join_anti", "join_semi", "on",
     "filter", "where", "let", "derive", "select", "aggregate", "group",
-    "sort", "asc", "desc", "take", "all",
+    "sort", "asc", "desc", "take", "all", "expand",
     "nonnull", "unique", "primary_key", "protected", "enum",
     "classification", "partition_by", "freshness",
     "nonnull",  # dedupe-safe

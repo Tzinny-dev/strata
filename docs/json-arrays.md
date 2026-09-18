@@ -80,6 +80,69 @@ comodines o pasos entrecomillados).
 Las restricciones de contratos y el lineage siguen pasando por el checker.
 Se corrigió además el NameError que impedía tipar `array(int64)`.
 
+## Agregación y expansión a filas (segunda entrega)
+
+Dos operaciones que sí necesitan sintaxis/funciones nuevas sobre arrays:
+
+### `array_agg(expr)` — agregación dentro de `group`
+
+Función agregada (`aggregate = true`, `collection = true`, fuera de un cuerpo de
+`group` es E056) que devuelve **un array con los valores NO NULL del grupo**, en
+orden de encuentro:
+
+```strata
+model history {
+  from events
+  group { field } ( aggregate { indices = array_agg(index) } )
+}
+```
+
+- Elemento = tipo del argumento (escalar simple, incluido `json`). Un argumento
+  que ya sea array produciría un array anidado y se rechaza con E063; un `null`
+  sin tipo tampoco tiene elemento. Resultado: `array(elem)` **nullable**.
+- Un grupo sin filas, o con todos los valores NULL, devuelve **NULL** en los
+  cuatro motores, y los NULL se excluyen para que la semántica no dependa del
+  motor: DuckDB/PostgreSQL `ARRAY_AGG(x) FILTER (WHERE x IS NOT NULL)`, BigQuery
+  `ARRAY_AGG(x IGNORE NULLS)`, Snowflake `ARRAY_AGG(x)` (descarta los NULL).
+  Verificado en DuckDB 1.5.5: el `ARRAY_AGG` nativo conserva los NULL, por eso se
+  filtra explícitamente.
+
+### `expand` — una fila por elemento de un array
+
+```strata
+model per_score {
+  from events
+  expand scores
+  select { score = scores }
+}
+model per_score_e {
+  from events
+  expand scores as s
+  filter s > 0
+}
+```
+
+- Sintaxis: `expand <col> [as <name>]`. Solo `expand` se añade al vocabulario
+  (grammar + lexer, con regla `expand-stmt`); `as` se parsea contextualmente como
+  identificador, así que no rompe esquemas existentes.
+- `expand xs` hace sombra: la columna array desaparece del esquema y `xs` pasa a
+  ser la columna de elemento (nullable, tipo del elemento). `expand xs as e`
+  conserva `xs` y añade `e`.
+- La fuente debe ser una columna **del `from`** de tipo `array(elem)` con elemento
+  escalar (sin arrays anidados). Una columna de `let`/`derive` o de join no vale
+  como fuente (perdió el contexto de fila). Máximo un `expand` por modelo — un
+  segundo unnest lateral multiplicaría filas. Errores: E075.
+- La expansión se emite en la subconsulta base, antes de cualquier agrupación,
+  como unnest lateral: DuckDB/PostgreSQL `CROSS JOIN LATERAL UNNEST(t0.xs) AS u0(e)`,
+  BigQuery `CROSS JOIN UNNEST(t0.xs) AS e`, Snowflake
+  `CROSS JOIN LATERAL FLATTEN(input => t0.xs) AS u0` con
+  `CAST(u0.VALUE AS <tipo>)` para elementos escalares (los `json` quedan como
+  VARIANT, el json nativo de Snowflake). Fila con array NULL o vacío → 0 filas.
+  El alias `AS u0(e)` es necesario en DuckDB/PostgreSQL: `unnest(xs) AS e`
+  expondría el elemento como STRUCT. Verificado en DuckDB 1.5.5.
+- Después de `expand` se puede agrupar (el elemento ya es un valor escalar) y
+  derivar/filtrar como cualquier columna.
+
 ## Dialectos y límites
 
 - DuckDB: `JSON_EXTRACT(doc, '<path>')`; se admite el subconjunto de rutas
@@ -123,10 +186,11 @@ Las fuentes deben respetar el esquema declarado: arrays unidimensionales,
 homogéneos y densos. No se valida todavía esa garantía física fuera de DuckDB;
 BigQuery tiene además restricciones propias al almacenar arrays con elementos NULL.
 
-Pendiente: agregación de arrays, expansión a filas y arrays anidados o de tipos
-parametrizados; filtros y descenso recursivo en `json_path` correlacionados con
-la forma de resultado de cada warehouse (y, si corresponde, una sintaxis de ruta
-en el lenguaje que incluya claves entrecomilladas); clave dinámica en BigQuery
+Pendiente: arrays anidados o de tipos parametrizados; expansión de columnas `json`
+que contienen un array (requiere verificar `unnest`/array-elements por engine);
+filtros y descenso recursivo en `json_path` correlacionados con la forma de
+resultado de cada warehouse (y, si corresponde, una sintaxis de ruta en el
+lenguaje que incluya claves entrecomilladas); clave dinámica en BigQuery
 (el motor exige literal o parámetro de consulta) y validación en runtime de que
 la clave dinámica no sea sintaxis de ruta (lo único que DuckDB sigue
 interpretando como tal). No se agregan stubs para estas funciones.

@@ -69,7 +69,7 @@ class TestGrammarConsistency(unittest.TestCase):
         text = grammar.emit_gbnf()
         for kw in ["from", "join_left", "join_inner", "join_anti", "join_semi",
                    "filter", "where", "let", "select", "derive", "aggregate",
-                   "group", "sort", "take"]:
+                   "group", "sort", "take", "expand"]:
             self.assertIn(f'"{kw}"', text, kw)
 
 

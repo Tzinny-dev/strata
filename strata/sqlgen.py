@@ -169,6 +169,19 @@ class Translator:
                 return (f"CASE WHEN {value} IS NULL THEN NULL "
                         f"WHEN IS_NULL_VALUE({value}) THEN TRUE ELSE FALSE END")
 
+        # --- array_agg: collect the group's non-NULL values into a typed array.
+        # Nullability is portable across warehouses only if NULLs are excluded
+        # (DuckDB/Postgres filter, BigQuery IGNORE NULLS, Snowflake ARRAY_AGG
+        # always drops NULLs when elements are not object role): an empty group
+        # then yields NULL everywhere and element counts agree.
+        if name == "array_agg":
+            arg = self.expr(e.args[0])
+            if d == "bigquery":
+                return f"ARRAY_AGG({arg} IGNORE NULLS)"
+            if d == "snowflake":
+                return f"ARRAY_AGG({arg})"
+            return f"ARRAY_AGG({arg}) FILTER (WHERE {arg} IS NOT NULL)"
+
         # --- array_construct: homogeneous typed array literal ---
         if name == "array_construct":
             target = self.dialect.sql_type(base_t.elem.name)
@@ -575,7 +588,13 @@ def gen_base_subquery(plan, dialect=DUCKDB, upstream_prefix: str = "v_") -> str:
     computed = {bc.name for bc in plan.base_cols if bc.expr is not None}
     left_input = plan.inputs[0]
     left_table = f"{upstream_prefix}{left_input.node}" if not left_input.is_source else left_input.node
-    selects = [f"t0.{cname}" for cname in left_input.cols if cname not in computed]
+    expand, expand_shadow = plan.expand, None
+    if expand is not None:
+        # `expand xs` replaces the array column with its element column, so the
+        # array itself is not projected under that name anymore.
+        expand_shadow = expand[0] if expand[0] == expand[1] else None
+    selects = [f"t0.{cname}" for cname in left_input.cols
+               if cname not in computed and cname != expand_shadow]
     for j in plan.joins:
         inp = plan.inputs[j.index]
         for cname in inp.cols:
@@ -595,6 +614,26 @@ def gen_base_subquery(plan, dialect=DUCKDB, upstream_prefix: str = "v_") -> str:
         jnode = plan.inputs[j.index]
         jtable = f"{upstream_prefix}{jnode.node}" if not jnode.is_source else jnode.node
         froms.append(f"{kind} {jtable} t{j.index} ON {on_sql}")
+    if expand is not None:
+        src, out, elem = expand
+        d = t.dialect.name
+        if d in ("duckdb", "postgres"):
+            # Alias rows shape: UNNEST(...) AS u0(e) gives a single column e;
+            # the plain `AS e` alias would expose the whole element as a STRUCT.
+            froms.append(f"CROSS JOIN LATERAL UNNEST(t0.{src}) AS u0(e)")
+            selects.append(f"u0.e AS {out}")
+        elif d == "bigquery":
+            # GoogleSQL: UNNEST alias IS the element column name.
+            froms.append(f"CROSS JOIN UNNEST(t0.{src}) AS {out}")
+            selects.append(f"{out} AS {out}")
+        else:  # snowflake
+            froms.append(f"CROSS JOIN LATERAL FLATTEN(input => t0.{src}) AS u0")
+            # FLATTEN yields the element as VARIANT; a JSON element stays
+            # VARIANT (the warehouse's native json), a scalar gets cast to the
+            # pinned element type so type agreements hold across dialects.
+            value = "u0.VALUE" if elem == "json" else \
+                f"CAST(u0.VALUE AS {t.dialect.sql_type(elem)})"
+            selects.append(f"{value} AS {out}")
     base = "SELECT " + ", ".join(selects) + "\nFROM " + "\n  ".join(froms)
     if plan.preds:  # pre-aggregation filters live in base subquery for cleanliness
         t2 = Translator(plan, _RAW, dialect=dialect)

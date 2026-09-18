@@ -140,6 +140,8 @@ def _stmts(stmts, ind: str):
             out.append(f"{ind}sort {{{keys}}}")
         elif isinstance(s, ast.TakeStmt):
             out.append(f"{ind}take {s.limit}" if s.limit is not None else f"{ind}take {s.start}..{s.end}")
+        elif isinstance(s, ast.ExpandStmt):
+            out.append(f"{ind}expand {s.name}" + (f" as {s.as_name}" if s.as_name != s.name else ""))
         else:
             raise ValueError(f"unsupported statement: {type(s).__name__}")
     return out

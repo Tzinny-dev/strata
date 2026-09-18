@@ -37,7 +37,7 @@ KEYWORDS: List[str] = [
     "source", "contract", "model", "pipeline", "fn", "import", "from",
     "join_left", "join_inner", "join_anti", "join_semi", "on",
     "filter", "where", "let", "derive", "select", "aggregate", "group",
-    "sort", "asc", "desc", "take", "all",
+    "sort", "asc", "desc", "take", "all", "expand",
     "nonnull", "unique", "primary_key", "protected", "enum",
     "classification", "partition_by", "freshness",
     "not", "and", "or", "in", "is", "null", "true", "false",
@@ -184,7 +184,7 @@ RULES["model-item"] = ("model attribute or statement", [
 RULES["model-stmt"] = ("relational statement", [
     "from-stmt", "join-stmt", "filter-stmt", "let-stmt",
     "select-stmt", "derive-stmt", "aggregate-stmt",
-    "group-stmt", "sort-stmt", "take-stmt",
+    "group-stmt", "sort-stmt", "take-stmt", "expand-stmt",
 ])
 
 RULES["from-stmt"] = ("source table/model reference", [
@@ -245,6 +245,10 @@ RULES["sort-key"] = ("expr with optional asc/desc (parser form)", [
 
 RULES["take-stmt"] = ("take N [.. M] (parser form)", [
     r'"take" int-lit (".." int-lit)?',
+])
+
+RULES["expand-stmt"] = ("one row per array element of a primary input column", [
+    r'"expand" ident ("as" ident)?',
 ])
 
 RULES["pipeline-decl"] = ("pipeline: models + source overrides", [

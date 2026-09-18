@@ -170,6 +170,20 @@ class TakeStmt(Stmt):
 
 
 @dataclass
+class ExpandStmt(Stmt):
+    """One row per element of a typed array column of the primary input.
+
+    ``expand xs`` replaces ``xs`` with its (nullable) element column;
+    ``expand xs as e`` keeps ``xs`` and adds ``e``. Element type is the
+    array's, the output column is nullable, and the expansion runs in the
+    base (pre-aggregation) subquery as a lateral unnest per dialect.
+    """
+    name: str = ""
+    as_name: str = ""
+    span: Any = None
+
+
+@dataclass
 class SelectStmt(Stmt):
     assigns: List[OutAssign] = field(default_factory=list)
 

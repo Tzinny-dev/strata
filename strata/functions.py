@@ -182,6 +182,15 @@ def check(fn: Fn, args: List[Inf], has_star: bool = False) -> Optional[Tuple[str
         return _check_array_operation(fn, args)
     if fn.name == "json_build":
         return _check_json_build(fn, args)
+    if fn.name == "array_agg":
+        # The element type is the aggregate's return (array of it); nested
+        # arrays are unsupported, and an untyped NULL has no element type.
+        t = args[0].t
+        if t.name == "array":
+            return E_ARG_TYPE, "array_agg() of an array would nest collections (unsupported)"
+        if t == UNKNOWN:
+            return E_ARG_TYPE, "array_agg() requires a known element type, not an untyped NULL"
+        return None
     # Collection access needs a known container type (especially array_get's
     # element return type). A nullable typed column is fine, an untyped NULL is not.
     if fn.collection and args[0].t == UNKNOWN:
@@ -362,6 +371,10 @@ FUNCTIONS: List[Fn] = [
     Fn("array_sort", 1, lambda a: Inf(a[0].t, True), max_args=1,
        collection=True,
        doc="stable ascending sort of a typed scalar array; NULL array returns NULL, NULL elements remain in unspecified order"),
+    Fn("array_agg", 1, lambda a: Inf(array(a[0].t), True),
+       max_args=1, aggregate=True, collection=True,
+       doc="one array of the group's non-NULL argument values, in encounter order; "
+           "an empty or all-NULL group yields NULL; element type follows the argument (no nested arrays)"),
         Fn("json_build", 2, lambda a: Inf(JSON, True), max_args=-1,
        collection=True, arg_kinds=("string", "any"),
        doc="construct a JSON object from key/value pairs; simple ASCII keys; NULL values become JSON null, NULL keys are rejected"),

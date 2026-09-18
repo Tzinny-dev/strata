@@ -115,6 +115,9 @@ class Plan:
     date_arg_types: Dict[int, StrataType] = field(default_factory=dict)
     # Container type for collection calls; Snowflake GET needs an element cast.
     collection_arg_types: Dict[int, StrataType] = field(default_factory=dict)
+    # One expand per model: (source_col, output_col, element_type_name) of the
+    # lateral array unnest that runs in the base subquery.
+    expand: Optional[Tuple[str, str, str]] = None
 
 
 @dataclass
@@ -728,6 +731,8 @@ class _ModelState:
                 base_t = fn.ret(args).t
             elif name == "json_build":
                 base_t = fn.ret(args).t
+            elif name == "array_agg":
+                base_t = fn.ret(args).t
             elif name == "array_prepend":
                 base_t = args[1].t
             else:
@@ -845,6 +850,8 @@ class _ModelState:
                 self.tm.plan.sorts.append((e, desc))
         elif isinstance(s, ast.TakeStmt):
             self.tm.plan.limit = (s.start, s.end)
+        elif isinstance(s, ast.ExpandStmt):
+            self.do_expand(s)
         elif isinstance(s, ast.SelectStmt):
             for a in s.assigns:
                 self.do_output(a)
@@ -888,6 +895,43 @@ class _ModelState:
         self.own[s.name] = self.tm.name
         self.origins[s.name] = self._origin_of_expr(s.expr)
         self.base_cols.append(BaseCol(name=s.name, expr=s.expr))
+
+    def do_expand(self, s: ast.ExpandStmt):
+        """One row per element of the primary input's typed array column.
+
+        Expansion runs in the base (pre-aggregation) subquery as a lateral
+        unnest, so it must come before any grouping, and the source must be a
+        row-preserving column of the ``from`` table (joined columns already
+        lost the row context; deriving over an array is a different shape).
+        ``expand xs`` replaces ``xs`` with its nullable element column;
+        ``expand xs as e`` keeps ``xs`` and adds ``e``.
+        """
+        if self.in_group:
+            raise err("E075", "expand is only allowed before grouping, "
+                              "not inside a group body", s.span)
+        if self.tm.plan.expand is not None:
+            raise err("E075", "only one expand per model (a second lateral "
+                              "unnest would cross-multiply rows)", s.span)
+        if not self.inputs:
+            raise err("E075", "expand requires a from first", s.span)
+        if s.name not in self.inputs[0].cols:
+            raise err("E075", f"expand source {s.name!r} must be a column of "
+                              "the from table", s.span)
+        src = self.inputs[0].cols[s.name]
+        if src.t.name != "array":
+            raise err("E075", f"expand source {s.name!r} must be a typed array "
+                              f"column, got {src.t}", s.span)
+        elem = src.t.elem
+        if elem is None or elem.name == "array":
+            raise err("E075", f"expand source {s.name!r} must be a "
+                              "one-dimensional array of scalar elements", s.span)
+        if s.as_name in self.inputs[0].cols and s.as_name != s.name:
+            raise err("E075", f"expand output {s.as_name!r} collides with an "
+                              "existing column of the from table", s.span)
+        self.tm.plan.expand = (s.name, s.as_name, elem.name)
+        self.cols[s.as_name] = Col(name=s.as_name, t=elem, nullable=True)
+        self.own[s.as_name] = self.tm.name
+        self.origins[s.as_name] = [Origin(self.inputs[0].node, s.name, "expanded")]
 
     def _require_no_window(self, e: ast.Node, span, where: str):
         """Windows run after grouping in the outer query, so `let` (inner

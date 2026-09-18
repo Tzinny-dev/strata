@@ -332,6 +332,14 @@ class Parser:
             elif self.at("KW", "take"):
                 t = self.advance()
                 decl.stmts.append(self.parse_take(t))
+            elif self.at("KW", "expand"):
+                t = self.advance()
+                name = self.expect("ID").value
+                as_name = name
+                if self.at("ID", "as"):
+                    self.advance()
+                    as_name = self.expect("ID").value
+                decl.stmts.append(ast.ExpandStmt(name=name, as_name=as_name, span=self.span(t)))
             elif self.at("KW", "select"):
                 t = self.advance()
                 decl.stmts.append(ast.SelectStmt(assigns=self.parse_assigns(), span=self.span(t)))
