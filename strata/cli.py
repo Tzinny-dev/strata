@@ -622,12 +622,70 @@ def cmd_replay(args):
         print(f"  applied      {', '.join(e.get('applied', [])) or '-'}")
         print(f"  fingerprints {e.get('fingerprints', {})}")
         print(f"  pins         {len(e.get('pins', []))} pin report lines")
+        if e.get("backfill_of"):
+            print(f"  backfill_of  {e['backfill_of']}")
+        if e.get("reason"):
+            print(f"  reason       {e['reason']}")
         return 0
     if not hist:
         print("no runs recorded (run strata run first)")
         return 0
     for e in hist[-int(args.last):]:
         print(f"{e['run_id']}  {e.get('at', '?')}  applied={','.join(e.get('applied', [])) or '-'}")
+    return 0
+
+
+def cmd_backfill(args):
+    rec = exec_mod.find_run(args.file, args.run_id)
+    if rec is None:
+        print(f"error: E085: unknown run {args.run_id!r} (see strata replay)", file=sys.stderr)
+        return 1
+    search = ([args.search_dir] if getattr(args, "search_dir", None) else [])
+    proj = load(args.file, search_dirs=search or None)
+    tms = check(proj)
+    if getattr(args, "models", None):
+        names = [m.strip() for m in args.models.split(",") if m.strip()]
+    else:
+        names = list(rec.get("names", [])) or list(tms)
+    unknown = [m for m in names if m not in tms]
+    if unknown:
+        print(f"error: E085: unknown model(s) {', '.join(unknown)}", file=sys.stderr)
+        return 1
+    overrides = dict(rec.get("source_overrides", {}))
+    for spec in getattr(args, "source", None) or []:
+        if "=" not in spec:
+            print(f"error: E085: --source expects src=table, got {spec!r}", file=sys.stderr)
+            return 1
+        src, table = spec.split("=", 1)
+        if src not in proj.sources:
+            print(f"error: E085: unknown source {src!r}", file=sys.stderr)
+            return 1
+        overrides[src] = {"dataset": table.strip()}
+    branch = getattr(args, "branch", None) or rec.get("branch", "main")
+    try:
+        import duckdb
+    except ImportError:
+        print("duckdb not available; run with the venv interpreter (prototype/.venv/bin/python)", file=sys.stderr)
+        return 2
+    con = duckdb.connect(getattr(args, "output", None) or ":memory:")
+    try:
+        applied, pins, note = exec_mod.run(
+            con, proj, tms, args.file, only_stale=True, names=names,
+            source_overrides=overrides or None, branch=branch,
+            stage_only=getattr(args, "stage_only", False),
+            reason=args.reason, backfill_of=rec.get("run_id"))
+    except exec_mod.PinError as pe:
+        print(f"error: E085: {pe}", file=sys.stderr)
+        return 1
+    if getattr(args, "output", None):
+        con.close()
+    if note:
+        print(note)
+        return 0
+    print(f"backfilled {rec.get('run_id')} -> corrected run "
+          f"({len(applied)} model(s), reason: {args.reason})")
+    for p in pins:
+        print(p)
     return 0
 
 
@@ -850,6 +908,22 @@ def main(argv=None):
     p.add_argument("-o", "--output", default=None, help="with --execute: persist the warehouse to this .duckdb file")
     p.add_argument("--search-dir", default=None, help="with --execute: extra dir resolving import a.b")
     p.set_defaults(fn=cmd_replay)
+
+    p = sub.add_parser("backfill", help="corrected rerun journaled against a past run (duckdb required)")
+    p.add_argument("file")
+    p.add_argument("run_id", help="past run to base the correction on")
+    p.add_argument("--models", default=None,
+                   help="comma-separated model subset (default: the run's model set)")
+    p.add_argument("--source", action="append", default=[],
+                   help="corrected source table as src=table (repeatable; wins over the run's overrides)")
+    p.add_argument("--reason", required=True,
+                   help="why this correction exists (recorded in history)")
+    p.add_argument("--branch", default=None, help="staging branch (default: the run's branch)")
+    p.add_argument("--stage-only", action="store_true",
+                   help="build + pin staged views without promoting (blue-green hold)")
+    p.add_argument("--search-dir", default=None)
+    p.add_argument("--output", "-o", help="persist the warehouse to this .duckdb file")
+    p.set_defaults(fn=cmd_backfill)
 
     p = sub.add_parser("branches", help="list staging branches in a warehouse (staged/live views per branch)")
     p.add_argument("-o", "--output", default=None, help="warehouse .duckdb file (default: describe :memory: as empty)")

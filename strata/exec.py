@@ -841,10 +841,35 @@ def _frozen_materialize(con, project, tms, entry, source_overrides=None,
     return applied, pins, rid
 
 
+def _downstream_models(tms, seeds):
+    """Models transitively downstream of the seed nodes (sources or models),
+    following plan inputs and lineage origins (covers from/join/set-op
+    uniformly, even for models with empty lineage)."""
+    children = {}
+    for m, tm in tms.items():
+        for inp in tm.plan.inputs:
+            children.setdefault(inp.node, set()).add(m)
+        for origins in tm.lineage.values():
+            for o in origins:
+                children.setdefault(o.node, set()).add(m)
+    seen, stack, out = set(), list(seeds), set()
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        for ch in children.get(cur, ()):
+            if ch not in seen:
+                out.add(ch)
+                stack.append(ch)
+    return out
+
+
 def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
         only_stale: bool = False, names: Optional[List[str]] = None,
         dialect=DUCKDB, source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
-        branch: str = "main", stage_only: bool = False):
+        branch: str = "main", stage_only: bool = False,
+        reason: Optional[str] = None, backfill_of: Optional[str] = None):
     if names is None:
         names = list(tms)
     for src in source_overrides or {}:
@@ -859,10 +884,17 @@ def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
         history = load_history(module_path)
         previous = next((e for e in reversed(history)
                          if e.get("snapshots") and e.get("branch") == branch), None)
-        data_changed = (previous is None or
-                        previous.get("source_fingerprints") != source_fps or
-                        previous.get("source_overrides", {}) != (source_overrides or {}))
-        stale = set(tms) if data_changed else set(stale_models(tms, module_path))
+        if previous is None:
+            stale = set(tms)
+        else:
+            # Per-source staleness: only models downstream of changed sources
+            # rebuild (plus code-changed models, transitive via fingerprints).
+            # Override changes surface as hash changes since fingerprints
+            # resolve through the overrides, so identical content still skips.
+            prev_fps = previous.get("source_fingerprints", {})
+            changed = {s for s, h in source_fps.items() if prev_fps.get(s) != h}
+            changed |= {s for s in prev_fps if s not in source_fps}
+            stale = set(stale_models(tms, module_path)) | _downstream_models(tms, changed)
         # A rollback (or a different warehouse) may not expose the last run.
         live = dict(con.execute("SELECT view_name, sql FROM duckdb_views() "
                                 "WHERE schema_name='main'").fetchall())
@@ -883,6 +915,10 @@ def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
         "branch": branch,
         "source_fingerprints": source_fps,
     }
+    if reason is not None:
+        entry["reason"] = reason
+    if backfill_of is not None:
+        entry["backfill_of"] = backfill_of
     if stage_only:
         rid = _run_id(entry)
         applied, pins = materialize(con, project, tms, names, dialect=dialect,
