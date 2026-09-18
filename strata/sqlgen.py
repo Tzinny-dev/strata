@@ -209,6 +209,60 @@ class Translator:
                 return value
             return f"CASE WHEN {kind} IN ({allowed}) THEN {scalar} ELSE NULL END"
 
+        # --- json_path: JSONPath-style query over a JSON value ---
+        # Path is a string literal starting with $ or @. The path may use
+        # bracket notation, dot traversal, array indices, and slices where the
+        # dialect supports them. Recursive descent ($..) and filter expressions
+        # ($[?(...)]) are not emitted everywhere yet and fail loud for dialects
+        # that cannot express them.
+        if name == "json_path":
+            path_arg = e.args[1]
+            if not isinstance(path_arg, ast.Literal) or not isinstance(path_arg.value, str):
+                raise RuntimeError(f"{name}() requires a string literal path expression")
+            path = path_arg.value
+            if not path or not (path.startswith("$") or path.startswith("@")):
+                raise RuntimeError(f"{name}() requires a path starting with $ or @")
+            base = self.expr(e.args[0])
+            d = self.dialect.name
+            # Aggregate path into a normalized form only for the simple recursive
+            # descent marker for dialects that support it; otherwise pass the raw
+            # path to the dialect's native function where possible.
+            if ".." in path and d in ("duckdb", "bigquery", "snowflake"):
+                # DuckDB and BigQuery support recursive descent in JSON path
+                # functions; Snowflake uses $.. in semi-structured query syntax.
+                pass
+            if d == "duckdb":
+                if ".." in path:
+                    return f"JSON_EXTRACT({base}, {path})"
+                return f"JSON_EXTRACT({base}, {path})"
+            if d == "bigquery":
+                # JSON_QUERY / JSON_VALUE accept JSON path expressions.
+                # Filters and slices are not universally supported at this layer.
+                if "[?(" in path or "]?" in path:
+                    raise RuntimeError(
+                        f"dialect {d!r} cannot express JSONPath filter expressions in {name}()")
+                return f"JSON_QUERY({base}, {path})"
+            if d == "postgres":
+                # PostgreSQL JSON path support uses jsonb_path_query/jsonb_path_query_first
+                # with SQL/JSON path syntax, not the same $../$[?] surface as DuckDB/BigQuery.
+                # For now we map only the simple member/index cases and fail loud for the rest.
+                if any(token in path for token in ("..", "[?", "]?")):
+                    raise RuntimeError(
+                        f"dialect {d!r} cannot express this JSONPath in {name}() "
+                        f"(use a supported simple path or a compose of json_get/json_value)")
+                # Convert $['key'] or $.key style to Postgres -> / ->> usage via jsonb_path_query_first
+                return f"jsonb_path_query_first({base}::jsonb, {path})"
+            if d == "snowflake":
+                # Snowflake uses colon notation :key or bracket notation for semi-structured data,
+                # and GET_PATH(/VARIANT, path) accepts a path string. Recursive descent via $.. is
+                # supported in variant path expressions. Filters are not part of this layer yet.
+                if "[?(" in path or "]?" in path:
+                    raise RuntimeError(
+                        f"dialect {d!r} cannot express JSONPath filter expressions in {name}()")
+                # Snowflake GET_PATH accepts a path string with $ prefix and supports $.. recursive descent.
+                return f"GET_PATH({base}, {path})"
+            raise RuntimeError(f"dialect {d!r} cannot express {name}()")
+
         # --- array functions: determine base (array) and other (non-array) ---
         # array_prepend(scalar, array): array is args[1], scalar is args[0]
         # all others: array is args[0], other is args[1]
