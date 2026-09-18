@@ -234,12 +234,14 @@ class Translator:
                         "parameter; use a literal key or json_path()")
                 return f"{'JSON_QUERY' if name == 'json_get' else 'JSON_VALUE'}({base}, {_lit('$.' + literal)})"
             else:
-                if literal is None:
-                    raise RuntimeError(
-                        f"dialect 'snowflake' cannot take a dynamic key in {name}(): "
-                        "GET_PATH requires a quoted path-name literal; use a literal "
-                        "key or json_path()")
-                value = f"GET({base}, {_lit(literal)})"
+                # Snowflake GET(<variant>, <field_name>) is a *key* lookup, not a
+                # path, which is exactly the contract of json_get/json_value:
+                # field_name accepts any VARCHAR expression for VARIANT input
+                # (only structured OBJECTs require a constant) and "must not be
+                # an empty string", so NULLIF maps the empty key to NULL as in
+                # the other warehouses.
+                key_expr = f"NULLIF({key_sql}, '')" if literal is None else _lit(literal)
+                value = f"GET({base}, {key_expr})"
                 scalar = f"CAST({value} AS VARCHAR)"
                 kind = f"TYPEOF({value})"
                 allowed = "'VARCHAR', 'BOOLEAN', 'INTEGER', 'DECIMAL', 'DOUBLE'"
@@ -248,7 +250,7 @@ class Translator:
             return f"CASE WHEN {kind} IN ({allowed}) THEN {scalar} ELSE NULL END"
 
         # --- json_path: JSONPath-style query over a JSON value ---
-        # The path is a string literal starting with $ or @ and must be emitted
+        # The path is a string literal starting with $ and must be emitted
         # *quoted*: every dialect takes the path as a string/jsonpath literal,
         # never as raw SQL. `functions.json_path_problem` defines which paths are
         # expressible (the checker rejects them earlier with E074); the guard here
@@ -276,11 +278,20 @@ class Translator:
                 return (f"jsonb_path_query_first({base}::jsonb, {_lit(path)}, "
                         f"'{{}}'::jsonb, TRUE)")
             if d == "snowflake":
-                # GET_PATH(<column_identifier>, '<path_name>') takes a *quoted*
-                # path-name literal; the documented forms are dot/bracket names
-                # ('array2[0].id3'), and `$..` is not documented for it (open
-                # issue handled above).
-                return f"GET_PATH({base}, {_lit(path)})"
+                # GET_PATH takes a JavaScript-notation path *without* the
+                # JSONPath '$' root: the documented forms are 'a.b' and
+                # 'xs[0]' (its own syntax has no '$'). A bare '$' has no
+                # GET_PATH spelling — the column already is the whole document —
+                # so it fails loud instead of guessing an empty path.
+                if path == "$":
+                    raise RuntimeError(
+                        "dialect 'snowflake' cannot express the whole document in "
+                        "json_path() (GET_PATH needs a member or index step); use "
+                        "the column itself")
+                sub = path[1:]
+                if sub.startswith("."):
+                    sub = sub[1:]
+                return f"GET_PATH({base}, {_lit(sub)})"
             raise RuntimeError(f"dialect {d!r} cannot express {name}()")
 
         # --- array functions: determine base (array) and other (non-array) ---
@@ -387,7 +398,11 @@ class Translator:
             if d == "duckdb":
                 value = f"ARRAY_SORT({base})"
             elif d == "postgres":
-                value = (f"(SELECT ARRAY_AGG(v ORDER BY v) FROM UNNEST({base}) AS v)")
+                # ARRAY_AGG over zero rows returns NULL, so the empty array has
+                # to be rebuilt explicitly: sorting [] must stay [] (verified
+                # against a real PostgreSQL 16 server).
+                value = (f"COALESCE((SELECT ARRAY_AGG(v ORDER BY v) FROM UNNEST({base}) AS v), "
+                         f"ARRAY[]::{target}[])")
             elif d == "bigquery":
                 value = f"ARRAY(SELECT x FROM UNNEST({base}) AS x ORDER BY x)"
             else:

@@ -41,20 +41,40 @@ def valid_json_key(value) -> bool:
 # A JSONPath filter step: `$[?(@ > 1)]` or `$[*] ? (@ > 1)` (SQL/JSON spelling).
 _JSONPATH_FILTER = re.compile(r"\?\s*\(")
 
+# The portable subset: the root, then member steps (`.name`) and index steps
+# (`[0]`). Everything else is engine-specific: `"a.b"`-style quoted keys are
+# SQL/JSON only, `['a.b']` is BigQuery-only (DuckDB and PostgreSQL reject it),
+# and `[*]` returns a list of matches in DuckDB but the first match in
+# PostgreSQL. Verified against a real DuckDB and a real PostgreSQL 16 server.
+_JSONPATH_STEP = re.compile(r"(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\])")
+
 
 def json_path_problem(path) -> Optional[str]:
     """Why a literal ``json_path()`` path cannot be emitted, or None if it can.
 
     Lives next to the catalog so the checker and the code generator reject the
-    same paths for the same reason instead of each keeping its own list.
+    same paths for the same reason instead of each keeping its own list. Only
+    the subset that behaves the same on DuckDB, PostgreSQL, BigQuery and
+    Snowflake is accepted: the root `$` plus member and index steps.
     """
-    if not isinstance(path, str) or not (path.startswith("$") or path.startswith("@")):
-        return "path must be a string literal starting with $ or @"
+    if not isinstance(path, str) or not path.startswith("$"):
+        return "path must be a string literal starting with $"
     if _JSONPATH_FILTER.search(path):
         return "JSONPath filter expressions (`$[?(...)]`) are not supported yet"
     if ".." in path:
         return ("recursive descent (`$..`) is not supported yet: its result shape "
                 "differs per warehouse (DuckDB returns an array of matches)")
+    if path == "$":
+        return None
+    pos, rest = 0, path[1:]
+    while pos < len(rest):
+        step = _JSONPATH_STEP.match(rest, pos)
+        if step is None:
+            return (f"JSONPath step {rest[pos:]!r} is not portable: only member "
+                    "steps (`.name`) and index steps (`[0]`) are supported, and "
+                    "quoted keys (`$['a.b']`, `$.\"a.b\"`) and wildcards (`[*]`) "
+                    "behave differently or fail on each warehouse")
+        pos = step.end()
     return None
 
 
@@ -359,9 +379,9 @@ FUNCTIONS: List[Fn] = [
            "null and containers return SQL NULL"),
     Fn("json_path", 2, lambda a: Inf(JSON, True), max_args=2,
        arg_kinds=("json", "string"), collection=True,
-       doc="JSON value selected by a literal path string starting with $ or @; base JSON "
-           "null or path absent returns SQL NULL; filters and recursive descent are "
-           "rejected in compilation"),
+       doc="JSON value selected by a literal path string with the root $ and member/"
+           "index steps; base JSON null or path absent returns SQL NULL; filters, "
+           "recursive descent, wildcards and quoted keys are rejected in compilation"),
     Fn("array_length", 1, lambda a: Inf(INT64, a[0].nullable), max_args=1,
        kind="array", collection=True,
        doc="number of elements, including NULL elements; empty array is zero"),

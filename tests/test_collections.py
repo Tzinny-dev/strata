@@ -56,6 +56,8 @@ class TestCollections(unittest.TestCase):
             'json_path(doc, "a.b")': 'E074', 'json_path(doc, key)': 'E074',
             'json_path(doc, "$..b")': 'E074',
             'json_path(doc, "$[*] ? (@ > 1)")': 'E074',
+            "json_path(doc, \"$['a.b']\")": 'E074',
+            'json_path(doc, "$[*]")': 'E074',
             'json_get(doc, "x.y")': 'E074', 'json_get(doc, "")': 'E074',
             'json_value(doc, null)': 'E074', 'array_get(*)': 'E064',
             'array_length(xs) over ()': 'E065',
@@ -123,24 +125,27 @@ model m -> contract c { from s
 
     def test_dynamic_key_emission_and_fail_loud(self):
         # A runtime key is an exact-key lookup, so it is emitted only where the
-        # dialect can express one: DuckDB (a '$'-less path is an exact key) and
-        # PostgreSQL (`jsonb -> text` takes a text expression). BigQuery (literal
-        # or query parameter only) and Snowflake (quoted path-name literal) fail
-        # loud rather than emit SQL the engine rejects.
+        # dialect can express one without turning the key into a path: DuckDB (a
+        # '$'-less path is an exact key), PostgreSQL (`jsonb -> text` takes a
+        # text expression) and Snowflake (GET's field_name is a key, and for
+        # VARIANT it accepts a VARCHAR expression). BigQuery requires a literal
+        # or a query parameter, so it fails loud instead of emitting SQL the
+        # engine rejects or that reads a different member.
         cases = [('json_get(doc, key)',
-                  ["JSON_EXTRACT(doc, NULLIF(key, ''))", "(doc -> NULLIF(key, ''))"]),
+                  {DUCKDB: "JSON_EXTRACT(doc, NULLIF(key, ''))",
+                   POSTGRES: "(doc -> NULLIF(key, ''))",
+                   SNOWFLAKE: "GET(doc, NULLIF(key, ''))"}),
                  ('json_value(doc, key)',
-                  ["JSON_EXTRACT_STRING(doc, NULLIF(key, ''))",
-                   "JSONB_TYPEOF((doc -> NULLIF(key, '')))"])]
+                  {DUCKDB: "JSON_EXTRACT_STRING(doc, NULLIF(key, ''))",
+                   POSTGRES: "JSONB_TYPEOF((doc -> NULLIF(key, '')))",
+                   SNOWFLAKE: "CAST(GET(doc, NULLIF(key, '')) AS VARCHAR)"})]
         for expr, markers in cases:
-            for dialect, marker in zip((DUCKDB, POSTGRES), markers):
+            for dialect, marker in markers.items():
                 with self.subTest(expr=expr, dialect=dialect.name):
                     self.assertIn(marker, sqlgen.model_sql(model(expr), dialect))
         for expr in ('json_get(doc, key)', 'json_value(doc, key)'):
-            for dialect in (BIGQUERY, SNOWFLAKE):
-                with self.subTest(expr=expr, dialect=dialect.name), \
-                        self.assertRaises(RuntimeError):
-                    sqlgen.model_sql(model(expr), dialect)
+            with self.subTest(expr=expr), self.assertRaises(RuntimeError):
+                sqlgen.model_sql(model(expr), BIGQUERY)
         # A literal key keeps the portable fast path and is still emitted
         # everywhere, dynamic support or not.
         for dialect in (DUCKDB, POSTGRES, BIGQUERY, SNOWFLAKE):
@@ -150,21 +155,29 @@ model m -> contract c { from s
     def test_json_path_emission_quotes_the_path(self):
         # Every dialect takes the path as a quoted string/jsonpath literal;
         # emitting it raw is invalid SQL in all four (fixed after the first
-        # json_path revision shipped `JSON_EXTRACT(doc, $.a.b)`).
-        markers = ["JSON_EXTRACT(doc, '$.a.b')",
-                   "jsonb_path_query_first(doc::jsonb, '$.a.b', '{}'::jsonb, TRUE)",
-                   "JSON_QUERY(doc, '$.a.b')",
-                   "GET_PATH(doc, '$.a.b')"]
-        for dialect, marker in zip((DUCKDB, POSTGRES, BIGQUERY, SNOWFLAKE), markers):
+        # json_path revision shipped `JSON_EXTRACT(doc, $.a.b)`). Snowflake's own
+        # path notation has no '$' root, so it gets the path without it.
+        markers = [DUCKDB, POSTGRES, BIGQUERY, SNOWFLAKE]
+        expected = ["JSON_EXTRACT(doc, '$.a.b')",
+                    "jsonb_path_query_first(doc::jsonb, '$.a.b', '{}'::jsonb, TRUE)",
+                    "JSON_QUERY(doc, '$.a.b')",
+                    "GET_PATH(doc, 'a.b')"]
+        for dialect, marker in zip(markers, expected):
             with self.subTest(dialect=dialect.name):
                 sql = sqlgen.model_sql(model('json_path(doc, "$.a.b")'), dialect)
                 self.assertIn(marker, sql)
 
     def test_json_path_problem_is_shared_by_checker_and_codegen(self):
-        for path in ('$.a.b', '$[0]', '$', '@.a'):
+        for path in ('$.a.b', '$.xs[0]', '$', '$.a.b.c[3]'):
             with self.subTest(path=path):
                 self.assertIsNone(functions.json_path_problem(path))
-        for path in ('a.b', '', '$..b', '$[*] ? (@ > 1)', '$[?(@ > 1)]'):
+        # Rejected because they fail or diverge per warehouse: no '$' root,
+        # filters, recursive descent, quoted keys and wildcards (verified
+        # against real DuckDB and PostgreSQL: `$['a.b']` is a syntax error on
+        # both, `$. "a.b"` is SQL/JSON only, `$[*]` is a list in DuckDB and the
+        # first match in PostgreSQL).
+        for path in ('a.b', '', '@.a', '$..b', '$[*] ? (@ > 1)', '$[?(@ > 1)]',
+                     "$['a.b']", '$."a.b"', '$[*]', '$[1:2]', '$.a-b'):
             with self.subTest(path=path):
                 self.assertIsNotNone(functions.json_path_problem(path))
 
