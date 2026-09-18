@@ -181,27 +181,65 @@ class Translator:
                 return f"ARRAY_CONSTRUCT({args})"
             return f"{'ARRAY' if d == 'postgres' else ''}[{args}]"
 
-        # --- json_get / json_value: literal-key member access ---
-        if fn.literal_key:
-            key = e.args[1]
-            if not isinstance(key, ast.Literal) or not functions.valid_json_key(key.value):
-                raise RuntimeError(f"{name}() requires a simple literal object key")
-            path = _lit("$." + key.value)
+        # --- json_get / json_value: object member by literal key, or by an
+        # expression that the checker has already proven to be a string ---
+        # A literal key becomes a compile-time path/member. A dynamic key is a
+        # runtime value, so it is an *exact-key lookup* and is emitted only
+        # where the dialect can express one: DuckDB (a `$`-less path is an
+        # exact key: it neither traverses dots nor indexes brackets) and
+        # PostgreSQL (`jsonb -> text` takes any text expression, never a
+        # path). BigQuery requires the JSONPath to be a string literal or
+        # query parameter and Snowflake's GET_PATH requires a quoted
+        # path-name literal, so both fail loud instead of emitting SQL the
+        # engine will reject or that reads a different member than the same
+        # expression on another warehouse.
+        #
+        # `NULLIF(key, '')` gives both warehouses the same answer for the one
+        # degenerate runtime key: DuckDB resolves the *empty* path to the whole
+        # document, and folding it to NULL avoids returning the entire row's
+        # payload for what the language calls a member lookup.
+        if name in ("json_get", "json_value"):
             base = self.expr(e.args[0])
-            if d == "bigquery":
-                return f"{'JSON_QUERY' if name == 'json_get' else 'JSON_VALUE'}({base}, {path})"
+            key = e.args[1]
+            if isinstance(key, ast.Literal):
+                # Analysis rejects a bad literal key as E074; guard codegen too.
+                if not functions.valid_json_key(key.value):
+                    raise RuntimeError(f"{name}() requires a simple literal object key")
+                literal, key_sql = key.value, None
+            else:
+                literal, key_sql = None, self.expr(key)
             if d == "duckdb":
+                if literal is None:
+                    path = f"NULLIF({key_sql}, '')"
+                else:
+                    path = _lit("$." + literal)
                 value = f"JSON_EXTRACT({base}, {path})"
                 scalar = f"JSON_EXTRACT_STRING({base}, {path})"
                 kind = f"JSON_TYPE({value})"
                 allowed = "'VARCHAR', 'BOOLEAN', 'BIGINT', 'UBIGINT', 'DOUBLE'"
             elif d == "postgres":
-                value = f"({base} -> {_lit(key.value)})"
-                scalar = f"({base} ->> {_lit(key.value)})"
+                if literal is None:
+                    value = f"({base} -> NULLIF({key_sql}, ''))"
+                    scalar = f"({base} ->> NULLIF({key_sql}, ''))"
+                else:
+                    value = f"({base} -> {_lit(literal)})"
+                    scalar = f"({base} ->> {_lit(literal)})"
                 kind = f"JSONB_TYPEOF({value})"
                 allowed = "'string', 'boolean', 'number'"
+            elif d == "bigquery":
+                if literal is None:
+                    raise RuntimeError(
+                        f"dialect 'bigquery' cannot take a dynamic key in {name}(): the "
+                        "engine requires the JSONPath to be a string literal or query "
+                        "parameter; use a literal key or json_path()")
+                return f"{'JSON_QUERY' if name == 'json_get' else 'JSON_VALUE'}({base}, {_lit('$.' + literal)})"
             else:
-                value = f"GET({base}, {_lit(key.value)})"
+                if literal is None:
+                    raise RuntimeError(
+                        f"dialect 'snowflake' cannot take a dynamic key in {name}(): "
+                        "GET_PATH requires a quoted path-name literal; use a literal "
+                        "key or json_path()")
+                value = f"GET({base}, {_lit(literal)})"
                 scalar = f"CAST({value} AS VARCHAR)"
                 kind = f"TYPEOF({value})"
                 allowed = "'VARCHAR', 'BOOLEAN', 'INTEGER', 'DECIMAL', 'DOUBLE'"
@@ -210,57 +248,39 @@ class Translator:
             return f"CASE WHEN {kind} IN ({allowed}) THEN {scalar} ELSE NULL END"
 
         # --- json_path: JSONPath-style query over a JSON value ---
-        # Path is a string literal starting with $ or @. The path may use
-        # bracket notation, dot traversal, array indices, and slices where the
-        # dialect supports them. Recursive descent ($..) and filter expressions
-        # ($[?(...)]) are not emitted everywhere yet and fail loud for dialects
-        # that cannot express them.
+        # The path is a string literal starting with $ or @ and must be emitted
+        # *quoted*: every dialect takes the path as a string/jsonpath literal,
+        # never as raw SQL. `functions.json_path_problem` defines which paths are
+        # expressible (the checker rejects them earlier with E074); the guard here
+        # keeps a hand-built plan from emitting SQL with the wrong shape.
         if name == "json_path":
             path_arg = e.args[1]
             if not isinstance(path_arg, ast.Literal) or not isinstance(path_arg.value, str):
                 raise RuntimeError(f"{name}() requires a string literal path expression")
             path = path_arg.value
-            if not path or not (path.startswith("$") or path.startswith("@")):
-                raise RuntimeError(f"{name}() requires a path starting with $ or @")
+            problem = functions.json_path_problem(path)
+            if problem is not None:
+                raise RuntimeError(f"{name}(): {problem}")
             base = self.expr(e.args[0])
             d = self.dialect.name
-            # Aggregate path into a normalized form only for the simple recursive
-            # descent marker for dialects that support it; otherwise pass the raw
-            # path to the dialect's native function where possible.
-            if ".." in path and d in ("duckdb", "bigquery", "snowflake"):
-                # DuckDB and BigQuery support recursive descent in JSON path
-                # functions; Snowflake uses $.. in semi-structured query syntax.
-                pass
             if d == "duckdb":
-                if ".." in path:
-                    return f"JSON_EXTRACT({base}, {path})"
-                return f"JSON_EXTRACT({base}, {path})"
+                return f"JSON_EXTRACT({base}, {_lit(path)})"
             if d == "bigquery":
-                # JSON_QUERY / JSON_VALUE accept JSON path expressions.
-                # Filters and slices are not universally supported at this layer.
-                if "[?(" in path or "]?" in path:
-                    raise RuntimeError(
-                        f"dialect {d!r} cannot express JSONPath filter expressions in {name}()")
-                return f"JSON_QUERY({base}, {path})"
+                return f"JSON_QUERY({base}, {_lit(path)})"
             if d == "postgres":
-                # PostgreSQL JSON path support uses jsonb_path_query/jsonb_path_query_first
-                # with SQL/JSON path syntax, not the same $../$[?] surface as DuckDB/BigQuery.
-                # For now we map only the simple member/index cases and fail loud for the rest.
-                if any(token in path for token in ("..", "[?", "]?")):
-                    raise RuntimeError(
-                        f"dialect {d!r} cannot express this JSONPath in {name}() "
-                        f"(use a supported simple path or a compose of json_get/json_value)")
-                # Convert $['key'] or $.key style to Postgres -> / ->> usage via jsonb_path_query_first
-                return f"jsonb_path_query_first({base}::jsonb, {path})"
+                # SQL/JSON path syntax. An empty vars object is passed explicitly
+                # because a NULL vars would make the whole function return NULL;
+                # `silent => true` suppresses the structural errors (a scalar
+                # where the path expects an object) so Postgres returns NULL like
+                # the other dialects instead of raising.
+                return (f"jsonb_path_query_first({base}::jsonb, {_lit(path)}, "
+                        f"'{{}}'::jsonb, TRUE)")
             if d == "snowflake":
-                # Snowflake uses colon notation :key or bracket notation for semi-structured data,
-                # and GET_PATH(/VARIANT, path) accepts a path string. Recursive descent via $.. is
-                # supported in variant path expressions. Filters are not part of this layer yet.
-                if "[?(" in path or "]?" in path:
-                    raise RuntimeError(
-                        f"dialect {d!r} cannot express JSONPath filter expressions in {name}()")
-                # Snowflake GET_PATH accepts a path string with $ prefix and supports $.. recursive descent.
-                return f"GET_PATH({base}, {path})"
+                # GET_PATH(<column_identifier>, '<path_name>') takes a *quoted*
+                # path-name literal; the documented forms are dot/bracket names
+                # ('array2[0].id3'), and `$..` is not documented for it (open
+                # issue handled above).
+                return f"GET_PATH({base}, {_lit(path)})"
             raise RuntimeError(f"dialect {d!r} cannot express {name}()")
 
         # --- array functions: determine base (array) and other (non-array) ---

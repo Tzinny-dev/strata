@@ -38,6 +38,26 @@ def valid_json_key(value) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value) is not None
 
 
+# A JSONPath filter step: `$[?(@ > 1)]` or `$[*] ? (@ > 1)` (SQL/JSON spelling).
+_JSONPATH_FILTER = re.compile(r"\?\s*\(")
+
+
+def json_path_problem(path) -> Optional[str]:
+    """Why a literal ``json_path()`` path cannot be emitted, or None if it can.
+
+    Lives next to the catalog so the checker and the code generator reject the
+    same paths for the same reason instead of each keeping its own list.
+    """
+    if not isinstance(path, str) or not (path.startswith("$") or path.startswith("@")):
+        return "path must be a string literal starting with $ or @"
+    if _JSONPATH_FILTER.search(path):
+        return "JSONPath filter expressions (`$[?(...)]`) are not supported yet"
+    if ".." in path:
+        return ("recursive descent (`$..`) is not supported yet: its result shape "
+                "differs per warehouse (DuckDB returns an array of matches)")
+    return None
+
+
 def _numeric(a: Inf) -> bool:
     return a.t.is_numeric() or a.t.is_money()
 
@@ -81,7 +101,6 @@ class Fn:
     doc: str = ""
     unit_names: Optional[frozenset] = None   # date fns: legal unit spellings
     collection: bool = False          # requires typed collection codegen
-    literal_key: bool = False         # simple JSON object key, not JSONPath
 
     @property
     def sql_name(self) -> str:
@@ -329,14 +348,20 @@ FUNCTIONS: List[Fn] = [
     Fn("json_is_null", 1, lambda a: Inf(BOOL, True),
        kind="json", collection=True, doc="true only for a JSON null value; SQL NULL returns NULL"),
     Fn("json_get", 2, lambda a: Inf(JSON, True), max_args=2,
-       arg_kinds=("json", "string"), collection=True, literal_key=True,
-       doc="JSON member by literal simple key; missing member is SQL NULL, JSON null preserved"),
+       arg_kinds=("json", "string"), collection=True,
+       doc="JSON member by a literal simple key or by a runtime string expression; "
+           "a runtime key is an exact-key lookup emitted only where the dialect can "
+           "express one (DuckDB, PostgreSQL); missing member is SQL NULL, JSON null preserved"),
     Fn("json_value", 2, lambda a: Inf(STRING, True), max_args=2,
-       arg_kinds=("json", "string"), collection=True, literal_key=True,
-       doc="JSON scalar member as text; missing, JSON null and containers return SQL NULL"),
+       arg_kinds=("json", "string"), collection=True,
+       doc="JSON scalar member as text, by a literal simple key or by a runtime string "
+           "expression where the dialect can express an exact-key lookup; missing, JSON "
+           "null and containers return SQL NULL"),
     Fn("json_path", 2, lambda a: Inf(JSON, True), max_args=2,
        arg_kinds=("json", "string"), collection=True,
-       doc="JSON value selected by a path string; base JSON null or path absent returns SQL NULL; recursive descent and filters are not yet supported in all dialects"),
+       doc="JSON value selected by a literal path string starting with $ or @; base JSON "
+           "null or path absent returns SQL NULL; filters and recursive descent are "
+           "rejected in compilation"),
     Fn("array_length", 1, lambda a: Inf(INT64, a[0].nullable), max_args=1,
        kind="array", collection=True,
        doc="number of elements, including NULL elements; empty array is zero"),

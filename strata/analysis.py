@@ -733,12 +733,30 @@ class _ModelState:
             else:
                 base_t = args[0].t
             self.tm.plan.collection_arg_types[id(e)] = base_t
-        if fn.literal_key:
+        if name in ("json_get", "json_value"):
+            # A literal key must be a simple ASCII member name: it compiles to a
+            # `$.key` path (DuckDB, BigQuery) or a quoted member (PostgreSQL,
+            # Snowflake). A non-literal key is a runtime string and is emitted as
+            # an exact-key lookup only where the dialect can express one; proving
+            # it is a string is the job of the argument kind checked above.
             key = e.args[1]
-            if not isinstance(key, ast.Literal) or not functions.valid_json_key(key.value):
+            if isinstance(key, ast.Literal) and not functions.valid_json_key(key.value):
                 raise err(functions.E_JSON_KEY,
-                          f'{name}() requires a literal object key matching [A-Za-z_][A-Za-z0-9_]*',
+                          f'{name}() literal key must match [A-Za-z_][A-Za-z0-9_]*; '
+                          'use json_path() for path expressions',
                           key.span)
+        if name == "json_path":
+            # The path is checked here so an unusable one fails during
+            # compilation with a span instead of during codegen;
+            # `functions.json_path_problem` is the single definition shared with
+            # the generator.
+            path = e.args[1]
+            if not isinstance(path, ast.Literal) or not isinstance(path.value, str):
+                raise err(functions.E_JSON_KEY,
+                          'json_path() requires a string literal path', path.span)
+            problem = functions.json_path_problem(path.value)
+            if problem is not None:
+                raise err(functions.E_JSON_KEY, f'json_path(): {problem}', path.span)
         if name == "json_build":
             for i in range(0, len(e.args), 2):
                 key = e.args[i]

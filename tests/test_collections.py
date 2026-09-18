@@ -34,6 +34,9 @@ class TestCollections(unittest.TestCase):
                  ('array_get(ys, 0)', 'string', True),
                  ('array_get(js, 0)', 'json', True),
                  ('array_get(xs, null)', 'int64', True),
+                 ('json_get(doc, key)', 'json', True),
+                 ('json_value(doc, key)', 'string', True),
+                 ('json_path(doc, "$.a.b")', 'json', True),
                  ('json_value(array_get(js, 0), "key")', 'string', True)]
         for expr, typ, nullable in cases:
             with self.subTest(expr=expr):
@@ -49,7 +52,10 @@ class TestCollections(unittest.TestCase):
             'array_length(doc)': 'E063', 'json_value(key, "x")': 'E063',
             'json_get(doc, 1)': 'E063', 'array_get(null, 0)': 'E063',
             'json_get(null, "x")': 'E063', 'array_length(null)': 'E063',
-            'json_get(doc, key)': 'E074', 'json_value(doc, "$.x")': 'E074',
+            'json_value(doc, "$.x")': 'E074',
+            'json_path(doc, "a.b")': 'E074', 'json_path(doc, key)': 'E074',
+            'json_path(doc, "$..b")': 'E074',
+            'json_path(doc, "$[*] ? (@ > 1)")': 'E074',
             'json_get(doc, "x.y")': 'E074', 'json_get(doc, "")': 'E074',
             'json_value(doc, null)': 'E074', 'array_get(*)': 'E064',
             'array_length(xs) over ()': 'E065',
@@ -114,6 +120,53 @@ model m -> contract c { from s
         tm.plan.collection_arg_types.clear()
         with self.assertRaises(RuntimeError):
             sqlgen.model_sql(tm)
+
+    def test_dynamic_key_emission_and_fail_loud(self):
+        # A runtime key is an exact-key lookup, so it is emitted only where the
+        # dialect can express one: DuckDB (a '$'-less path is an exact key) and
+        # PostgreSQL (`jsonb -> text` takes a text expression). BigQuery (literal
+        # or query parameter only) and Snowflake (quoted path-name literal) fail
+        # loud rather than emit SQL the engine rejects.
+        cases = [('json_get(doc, key)',
+                  ["JSON_EXTRACT(doc, NULLIF(key, ''))", "(doc -> NULLIF(key, ''))"]),
+                 ('json_value(doc, key)',
+                  ["JSON_EXTRACT_STRING(doc, NULLIF(key, ''))",
+                   "JSONB_TYPEOF((doc -> NULLIF(key, '')))"])]
+        for expr, markers in cases:
+            for dialect, marker in zip((DUCKDB, POSTGRES), markers):
+                with self.subTest(expr=expr, dialect=dialect.name):
+                    self.assertIn(marker, sqlgen.model_sql(model(expr), dialect))
+        for expr in ('json_get(doc, key)', 'json_value(doc, key)'):
+            for dialect in (BIGQUERY, SNOWFLAKE):
+                with self.subTest(expr=expr, dialect=dialect.name), \
+                        self.assertRaises(RuntimeError):
+                    sqlgen.model_sql(model(expr), dialect)
+        # A literal key keeps the portable fast path and is still emitted
+        # everywhere, dynamic support or not.
+        for dialect in (DUCKDB, POSTGRES, BIGQUERY, SNOWFLAKE):
+            with self.subTest(dialect=dialect.name):
+                self.assertIn('key', sqlgen.model_sql(model('json_get(doc, "key")'), dialect))
+
+    def test_json_path_emission_quotes_the_path(self):
+        # Every dialect takes the path as a quoted string/jsonpath literal;
+        # emitting it raw is invalid SQL in all four (fixed after the first
+        # json_path revision shipped `JSON_EXTRACT(doc, $.a.b)`).
+        markers = ["JSON_EXTRACT(doc, '$.a.b')",
+                   "jsonb_path_query_first(doc::jsonb, '$.a.b', '{}'::jsonb, TRUE)",
+                   "JSON_QUERY(doc, '$.a.b')",
+                   "GET_PATH(doc, '$.a.b')"]
+        for dialect, marker in zip((DUCKDB, POSTGRES, BIGQUERY, SNOWFLAKE), markers):
+            with self.subTest(dialect=dialect.name):
+                sql = sqlgen.model_sql(model('json_path(doc, "$.a.b")'), dialect)
+                self.assertIn(marker, sql)
+
+    def test_json_path_problem_is_shared_by_checker_and_codegen(self):
+        for path in ('$.a.b', '$[0]', '$', '@.a'):
+            with self.subTest(path=path):
+                self.assertIsNone(functions.json_path_problem(path))
+        for path in ('a.b', '', '$..b', '$[*] ? (@ > 1)', '$[?(@ > 1)]'):
+            with self.subTest(path=path):
+                self.assertIsNotNone(functions.json_path_problem(path))
 
 
 
@@ -180,3 +233,40 @@ class TestCollectionsExecution(unittest.TestCase):
         tm = analysis.Checker(analysis.Project(parse_strata(text))).check_all()['m']
         self.assertEqual(self.con.execute(sqlgen.model_sql(tm)).fetchall(), [('yes',)])
         self.assertIn('SAFE_OFFSET', sqlgen.model_sql(tm, BIGQUERY))
+
+    def test_dynamic_key_is_exact_member_lookup(self):
+        # The runtime key is an exact object-member lookup: dots do not
+        # traverse and brackets do not index (a '$'-less DuckDB path), and the
+        # empty key is folded to NULL instead of DuckDB's whole-document
+        # reading of the empty path.
+        doc = {'plain': 'v', 'num': 3, 'obj': {'in': 1}, 'xs': [7, 8],
+               'a.b': 11, 'a': {'b': 22}}
+        cases = [('plain', 'v', '"v"'), ('num', '3', '3'), ('obj', None, '{"in":1}'),
+                 ('xs', None, '[7,8]'), ('a.b', '11', '11'),
+                 ('nope', None, None), ('', None, None), (None, None, None)]
+        for key, scalar, as_json in cases:
+            with self.subTest(key=key):
+                self.con.execute('DELETE FROM s')
+                self.con.execute('INSERT INTO s VALUES (?, ?, ?, ?, ?, ?)',
+                                 [json.dumps(doc), None, ['hello', None],
+                                  ['{"key":"nested"}', 'null'], 0, key])
+                rows, typ = self.result('json_get(doc, key)')
+                self.assertEqual(typ, 'JSON')
+                self.assertEqual(None if rows[0][0] is None else json.loads(rows[0][0]),
+                                 None if as_json is None else json.loads(as_json))
+                self.assertEqual(self.result('json_value(doc, key)')[0], [(scalar,)])
+        self.assertIn("NULLIF(key, '')", sqlgen.model_sql(model('json_get(doc, key)')))
+
+    def test_json_path_member_index_missing_and_null(self):
+        self.con.execute('DELETE FROM s')
+        self.insert('{"a": {"b": 22}, "xs": [7, 8], "n": null}')
+        self.assertEqual(json.loads(self.result('json_path(doc, "$.a.b")')[0][0][0]), 22)
+        self.assertEqual(json.loads(self.result('json_path(doc, "$.xs[0]")')[0][0][0]), 7)
+        self.assertEqual(self.result('json_path(doc, "$.missing")')[0], [(None,)])
+        # A JSON null member comes back as JSON null, never as SQL NULL.
+        self.assertEqual(self.result('json_path(doc, "$.n")')[0], [('null',)])
+        for doc in (None, 'null', '42'):
+            with self.subTest(doc=doc):
+                self.con.execute('DELETE FROM s')
+                self.insert(doc)
+                self.assertEqual(self.result('json_path(doc, "$.a.b")')[0], [(None,)])
