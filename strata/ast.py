@@ -243,6 +243,19 @@ class ContractDecl(Node):
 
 
 @dataclass
+class DomainDecl(Node):
+    """Transparent type alias: `domain user_id = int64`.
+
+    Usable anywhere a type is written (sources, contracts, casts, nested
+    element types, other domains). Structural, not nominal: compatibility
+    and physical types follow the underlying type.
+    """
+    name: str = ""
+    type_spec: str = ""
+    params: List[object] = field(default_factory=list)
+
+
+@dataclass
 class ModelDecl(Node):
     name: str = ""
     contract: Optional[str] = None

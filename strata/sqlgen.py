@@ -49,6 +49,21 @@ def _sql_type_stub(t: StrataType) -> str:
     return SQL_TYPE.get(t.name, "VARCHAR")
 
 
+def _elem_target(dialect, t: StrataType) -> str:
+    """CAST target for an array element type, recursing through nested
+    arrays (BIGINT[][], ARRAY<ARRAY<...>>, ...), decimals and money."""
+    target = dialect.sql_type(t.name)
+    if target is not None:
+        return target
+    if t.name == "decimal":
+        return dialect.decimal_sql(t.precision, t.scale)
+    if t.name == "money":
+        return dialect.money
+    if t.name == "array" and t.elem is not None:
+        return dialect.array_sql(_elem_target(dialect, t.elem))
+    raise RuntimeError(f"dialect {dialect.name!r} cannot target element type {t}")
+
+
 class Translator:
     def __init__(self, plan, mode: str, dialect=DUCKDB):
         self.dialect = dialect
@@ -184,9 +199,7 @@ class Translator:
 
         # --- array_construct: homogeneous typed array literal ---
         if name == "array_construct":
-            target = self.dialect.sql_type(base_t.elem.name)
-            if target is None:
-                raise RuntimeError(f"dialect {d!r} cannot construct array of {base_t.elem}")
+            target = _elem_target(self.dialect, base_t.elem)
             # Cast each element, including NULL, so warehouse inference cannot
             # disagree with the homogeneous Strata element type.
             args = ", ".join(f"CAST({self.expr(a)} AS {target})" for a in e.args)
@@ -441,10 +454,7 @@ class Translator:
         else:
             value = f"GET({base}, {index})"
             if base_t.elem != JSON:
-                target = self.dialect.sql_type(base_t.elem.name)
-                if target is None:
-                    raise RuntimeError(f"dialect {d!r} cannot express array_get of {base_t.elem}")
-                value = f"CAST({value} AS {target})"
+                value = f"CAST({value} AS {_elem_target(self.dialect, base_t.elem)})"
         return (f"CASE WHEN ({index}) >= 0 AND ({index}) < {length} "
                 f"THEN {value} ELSE NULL END")
 
@@ -646,17 +656,10 @@ def _base_select(plan, dialect, base_cols, preds, upstream_prefix: str = "v_") -
 
 def _union_cast(dialect, t: StrataType) -> str:
     """CAST target aligning a set-operation branch column to its unified type."""
-    target = dialect.sql_type(t.name)
-    if target is not None:
-        return target
-    if t.name == "decimal":
-        return dialect.decimal_sql(t.precision, t.scale)
-    if t.name == "money":
-        return dialect.money
-    if t.name == "array":
-        elem = dialect.sql_type(t.elem.name) if t.elem is not None else None
-        return dialect.array_sql(elem or "VARCHAR")
-    raise RuntimeError(f"dialect {dialect.name!r} cannot align set column of type {t}")
+    try:
+        return _elem_target(dialect, t)
+    except RuntimeError:
+        raise RuntimeError(f"dialect {dialect.name!r} cannot align set column of type {t}")
 
 
 def _setop_base(plan, dialect, upstream_prefix: str = "v_"):

@@ -39,6 +39,7 @@ KEYWORDS: List[str] = [
     "filter", "where", "let", "derive", "select", "aggregate", "group",
     "sort", "asc", "desc", "take", "all", "expand",
     "union", "intersect", "except", "dedup",
+    "domain",
     "nonnull", "unique", "primary_key", "protected", "enum",
     "classification", "partition_by", "freshness",
     "not", "and", "or", "in", "is", "null", "true", "false",
@@ -75,7 +76,11 @@ RULES["root"] = ("a .strata module: { top_decl }", ["top-decl*"])
 
 RULES["top-decl"] = ("one top-level declaration", [
     "source-decl", "contract-decl", "model-decl", "pipeline-decl",
-    "fn-decl", "import-decl", "test-decl", "generator-call",
+    "fn-decl", "import-decl", "test-decl", "generator-call", "domain-decl",
+])
+
+RULES["domain-decl"] = ("transparent type alias usable anywhere a type is written", [
+    r'"domain" ident "=" type-spec',
 ])
 RULES["generator-call"] = ("top-level model generator call (fn emitting models)", [
     r'ident "(" call-args? ")"',
@@ -145,11 +150,12 @@ RULES["contract-field"] = ("name : type annotations", [
     r'ident ":" type-spec type-annot*',
 ])
 
-RULES["type-spec"] = ("builtin type with optional parameters", [
+RULES["type-spec"] = ("builtin type with optional parameters (array recurses; a bare ident is a domain alias)", [
     r'"decimal" "(" int-lit "," int-lit ")"',
-    r'"array" "(" type-kw ")"',
+    r'"array" "(" type-spec ")"',
     r'"money" ("(" ident ")")?',
     "type-kw-scalar",
+    "ident",
 ])
 
 RULES["type-kw-scalar"] = ("builtin type keyword sans decimal/array (must be parameterized)", [

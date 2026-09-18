@@ -96,7 +96,7 @@ class TestGbnfRejectsGarbage(unittest.TestCase):
     def test_parser_and_consumer_agree_on_garbage(self):
         cases = [
             "model { from broken start}",     # model needs a name
-            "contract C { a: int, }",          # no trailing comma in contracts
+            "contract C { a: 123, }",        # a type is a keyword, a domain name or a parameterized type, never a literal
             "pipeline p { models: [x }",       # unterminated list
             "fn f() -> Int { 1 + }",           # dangling operator
             "pipeline p { bogus: 1 }",         # unknown pipeline key

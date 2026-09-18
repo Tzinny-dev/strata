@@ -26,6 +26,7 @@ KEYWORDS = {
     "filter", "where", "let", "derive", "select", "aggregate", "group",
     "sort", "asc", "desc", "take", "all", "expand",
     "union", "intersect", "except", "dedup",
+    "domain",
     "nonnull", "unique", "primary_key", "protected", "enum",
     "classification", "partition_by", "freshness",
     "nonnull",  # dedupe-safe

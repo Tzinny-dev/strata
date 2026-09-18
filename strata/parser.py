@@ -73,6 +73,8 @@ class Parser:
                 m.decls.append(self.parse_source())
             elif self.at("KW", "contract"):
                 m.decls.append(self.parse_contract())
+            elif self.at("KW", "domain"):
+                m.decls.append(self.parse_domain())
             elif self.at("KW", "model"):
                 m.decls.append(self.parse_model_decl())
             elif self.at("KW", "fn"):
@@ -88,7 +90,7 @@ class Parser:
                 t = self.cur()
                 raise ParseError(
                     f"{self.path}:{t.line}:{t.col}: expected top-level declaration "
-                    f"(source|contract|model|fn|pipeline|import) but found {t.value!r}"
+                    f"(source|contract|model|fn|pipeline|import|domain) but found {t.value!r}"
                 )
         return m
 
@@ -198,24 +200,56 @@ class Parser:
         self.expect("SYM", "}")
         return decl
 
+    def parse_domain(self) -> ast.DomainDecl:
+        kw = self.expect("KW", "domain")
+        decl = ast.DomainDecl(span=self.span(kw))
+        decl.name = self.expect("ID").value
+        self.expect("SYM", "=")
+        decl.type_spec, decl.params = self.parse_type_spec()
+        return decl
+
+    def parse_type_spec(self):
+        """A type in a source/contract/domain position: a builtin (with
+        parameters, array elements recursing to any depth), or a bare
+        identifier referencing a `domain` alias (resolved at check time).
+
+        Returns (spec, params); a bare name without parameters stays a bare
+        string so simple types keep their historical AST shape.
+        """
+        tok = self.cur()
+        if tok.kind == "ID":
+            return self.advance().value, []
+        if tok.kind != "TYPE_KW":
+            raise ParseError(
+                f"{self.path}:{tok.line}:{tok.col}: expected type "
+                f"but found {tok.kind} {tok.value!r}")
+        spec = self.advance().value
+        if spec == "decimal":
+            self.expect("SYM", "(")
+            params = [int(self.expect("INT").value)]
+            self.match("SYM", ",")
+            params.append(int(self.expect("INT").value))
+            self.expect("SYM", ")")
+            return spec, params
+        if spec == "array":
+            self.expect("SYM", "(")
+            espec, eparams = self.parse_type_spec()
+            self.expect("SYM", ")")
+            elem = espec if eparams == [] else (espec, eparams)
+            return spec, [elem]
+        if spec == "money":
+            if self.match("SYM", "("):
+                cur = self.expect("ID").value
+                self.expect("SYM", ")")
+                return spec, [cur]
+            return spec, []
+        return spec, []
+
     def parse_contract_field(self) -> ast.ContractField:
         f = ast.ContractField()
         f.name = self.expect("ID").value
         self.expect("SYM", ":")
-        f.type_spec = self.expect("TYPE_KW").value
-        if f.type_spec in ("decimal", "array"):
-            self.expect("SYM", "(")
-            if f.type_spec == "decimal":
-                f.params = [int(self.expect("INT").value)]
-                self.match("SYM", ",")
-                f.params.append(int(self.expect("INT").value))
-            else:
-                f.params = [self.expect("TYPE_KW").value]
-            self.expect("SYM", ")")
-        elif f.type_spec == "money":
-            if self.match("SYM", "("):
-                f.params = [self.expect("ID").value]
-                self.expect("SYM", ")")
+        f.type_spec, f.params = self.parse_type_spec()
         # annotations
         while True:
             if self.match("KW", "nonnull"):

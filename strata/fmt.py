@@ -19,14 +19,31 @@ def _model_name(name: str) -> str:
         return name
     return _q(name)
 
+def _type_param(p) -> str:
+    # Array element params: bare names stay bare; parameterized or nested
+    # elements are (spec, subparams) tuples rendered recursively.
+    if not isinstance(p, tuple):
+        return p
+    spec, sub = p
+    if spec == "array":
+        return f"array({_type_param(sub[0])})"
+    if spec == "decimal":
+        return f"decimal({sub[0]}, {sub[1]})"
+    if spec == "money":
+        return f"money({sub[0]})" if sub else "money"
+    return spec
+
+def _type_str(spec: str, params) -> str:
+    if spec == "decimal":
+        return f"decimal({params[0]}, {params[1]})"
+    if spec == "array":
+        return f"array({_type_param(params[0])})"
+    if spec == "money" and params:
+        return f"money({params[0]})"
+    return spec
+
 def _field(f: ast.ContractField) -> str:
-    t = f.type_spec
-    if f.type_spec == "decimal":
-        t = f"decimal({f.params[0]}, {f.params[1]})"
-    elif f.type_spec == "array":
-        t = f"array({f.params[0]})"
-    elif f.type_spec == "money" and f.params:
-        t = f"money({f.params[0]})"
+    t = _type_str(f.type_spec, f.params)
     bits = [t]
     if f.nonnull and not f.primary:
         bits.append("nonnull")
@@ -174,6 +191,8 @@ def format_module(mod: ast.Module) -> str:
             for f in d.fields:
                 out.append(f"  {_field(f)},")
             out.append("}")
+        elif isinstance(d, ast.DomainDecl):
+            out.append(f"domain {d.name} = {_type_str(d.type_spec, d.params)}")
         elif isinstance(d, ast.ModelDecl):
             head = f"model {_model_name(d.name)}" + (f" -> contract {d.contract}" if d.contract else "")
             out.append(head + " {")

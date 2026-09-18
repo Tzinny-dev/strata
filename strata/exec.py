@@ -203,7 +203,7 @@ def runtime_pins(con, project: Project, tm: TypedModel, view: str, report: List[
     cd = _contract_decl(project, tm)
     physical = physical_schema(con, view)
     for f in cd.fields:
-        exp = contract_field_col(f)
+        exp = contract_field_col(f, project.domain_types)
 
         def bad(why):
             raise PinError(f"phase-C pin FAILED [{tm.name}.{f.name}] {why}")

@@ -211,6 +211,17 @@ ARRAY_ELEMENTS = frozenset({"int64", "float64", "string", "bool", "date",
                             "timestamp", "uuid", "json"})
 
 
+# Element types an array may carry: the simple scalars, decimal/money, and
+# nested arrays to any depth (homogeneous by construction). Element-wise
+# operations with per-engine equality/ordering semantics (contains, sort,
+# append/prepend/remove/index_of) still require simple scalar elements and
+# reject the rest loudly at check time.
+def _valid_elem(t: StrataType) -> bool:
+    if t.name in ARRAY_ELEMENTS or t.name in ("decimal", "money"):
+        return True
+    return t.name == "array" and t.elem is not None and _valid_elem(t.elem)
+
+
 def _constructed_type(args: List[Inf]) -> StrataType:
     return array(next(a.t for a in args if a.t != UNKNOWN))
 
@@ -243,17 +254,19 @@ def _check_array_operation(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]
     if fn.name in ("array_construct", "array_contains", "array_concat"):
         known = [a.t for a in args if a.t != UNKNOWN]
         if fn.name == "array_construct":
-            if not known or known[0].name not in ARRAY_ELEMENTS or any(t != known[0] for t in known):
-                return E_ARG_TYPE, "array_construct() requires homogeneous scalar elements and at least one known type"
+            if not known or not _valid_elem(known[0]) or any(t != known[0] for t in known):
+                return E_ARG_TYPE, "array_construct() requires homogeneous elements of a supported type and at least one known type"
         else:
             base = args[0].t
-            if base.name != "array" or base.elem is None or base.elem.name not in ARRAY_ELEMENTS:
-                return E_ARG_TYPE, f"{fn.name}() requires a typed one-dimensional array"
+            if base.name != "array" or base.elem is None or not _valid_elem(base.elem):
+                return E_ARG_TYPE, f"{fn.name}() requires a typed array with supported element types"
             other = args[1].t
             if fn.name == "array_concat":
                 if other != base:
                     return E_ARG_TYPE, f"array_concat() requires identical array types, got {base} and {other}"
-            elif base.elem == JSON or other not in (base.elem, UNKNOWN):
+            elif base.elem.name not in ("int64", "float64", "string", "bool", "date", "timestamp", "uuid"):
+                return E_ARG_TYPE, "array_contains() requires a one-dimensional array of comparable scalar elements (no JSON, decimal, money or nested arrays)"
+            elif other not in (base.elem, UNKNOWN):
                 return E_ARG_TYPE, "array_contains() requires a matching scalar value; JSON equality is not supported"
         return None
     if fn.name in ("array_sort",):

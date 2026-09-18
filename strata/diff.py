@@ -124,9 +124,9 @@ def diff_projects(base_proj, head_proj) -> List[ModelChange]:
                 mc.model, "*", "compile-error",
                 "model failed to typecheck in base (schema unknown)", True))
         fixed.append(mc)
-    s_base = {n: {c.name: c for c in source_decl_cols(d)}
+    s_base = {n: {c.name: c for c in source_decl_cols(d, base_proj.domain_types)}
               for n, d in base_proj.sources.items()}
-    s_head = {n: {c.name: c for c in source_decl_cols(d)}
+    s_head = {n: {c.name: c for c in source_decl_cols(d, head_proj.domain_types)}
               for n, d in head_proj.sources.items()}
     for name in sorted(set(s_base) | set(s_head)):
         cols = _col_changes(name, s_base.get(name, {}), s_head.get(name, {}))

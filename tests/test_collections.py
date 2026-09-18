@@ -68,10 +68,20 @@ class TestCollections(unittest.TestCase):
             self.assertEqual(cm.exception.code, code)
 
     def test_unsupported_array_element_is_diagnostic_not_crash(self):
-        for elem in ('array', 'decimal', 'money'):
-            with self.subTest(elem=elem), self.assertRaises(analysis.StrataError) as cm:
-                model('xs', SRC.replace('array(int64)', f'array({elem})'))
-            self.assertEqual(cm.exception.code, 'E063')
+        from strata.parser import ParseError
+        # Nested and parameterized elements are supported types now.
+        for elem, typ in [('array(int64)', 'array<array<int64>>'),
+                          ('decimal(10, 2)', 'array<decimal(10,2)>'),
+                          ('money', 'array<money(USD)>'),
+                          ('money(USD)', 'array<money(USD)>')]:
+            with self.subTest(elem=elem):
+                col = model('xs', SRC.replace('array(int64)', f'array({elem})')).schema['x']
+                self.assertEqual(str(col.t), typ)
+        # Bare parameterizable spellings are not types: loud at parse time.
+        for elem in ('array', 'decimal'):
+            with self.subTest(elem=elem):
+                with self.assertRaises(ParseError):
+                    model('xs', SRC.replace('array(int64)', f'array({elem})'))
 
     def test_roundtrip_contracts_and_lineage(self):
         text = SRC + '''

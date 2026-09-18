@@ -154,7 +154,11 @@ TYPE_FROM_KW = {
 }
 
 
-def type_from_spec(spec: str, params: List[object]) -> StrataType:
+def type_from_spec(spec: str, params: List[object],
+                   domains: Optional[Dict[str, StrataType]] = None) -> StrataType:
+    """Resolve a declared type: builtins (array elements recurse to any depth
+    over scalars, parameterized types and nested arrays), or a bare `domain`
+    alias looked up in the project's pre-resolved domain table."""
     if spec in TYPE_FROM_KW:
         return TYPE_FROM_KW[spec]
     if spec == "decimal":
@@ -162,16 +166,45 @@ def type_from_spec(spec: str, params: List[object]) -> StrataType:
     if spec == "money":
         return money(params[0] if params else "USD")
     if spec == "array":
-        if len(params) != 1 or params[0] not in TYPE_FROM_KW:
-            raise err("E063", "array elements must be a supported scalar type (nested/parameterized types are not supported)")
-        return array(TYPE_FROM_KW[params[0]])
+        if len(params) != 1:
+            raise err("E063", "array() takes exactly one element type")
+        return array(_elem_type(params[0], domains))
+    if domains is not None and spec in domains:
+        return domains[spec]
     return UNKNOWN
 
 
-def contract_field_col(f: ast.ContractField) -> Col:
+def _elem_type(p: object, domains: Optional[Dict[str, StrataType]]) -> StrataType:
+    # Array element params: bare names stay bare strings (scalars, or domain
+    # aliases resolved here); parameterized or nested elements are
+    # (spec, subparams) tuples resolved recursively.
+    if isinstance(p, tuple):
+        t = type_from_spec(p[0], p[1], domains)
+        if t.name == "unknown":
+            raise err("E063", f"array elements must be a supported scalar, "
+                              f"parameterized or nested array type, or a declared "
+                              f"domain (got {p[0]!r})")
+        return t
+    if p in TYPE_FROM_KW:
+        return TYPE_FROM_KW[p]
+    if p == "money":
+        # money() without parens means money(USD), like the top level
+        return money("USD")
+    if domains is not None and p in domains:
+        return domains[p]
+    raise err("E063", f"array elements must be a supported scalar, parameterized "
+                      f"or nested array type, or a declared domain (got {p!r})")
+
+
+def contract_field_col(f: ast.ContractField,
+                       domains: Optional[Dict[str, StrataType]] = None) -> Col:
+    t = type_from_spec(f.type_spec, f.params, domains)
+    if t.name == "unknown":
+        raise err("E078", f"unknown type {f.type_spec!r} for column {f.name!r} "
+                          f"(declare it with `domain {f.type_spec} = <type>`)")
     return Col(
         name=f.name,
-        t=type_from_spec(f.type_spec, f.params),
+        t=t,
         nullable=not f.nonnull,
         unique=f.unique,
         primary=f.primary,
@@ -181,10 +214,11 @@ def contract_field_col(f: ast.ContractField) -> Col:
     )
 
 
-def source_decl_cols(decl: ast.SourceDecl) -> List[Col]:
+def source_decl_cols(decl: ast.SourceDecl,
+                     domains: Optional[Dict[str, StrataType]] = None) -> List[Col]:
     for kind, val in decl.props:
         if kind == "columns":
-            return [contract_field_col(f) for f in val]
+            return [contract_field_col(f, domains) for f in val]
     return []
 
 
@@ -294,6 +328,8 @@ class Project:
         self.sources: Dict[str, ast.SourceDecl] = {}
         self.contracts: Dict[str, ast.ContractDecl] = {}
         self.models: Dict[str, ast.ModelDecl] = {}
+        self.domains: Dict[str, ast.DomainDecl] = {}
+        self.domain_types: Dict[str, StrataType] = {}
         self.fns: Dict[str, ast.FnDecl] = {}
         self.pipelines: List[ast.PipelineDecl] = []
         self.tests: Dict[str, List[ast.TestDecl]] = {}
@@ -301,6 +337,7 @@ class Project:
         self.modules: Dict[str, ast.Module] = {module.path or "<strata>": module}
         self.imports: List[str] = []
         self._resolve()
+        self._resolve_domains()
         self._expand_fns()
 
     # -- multi-file imports (spec/grammar.md: `import a.b` -> a/b.strata) ----
@@ -338,6 +375,8 @@ class Project:
             self.contracts.setdefault(d.name, d)
         elif isinstance(d, ast.ModelDecl):
             self.models.setdefault(d.name, d)
+        elif isinstance(d, ast.DomainDecl):
+            self.domains.setdefault(d.name, d)
         elif isinstance(d, ast.TestDecl):
             self.tests.setdefault(d.model, []).append(d)
         elif isinstance(d, ast.FnDecl):
@@ -358,6 +397,49 @@ class Project:
                 self._resolve_import(d.path, seen)
             else:
                 self._merge_decl(d)
+
+    def _resolve_domains(self):
+        """Pre-resolve `domain` aliases to StrataTypes (fail fast on cycles
+        and unknown names, even when the alias is never used)."""
+        visiting: Set[str] = set()
+
+        def expand(spec: str, params: List[object]) -> StrataType:
+            if spec in TYPE_FROM_KW:
+                return TYPE_FROM_KW[spec]
+            if spec == "decimal":
+                return decimal(params[0], params[1])
+            if spec == "money":
+                return money(params[0] if params else "USD")
+            if spec == "array":
+                if len(params) != 1:
+                    raise err("E063", "array() takes exactly one element type")
+                p = params[0]
+                if isinstance(p, tuple):
+                    return array(expand(p[0], p[1]))
+                if p in TYPE_FROM_KW:
+                    return array(TYPE_FROM_KW[p])
+                if p == "money":
+                    return array(money("USD"))
+                return array(rec(p))
+            return rec(spec)
+
+        def rec(name: str) -> StrataType:
+            if name in self.domain_types:
+                return self.domain_types[name]
+            if name in visiting:
+                raise err("E078", f"domain cycle involving {name!r}")
+            d = self.domains.get(name)
+            if d is None:
+                raise err("E078", f"unknown domain {name!r} "
+                                  f"(declare it with `domain {name} = <type>`)")
+            visiting.add(name)
+            t = expand(d.type_spec, d.params)
+            visiting.discard(name)
+            self.domain_types[name] = t
+            return t
+
+        for name in list(self.domains):
+            rec(name)
 
     def _expand_fns(self):
         ev = FnEvaluator(self)
@@ -395,7 +477,7 @@ class Project:
         decl = self.sources.get(name)
         if decl is None:
             raise err("E020", f"unknown source {name!r}")
-        cols = source_decl_cols(decl)
+        cols = source_decl_cols(decl, self.domain_types)
         if not cols:
             raise err("E021", f"source {name!r} has no declared columns (add columns: {{...}})")
         return OrderedDict((c.name, c) for c in cols)
@@ -719,7 +801,7 @@ class _ModelState:
                 raise err("E062", "cast() takes exactly 2 arguments", e.span)
             a = self.infer(e.args[0])
             spec = str(e.args[1].value) if isinstance(e.args[1], ast.Literal) else "string"
-            return Inf(type_from_spec(spec, []), a.nullable)
+            return Inf(type_from_spec(spec, [], self.c.p.domain_types), a.nullable)
         fn = functions.get(name)
         if fn is None:
             raise err("E059", f"unknown function {name!r}", e.span)
@@ -1143,7 +1225,7 @@ class _ModelState:
             raise err("E061", f"unknown contract {model.contract!r}")
         for f in cd.fields:
             col = self.cols.get(f.name)
-            exp = contract_field_col(f)
+            exp = contract_field_col(f, self.c.p.domain_types)
             if col is None:
                 raise err("E010", f"model {model.name} missing contract column {f.name!r}")
             if not types_compat(exp.t, col.t):

@@ -32,7 +32,7 @@ class TestArrayOperations(unittest.TestCase):
         cases = {
             'array_construct()': 'E062', 'array_construct(null)': 'E063',
             'array_construct(1, 1.0)': 'E063', 'array_construct(1, "x")': 'E063',
-            'array_construct(xs)': 'E063', 'array_construct(*)': 'E064',
+            'array_construct(*)': 'E064',
             'array_concat(xs)': 'E062', 'array_concat(xs, xs, xs)': 'E062',
             'array_concat(xs, ys)': 'E063', 'array_concat(xs, null)': 'E063',
             'array_concat(null, xs)': 'E063',
