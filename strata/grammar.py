@@ -38,6 +38,7 @@ KEYWORDS: List[str] = [
     "join_left", "join_inner", "join_anti", "join_semi", "on",
     "filter", "where", "let", "derive", "select", "aggregate", "group",
     "sort", "asc", "desc", "take", "all", "expand",
+    "union", "intersect", "except", "dedup",
     "nonnull", "unique", "primary_key", "protected", "enum",
     "classification", "partition_by", "freshness",
     "not", "and", "or", "in", "is", "null", "true", "false",
@@ -185,6 +186,7 @@ RULES["model-stmt"] = ("relational statement", [
     "from-stmt", "join-stmt", "filter-stmt", "let-stmt",
     "select-stmt", "derive-stmt", "aggregate-stmt",
     "group-stmt", "sort-stmt", "take-stmt", "expand-stmt",
+    "setop-stmt", "dedup-stmt",
 ])
 
 RULES["from-stmt"] = ("source table/model reference", [
@@ -249,6 +251,14 @@ RULES["take-stmt"] = ("take N [.. M] (parser form)", [
 
 RULES["expand-stmt"] = ("one row per array element of a primary input column", [
     r'"expand" ident ("as" ident)?',
+])
+
+RULES["setop-stmt"] = ("combine the current rows with a same-shaped model", [
+    r'("union" "all"? | "intersect" | "except") ident',
+])
+
+RULES["dedup-stmt"] = ("duplicate-row elimination over the final row set", [
+    r'"dedup"',
 ])
 
 RULES["pipeline-decl"] = ("pipeline: models + source overrides", [
@@ -377,7 +387,7 @@ PRECEDENCE: List[List[str]] = [
 
 # lexer-reserved words with no production in the reference grammar yet
 # (kept in lockstep with lexer.KEYWORDS by test_grammar)
-RESERVED_UNUSED = {"all", "is", "=>", "freshness"}
+RESERVED_UNUSED = {"is", "=>", "freshness"}
 
 LEXICAL = {
     "STR": STR_GBNF,

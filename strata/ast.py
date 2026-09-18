@@ -184,6 +184,32 @@ class ExpandStmt(Stmt):
 
 
 @dataclass
+class SetOpStmt(Stmt):
+    """Combine the current rows with a same-shaped upstream model.
+
+    ``op`` is union (DISTINCT unless ``all``), intersect or except (always
+    DISTINCT: the ALL variants are not portable). The right side is a model
+    name whose schema must carry the same columns in the same order with
+    compatible types; statements before the set-op shape the left branch,
+    statements after it see the combined rows.
+    """
+    op: str = ""
+    table: str = ""
+    all: bool = False
+    span: Any = None
+
+
+@dataclass
+class DedupStmt(Stmt):
+    """Duplicate-row elimination over the final row set (SELECT DISTINCT).
+
+    Full-row only: key-based dedup without a tiebreak is engine-dependent,
+    so keeping one row per key must be written as an explicit group-by.
+    """
+    span: Any = None
+
+
+@dataclass
 class SelectStmt(Stmt):
     assigns: List[OutAssign] = field(default_factory=list)
 

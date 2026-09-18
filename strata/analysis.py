@@ -118,6 +118,18 @@ class Plan:
     # One expand per model: (source_col, output_col, element_type_name) of the
     # lateral array unnest that runs in the base subquery.
     expand: Optional[Tuple[str, str, str]] = None
+    # Set operation combining the current rows with a same-shaped model:
+    # (op, all, right_node). Statements before it shape the left branch;
+    # setop_base_split/setop_pred_split record how many base_cols/preds
+    # belong to the left branch at union time.
+    set_op: Optional[Tuple[str, bool, str]] = None
+    setop_base_split: int = 0
+    setop_pred_split: int = 0
+    # Union branch column types, in positional order: (name, left_type,
+    # right_type, unified_type) for the casts in both branches.
+    setop_cols: List[Tuple[str, "StrataType", "StrataType", "StrataType"]] = field(default_factory=list)
+    # Full-row duplicate elimination (SELECT DISTINCT over the final rows).
+    distinct: bool = False
 
 
 @dataclass
@@ -551,6 +563,8 @@ class Checker:
                 deps.append(s.table)
             elif isinstance(s, ast.JoinStmt):
                 deps.append(s.table)
+            elif isinstance(s, ast.SetOpStmt):
+                deps.append(s.table)
         return deps
 
     def _check_model(self, decl: ast.ModelDecl) -> TypedModel:
@@ -852,6 +866,10 @@ class _ModelState:
             self.tm.plan.limit = (s.start, s.end)
         elif isinstance(s, ast.ExpandStmt):
             self.do_expand(s)
+        elif isinstance(s, ast.SetOpStmt):
+            self.do_setop(s)
+        elif isinstance(s, ast.DedupStmt):
+            self.tm.plan.distinct = True
         elif isinstance(s, ast.SelectStmt):
             for a in s.assigns:
                 self.do_output(a)
@@ -859,6 +877,9 @@ class _ModelState:
             raise err("E060", f"unsupported statement {type(s).__name__}", s.span)
 
     def do_from(self, s: ast.FromStmt):
+        if self.tm.plan.set_op is not None:
+            raise err("E076", "a set model combines exactly one from with one "
+                              "named model; chain further inputs downstream", s.span)
         cols, is_src, node = self.c.p.input_schema(s.table)
         inp = InputSpec(alias=s.table, node=node, is_source=is_src,
                         cols=OrderedDict((k, c.clone()) for k, c in cols.items()))
@@ -871,6 +892,9 @@ class _ModelState:
             self.base_cols.append(BaseCol(name=name, expr=None))
 
     def do_join(self, s: ast.JoinStmt):
+        if self.tm.plan.set_op is not None:
+            raise err("E076", f"{s.kind} join after a set operation is not supported; "
+                              "join the combined rows in a downstream model", s.span)
         idx = len(self.inputs)
         cols, is_src, node = self.c.p.input_schema(s.table)
         inp = InputSpec(alias=s.table, node=node, is_source=is_src,
@@ -912,6 +936,10 @@ class _ModelState:
         if self.tm.plan.expand is not None:
             raise err("E075", "only one expand per model (a second lateral "
                               "unnest would cross-multiply rows)", s.span)
+        if self.tm.plan.set_op is not None:
+            raise err("E076", "expand after a set operation is not supported; "
+                              "expand a branch before combining, or the combined "
+                              "rows in a downstream model", s.span)
         if not self.inputs:
             raise err("E075", "expand requires a from first", s.span)
         if s.name not in self.inputs[0].cols:
@@ -932,6 +960,52 @@ class _ModelState:
         self.cols[s.as_name] = Col(name=s.as_name, t=elem, nullable=True)
         self.own[s.as_name] = self.tm.name
         self.origins[s.as_name] = [Origin(self.inputs[0].node, s.name, "expanded")]
+
+    def do_setop(self, s: ast.SetOpStmt):
+        """Combine the current rows with a same-shaped upstream model.
+
+        Pipeline semantics: statements before the set-op shape the left
+        branch (filters and lets apply there); statements after it see the
+        combined rows. The union schema keeps the left column names in order
+        with unified types and OR-ed nullability, so both SQL branch
+        spellings (by-name DuckDB, by-position everywhere else) agree.
+        """
+        plan = self.tm.plan
+        if plan.set_op is not None:
+            raise err("E076", "only one set operation per model (chain them "
+                              "through downstream models)", s.span)
+        if not self.inputs:
+            raise err("E076", f"{s.op} requires a from first", s.span)
+        if plan.joins:
+            raise err("E076", f"{s.op} combines single-table row sets; join "
+                              "in a downstream model instead", s.span)
+        if self.outputs or plan.sorts or plan.limit is not None or self.group_keys:
+            raise err("E076", f"{s.op} must come before select/derive/aggregate/"
+                              "group/sort/take (those see the combined rows)", s.span)
+        cols, is_src, node = self.c.p.input_schema(s.table)
+        if is_src:
+            raise err("E076", f"{s.op} combines models, not sources; wrap "
+                              f"{s.table!r} in a model first", s.span)
+        names = list(self.cols)
+        if list(cols) != names:
+            raise err("E077", f"{s.op} {s.table!r} must carry the same columns "
+                              f"in the same order (left {names}, "
+                              f"right {list(cols)})", s.span)
+        for n in names:
+            lt, rt = self.cols[n].t, cols[n].t
+            u = lt if lt == rt else unify(lt, rt)
+            if u.name == "unknown" or (u.name == "money" and lt != rt):
+                raise err("E077", f"{s.op} column {n!r} cannot align {lt} "
+                                  f"with {rt}", s.span)
+            self.cols[n] = Col(name=n, t=u, nullable=self.cols[n].nullable or cols[n].nullable)
+            self.own[n] = self.tm.name
+            self.origins[n] = list(self.origins.get(n, [])) + [Origin(node, n, "set")]
+            self.tm.reads.add((self.inputs[0].node, n))
+            self.tm.reads.add((node, n))
+            plan.setop_cols.append((n, lt, rt, u))
+        plan.set_op = (s.op, s.all, node)
+        plan.setop_base_split = len(self.base_cols)
+        plan.setop_pred_split = len(plan.preds)
 
     def _require_no_window(self, e: ast.Node, span, where: str):
         """Windows run after grouping in the outer query, so `let` (inner

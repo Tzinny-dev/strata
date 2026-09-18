@@ -340,6 +340,18 @@ class Parser:
                     self.advance()
                     as_name = self.expect("ID").value
                 decl.stmts.append(ast.ExpandStmt(name=name, as_name=as_name, span=self.span(t)))
+            elif self.at("KW", "union") or self.at("KW", "intersect") or self.at("KW", "except"):
+                t = self.advance()
+                op = t.value
+                all_ = False
+                if op == "union" and self.at("KW", "all"):
+                    self.advance()
+                    all_ = True
+                decl.stmts.append(ast.SetOpStmt(op=op, table=self.expect("ID").value,
+                                                all=all_, span=self.span(t)))
+            elif self.at("KW", "dedup"):
+                t = self.advance()
+                decl.stmts.append(ast.DedupStmt(span=self.span(t)))
             elif self.at("KW", "select"):
                 t = self.advance()
                 decl.stmts.append(ast.SelectStmt(assigns=self.parse_assigns(), span=self.span(t)))

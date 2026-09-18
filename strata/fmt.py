@@ -142,6 +142,10 @@ def _stmts(stmts, ind: str):
             out.append(f"{ind}take {s.limit}" if s.limit is not None else f"{ind}take {s.start}..{s.end}")
         elif isinstance(s, ast.ExpandStmt):
             out.append(f"{ind}expand {s.name}" + (f" as {s.as_name}" if s.as_name != s.name else ""))
+        elif isinstance(s, ast.SetOpStmt):
+            out.append(f"{ind}{s.op}" + (" all" if s.all else "") + f" {s.table}")
+        elif isinstance(s, ast.DedupStmt):
+            out.append(f"{ind}dedup")
         else:
             raise ValueError(f"unsupported statement: {type(s).__name__}")
     return out

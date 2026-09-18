@@ -582,10 +582,12 @@ class Translator:
         return f"({lhs} IN ({parts}))"
 
 
-def gen_base_subquery(plan, dialect=DUCKDB, upstream_prefix: str = "v_") -> str:
+def _base_select(plan, dialect, base_cols, preds, upstream_prefix: str = "v_") -> str:
+    """SELECT...FROM...[WHERE] over the left table (the left branch when the
+    model combines rows with a set operation, the whole base otherwise)."""
     t = Translator(plan, _RAW, dialect=dialect)
     # explicit projection over the left table (avoids name clashes with computed columns)
-    computed = {bc.name for bc in plan.base_cols if bc.expr is not None}
+    computed = {bc.name for bc in base_cols if bc.expr is not None}
     left_input = plan.inputs[0]
     left_table = f"{upstream_prefix}{left_input.node}" if not left_input.is_source else left_input.node
     expand, expand_shadow = plan.expand, None
@@ -599,7 +601,7 @@ def gen_base_subquery(plan, dialect=DUCKDB, upstream_prefix: str = "v_") -> str:
         inp = plan.inputs[j.index]
         for cname in inp.cols:
             selects.append(f"t{j.index}.{cname} AS __j{j.index}_{cname}")
-    for bc in plan.base_cols:
+    for bc in base_cols:
         if bc.expr is None:
             continue
         selects.append(f"{t.expr(bc.expr)} AS {bc.name}")
@@ -635,11 +637,80 @@ def gen_base_subquery(plan, dialect=DUCKDB, upstream_prefix: str = "v_") -> str:
                 f"CAST(u0.VALUE AS {t.dialect.sql_type(elem)})"
             selects.append(f"{value} AS {out}")
     base = "SELECT " + ", ".join(selects) + "\nFROM " + "\n  ".join(froms)
-    if plan.preds:  # pre-aggregation filters live in base subquery for cleanliness
+    if preds:  # pre-aggregation filters live in base subquery for cleanliness
         t2 = Translator(plan, _RAW, dialect=dialect)
-        base += "\nWHERE " + " AND ".join(t2.expr(p) for p in plan.preds)
-    
+        base += "\nWHERE " + " AND ".join(t2.expr(p) for p in preds)
+
     return base
+
+
+def _union_cast(dialect, t: StrataType) -> str:
+    """CAST target aligning a set-operation branch column to its unified type."""
+    target = dialect.sql_type(t.name)
+    if target is not None:
+        return target
+    if t.name == "decimal":
+        return dialect.decimal_sql(t.precision, t.scale)
+    if t.name == "money":
+        return dialect.money
+    if t.name == "array":
+        elem = dialect.sql_type(t.elem.name) if t.elem is not None else None
+        return dialect.array_sql(elem or "VARCHAR")
+    raise RuntimeError(f"dialect {dialect.name!r} cannot align set column of type {t}")
+
+
+def _setop_base(plan, dialect, upstream_prefix: str = "v_"):
+    """(extra_ctes, base_body) for a model combining rows with a set operation.
+
+    The left branch is the model's own base query (filters and lets before
+    the set-op live there); the right branch projects the upstream model's
+    view with positional casts to the unified types. Both branches spell the
+    same column aliases in the same order, so by-name (DuckDB) and
+    by-position (everywhere else) matching agree. Lets and filters after the
+    set-op compile against the combined rows through a `t0`-aliased union
+    subquery, so _RAW qualified references keep resolving unchanged.
+    """
+    op, all_, right_node = plan.set_op
+    t = Translator(plan, _RAW, dialect=dialect)
+    left_q = _base_select(plan, dialect, plan.base_cols[:plan.setop_base_split],
+                          plan.preds[:plan.setop_pred_split], upstream_prefix)
+
+    def branch(alias, table, idx):
+        parts = []
+        for name, left_t, right_t, unified in plan.setop_cols:
+            side_t = (left_t, right_t)[idx]
+            ref = f"{alias}.{name}"
+            parts.append(ref if side_t == unified
+                         else f"CAST({ref} AS {_union_cast(dialect, unified)})")
+        return "SELECT " + ", ".join(parts) + f" FROM {table}"
+
+    left_branch = branch("b_left", "b_left", 0)
+    right_table = f"{upstream_prefix}{right_node}"  # the right side is always a model
+    right_branch = branch(right_table, right_table, 1)
+    op_sql = {"union": "UNION ALL" if all_ else "UNION",
+              "intersect": "INTERSECT", "except": "EXCEPT"}[op]
+    union_q = f"{left_branch}\n{op_sql}\n{right_branch}"
+
+    post_lets = [bc for bc in plan.base_cols[plan.setop_base_split:] if bc.expr is not None]
+    post_preds = plan.preds[plan.setop_pred_split:]
+    if not post_lets and not post_preds:
+        return [f"b_left AS (\n{left_q}\n)"], union_q
+    shadowed = {bc.name for bc in post_lets}
+    inner = ", ".join(n for n, _, _, _ in plan.setop_cols if n not in shadowed)
+    lets = ", ".join(f"{t.expr(bc.expr)} AS {bc.name}" for bc in post_lets)
+    sel = inner + (", " + lets if lets else "")
+    base_body = f"SELECT {sel}\nFROM (\n{union_q}\n) t0"
+    if post_preds:
+        base_body += "\nWHERE " + " AND ".join(t.expr(p) for p in post_preds)
+    return [f"b_left AS (\n{left_q}\n)"], base_body
+
+
+def gen_base_subquery(plan, dialect=DUCKDB, upstream_prefix: str = "v_"):
+    """Content of the `base` CTE plus any sibling CTEs it needs (set models
+    need `b_left` for their left branch): returns (extra_ctes, base_body)."""
+    if plan.set_op is None:
+        return [], _base_select(plan, dialect, plan.base_cols, plan.preds, upstream_prefix)
+    return _setop_base(plan, dialect, upstream_prefix)
 
 
 def gen_outer(plan, dialect=DUCKDB) -> str:
@@ -648,7 +719,7 @@ def gen_outer(plan, dialect=DUCKDB) -> str:
     for out in plan.outputs:
         sql = t.expr(out.expr)
         parts.append(f"{sql} AS {out.name}")
-    sql = "SELECT " + ", ".join(parts) + "\nFROM base"
+    sql = "SELECT " + ("DISTINCT " if plan.distinct else "") + ", ".join(parts) + "\nFROM base"
     if plan.grouped:
         if plan.group_exprs:
             sql += "\nGROUP BY " + ", ".join(t.expr(k) for k in plan.group_exprs)
@@ -672,9 +743,10 @@ def model_sql(tm: TypedModel, dialect=DUCKDB, upstream_prefix: str = "v_") -> st
     plan = tm.plan
     if plan is None:
         return "-- no plan"
-    base = gen_base_subquery(plan, dialect=dialect, upstream_prefix=upstream_prefix)
+    extras, base = gen_base_subquery(plan, dialect=dialect, upstream_prefix=upstream_prefix)
     outer = gen_outer(plan, dialect=dialect)
-    return f"-- model {tm.name}" + (f" -> contract {tm.contract}" if tm.contract else "") + "\nWITH base AS (\n" + base + "\n)\n" + outer + "\n"
+    ctes = ",\n".join(extras + [f"base AS (\n{base}\n)"])
+    return f"-- model {tm.name}" + (f" -> contract {tm.contract}" if tm.contract else "") + "\nWITH " + ctes + "\n" + outer + "\n"
 
 
 def full_sql(tms: List[TypedModel], names: List[str], dialect=DUCKDB,
