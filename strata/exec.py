@@ -197,6 +197,41 @@ def _physical_types(t: StrataType) -> set:
     return set()
 
 
+def check_join_cardinality(con, project: Project, tm: TypedModel, order,
+                           branch: str, source_overrides, pins: List[str]):
+    """Enforce `expect many_to_one|one_to_one` join annotations at
+    materialize time: count duplicate equi-join key groups on the upstream
+    tables (right side always; left side too for one_to_one). A violation
+    aborts the run like a pin failure, leaving last-known-good live."""
+    if not any(j.expect for j in tm.plan.joins):
+        return
+    # Same upstream resolution as the model's own SQL: staged views for
+    # upstreams built in this run, live views otherwise.
+    staged = any(d in order for d in tm.deps)
+    staged_prefix = STAGED_PREFIX + branch + BRANCH_SEP
+    prefix = staged_prefix if staged else PROMOTED_PREFIX
+    for j in tm.plan.joins:
+        if not j.expect:
+            continue
+        sides = [(j.index, j.right_keys)]
+        if j.expect == "one_to_one":
+            sides.append((0, j.left_keys))
+        for idx, keys in sides:
+            inp = tm.plan.inputs[idx]
+            table = f"{prefix}{inp.node}" if not inp.is_source else inp.node
+            sql = sqlgen.join_check_sql(table, keys)
+            if source_overrides:
+                sql, _ = _apply_source_overrides(sql, project, source_overrides)
+            n = con.execute(sql).fetchone()[0]
+            if n:
+                raise PinError(
+                    f"join cardinality FAILED [{tm.name} {j.kind} {j.alias}]: "
+                    f"expected {j.expect} but {table} has {n} duplicate "
+                    f"key groups ({', '.join(keys)})")
+            pins.append(f"  ok  {tm.name} {j.kind} {j.alias}: {j.expect} "
+                        f"({table} unique on {', '.join(keys)})")
+
+
 def runtime_pins(con, project: Project, tm: TypedModel, view: str, report: List[str]):
     if not tm.contract:
         return
@@ -326,6 +361,7 @@ def materialize(con, project: Project, tms: Dict[str, TypedModel],
                 con.execute(stmt)
         applied.append(name)
         runtime_pins(con, project, tm, staged_name(name, branch), pins)
+        check_join_cardinality(con, project, tm, order, branch, source_overrides, pins)
     if not stage_only:
         # Publish into run-addressed snapshot TABLES (data frozen at this
         # run's moment) when the run identity is known; legacy staged-view

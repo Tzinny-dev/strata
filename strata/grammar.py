@@ -199,8 +199,8 @@ RULES["from-stmt"] = ("source table/model reference", [
     r'"from" ident',
 ])
 
-RULES["join-stmt"] = ("join kinds with on-condition", [
-    r'("join_left" | "join_inner" | "join_anti" | "join_semi") ident "on" expr',
+RULES["join-stmt"] = ("join kinds with on-condition and optional cardinality expectation", [
+    r'("join_left" | "join_inner" | "join_anti" | "join_semi") ident "on" expr ("expect" ("many_to_one" | "one_to_one"))?',
 ])
 
 RULES["filter-stmt"] = ("row filter (filter|where)", [

@@ -122,6 +122,7 @@ class JoinStmt(Stmt):
     kind: str = ""          # left inner anti semi
     table: str = ""
     on: Node = None
+    expect: Optional[str] = None  # None | "many_to_one" | "one_to_one"
 
 
 @dataclass

@@ -133,7 +133,8 @@ def _stmts(stmts, ind: str):
         if isinstance(s, ast.FromStmt):
             out.append(f"{ind}from {s.table}")
         elif isinstance(s, ast.JoinStmt):
-            out.append(f"{ind}join_{s.kind} {s.table} on {_expr(s.on)}")
+            out.append(f"{ind}join_{s.kind} {s.table} on {_expr(s.on)}" +
+                       (f" expect {s.expect}" if s.expect else ""))
         elif isinstance(s, ast.FilterStmt):
             out.append(f"{ind}filter {_expr(s.cond)}")
         elif isinstance(s, ast.LetStmt):

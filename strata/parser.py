@@ -314,6 +314,7 @@ class Parser:
                     kind=JOIN_KINDS[k], table=self.expect("ID").value, span=self.span(t)))
                 self.expect("KW", "on")
                 decl.stmts[-1].on = self.parse_expr()
+                decl.stmts[-1].expect = self.parse_join_expect()
             elif self.at("KW") and self.cur().value in ("filter", "where"):
                 t = self.advance()
                 decl.stmts.append(ast.FilterStmt(cond=self.parse_expr(), span=self.span(t)))
@@ -395,6 +396,19 @@ class Parser:
                     f"{self.cur().value!r} in model body")
         self.expect("SYM", "}")
         return decl
+
+    def parse_join_expect(self) -> Optional[str]:
+        # `expect many_to_one|one_to_one` after a join condition. The two
+        # cardinalities are contextual identifiers (not keywords) so existing
+        # columns named like them keep parsing; anything else is a parse error.
+        if not self.match("KW", "expect"):
+            return None
+        if self.at("ID") and self.cur().value in ("many_to_one", "one_to_one"):
+            return self.advance().value
+        t = self.cur()
+        raise ParseError(
+            f"{self.path}:{t.line}:{t.col}: expected join cardinality "
+            f"many_to_one or one_to_one but found {t.kind} {t.value!r}")
 
     def parse_sort(self, t):
         self.expect("SYM", "{")
@@ -673,6 +687,7 @@ class Parser:
                     kind=JOIN_KINDS[k], table=self.expect("ID").value, span=self.span(tt)))
                 self.expect("KW", "on")
                 mv.stmts[-1].on = self.parse_expr()
+                mv.stmts[-1].expect = self.parse_join_expect()
             elif self.at("KW") and self.cur().value in ("filter", "where"):
                 tt = self.advance()
                 mv.stmts.append(ast.FilterStmt(cond=self.parse_expr(), span=self.span(tt)))

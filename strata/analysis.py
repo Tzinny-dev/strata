@@ -82,6 +82,12 @@ class JoinSpec:
     node: str
     on: ast.Node
     kind: str = "left"
+    # Cardinality expectation (None | "many_to_one" | "one_to_one") with the
+    # equi-join key columns per side, extracted at check time; enforced at
+    # materialize time by counting duplicate key groups on the upstream tables.
+    expect: Optional[str] = None
+    left_keys: List[str] = field(default_factory=list)
+    right_keys: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -987,12 +993,107 @@ class _ModelState:
         self.tm.plan.joins.append(js)
         self._require_no_window(s.on, s.span, "join condition")
         self.infer(s.on)
+        if s.expect is not None:
+            js.expect, js.left_keys, js.right_keys = self._join_cardinality(s, inp)
         for name, col in inp.cols.items():
             key = f"__j{idx}_{name}"
             self.cols[key] = col
             self.own[key] = node
             self.origins[key] = [Origin(node, name, "joined")]
             self.base_cols.append(BaseCol(name=key, expr=None))
+
+    def _join_cardinality(self, s: ast.JoinStmt, inp: InputSpec):
+        """Validate an `expect many_to_one|one_to_one` annotation and extract
+        the equi-join key columns per side for the materialize-time check.
+
+        many_to_one needs keys on the right side only (their uniqueness bounds
+        every left row to at most one match); one_to_one needs at least one
+        key pair relating a left column to a right column. Conjuncts that only
+        filter left rows are safely ignored (AND-semantics: they remove
+        matches, never create them); anything touching the right table outside
+        a clean `right_col == <non-right-expr>` equi-pair fails loudly, since
+        the upstream uniqueness probe cannot cover it.
+        """
+        if s.kind in ("anti", "semi"):
+            raise err("E079", f"expect {s.expect} does not apply to a {s.kind} "
+                              f"join (it never multiplies rows)", s.span)
+        left_alias = self.inputs[0].alias
+        true_pairs: List[Tuple[str, str]] = []
+        right_only: List[str] = []
+
+        def l_plain(e):
+            if not isinstance(e, ast.ColumnRef):
+                return None
+            if e.qualifier:
+                return e.name if e.qualifier == left_alias else None
+            if e.name in self.inputs[0].cols and \
+                    self.cols.get(e.name) is self.inputs[0].cols.get(e.name):
+                return e.name
+            return None
+
+        def r_plain(e):
+            if isinstance(e, ast.ColumnRef) and e.qualifier == inp.alias:
+                return e.name
+            return None
+
+        def refs_right(e) -> bool:
+            if isinstance(e, ast.ColumnRef):
+                return e.qualifier == inp.alias
+            if isinstance(e, ast.BinOp):
+                return refs_right(e.left) or refs_right(e.right)
+            if isinstance(e, ast.UnOp):
+                return refs_right(e.operand)
+            if isinstance(e, ast.Call):
+                return any(refs_right(a) for a in e.args)
+            if isinstance(e, ast.WindowCall):
+                return any(refs_right(a) for a in e.args)
+            if isinstance(e, ast.Kwarg):
+                return refs_right(e.value)
+            return False
+
+        def walk(e):
+            if isinstance(e, ast.BinOp) and e.op == "and":
+                walk(e.left); walk(e.right); return
+            if isinstance(e, ast.BinOp) and e.op == "==":
+                ln, rn = l_plain(e.left), r_plain(e.right)
+                if ln is not None and rn is not None:
+                    true_pairs.append((ln, rn)); return
+                ln, rn = l_plain(e.right), r_plain(e.left)
+                if ln is not None and rn is not None:
+                    true_pairs.append((ln, rn)); return
+                rn = r_plain(e.left) or r_plain(e.right)
+                if rn is not None:
+                    other = e.right if r_plain(e.left) else e.left
+                    if not refs_right(other):
+                        right_only.append(rn); return
+                if refs_right(e.left) or refs_right(e.right):
+                    raise err("E079", f"expect {s.expect} needs the right side "
+                                      f"referenced only through equi-join keys "
+                                      f"(found an exotic condition)", s.span)
+                return  # left-local filter or tautology: removes matches only
+            if refs_right(e):
+                raise err("E079", f"expect {s.expect} needs equi-join keys on plain "
+                                  f"columns (top-level AND of col == col)", s.span)
+            return  # left-local filter: ignore
+
+        walk(s.on)
+
+        def ordered(keys):
+            out = []
+            for k in keys:
+                if k not in out:
+                    out.append(k)
+            return out
+
+        left_keys = ordered([l for l, _ in true_pairs])
+        right_keys = ordered([r for _, r in true_pairs] + right_only)
+        if not right_keys:
+            raise err("E079", f"expect {s.expect} needs at least one equi-join key "
+                              f"on {inp.alias}", s.span)
+        if s.expect == "one_to_one" and not true_pairs:
+            raise err("E079", "expect one_to_one needs at least one equi-join key "
+                              "pair relating a left column to a right column", s.span)
+        return s.expect, left_keys, right_keys
 
     def do_let(self, s: ast.LetStmt):
         self._require_no_window(s.expr, s.span, "let")

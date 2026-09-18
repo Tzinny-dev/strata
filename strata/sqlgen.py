@@ -716,6 +716,17 @@ def gen_base_subquery(plan, dialect=DUCKDB, upstream_prefix: str = "v_"):
     return _setop_base(plan, dialect, upstream_prefix)
 
 
+def join_check_sql(table: str, keys) -> str:
+    """Duplicate-key probe backing a join cardinality expectation: counts key
+    groups occurring more than once, ignoring all-NULL keys (they never match
+    in an equi-join, so they cannot fan out). Zero means the side is unique
+    on those keys; anything else fails the expectation at materialize time."""
+    cond = " AND ".join(f"{k} IS NOT NULL" for k in keys)
+    group = ", ".join(keys)
+    return (f"SELECT COUNT(*) FROM (SELECT 1 FROM {table} WHERE {cond} "
+            f"GROUP BY {group} HAVING COUNT(*) > 1) t")
+
+
 def gen_outer(plan, dialect=DUCKDB) -> str:
     t = Translator(plan, _OUTER, dialect=dialect)
     parts = []
