@@ -56,6 +56,7 @@ SYMBOLS: List[str] = [
 ]
 
 TYPE_KW_GBNF = "(" + " | ".join(f'"{k}"' for k in TYPE_KEYWORDS) + ")"
+TYPE_KW_SCALAR_GBNF = "(" + " | ".join(f'"{k}"' for k in TYPE_KEYWORDS if k not in ("decimal", "array")) + ")"
 
 # lexer lexical shapes, verbatim in GBNF terminal form
 INT_GBNF = '[0-9] ([0-9] | "_")* [0-9] | [0-9]'
@@ -73,13 +74,16 @@ RULES["root"] = ("a .strata module: { top_decl }", ["top-decl*"])
 
 RULES["top-decl"] = ("one top-level declaration", [
     "source-decl", "contract-decl", "model-decl", "pipeline-decl",
-    "fn-decl", "import-decl", "test-decl",
+    "fn-decl", "import-decl", "test-decl", "generator-call",
+])
+RULES["generator-call"] = ("top-level model generator call (fn emitting models)", [
+    r'ident "(" call-args? ")"',
 ])
 RULES["test-decl"] = ("declarative data test on a model (expect row_count or expect <col> op literal)", [
     r'"test" ident "{" expect-list? "}"',
 ])
-RULES["expect-list"] = ("one or more expect clauses, semicolon separated", [
-    r'(expect (";" expect)*)?',
+RULES["expect-list"] = ("one or more expect clauses; the parser treats ';' as an optional separator (no mandatory semicolon)", [
+    r'(expect (";"? expect)* (";"?)? )?',
 ])
 RULES["expect"] = ("a single expect clause", [
     r'"expect" expect-target comparison-op literal',
@@ -100,39 +104,36 @@ RULES["path-ref"] = ("dotted module path", [
 ])
 
 RULES["source-decl"] = ("external table declaration", [
-    r'"source" ident "(" named-arg-list? ")" ("{" source-prop-list "}")?',
+    r'"source" ident "(" resource-arg-list? ")" ("{" source-prop-list "}")?',
 ])
 
-RULES["named-arg-list"] = ("resource args: ident \":\" value, comma separated", [
-    "named-arg (:: \",\" named-arg)*",
+RULES["resource-arg-list"] = ("source resource args: ident \":\" STR|IDENT, comma separated (no trailing comma)", [
+    '(resource-arg (\",\" resource-arg)*)?',
 ])
 
-RULES["named-arg"] = ("ident \":\" STR|IDENT", [
+RULES["resource-arg"] = ("ident \":\" STR|IDENT", [
+    r'ident ":" (string | ident)',
+])
+
+RULES["named-arg-list"] = ("override/resource args: ident \":\" value, comma separated", [
+    "(named-arg (\",\" named-arg)* \",\"?)?",
+])
+
+RULES["named-arg"] = ("ident \":\" STR|IDENT|INT", [
     r'ident ":" (string | ident | int-lit)',
 ])
 
-RULES["source-prop-list"] = ("source properties", [
-    "(source-prop)*",
+RULES["source-prop-list"] = ("source properties (parser: optional single comma between, trailing comma ok)", [
+    "(source-prop (\",\"? source-prop)* \",\"?)?",
 ])
 
-RULES["source-prop"] = ("freshness | filter | schema | columns block", [
-    r'"freshness" ":" interval-expr',
-    r'"filter" ":" expr',
-    r'"schema" ":" string',
+RULES["source-prop"] = ("columns block | ident \":\" scalar value", [
     r'"columns" ":" "{" contract-field-list "}"',
     r'ident ":" (string | int-lit | ident)',
 ])
 
-RULES["contract-field-list"] = ("fields separated by , or ;", [
-    "(contract-field (\",\" | \";\")*)*",
-])
-
-RULES["interval-expr"] = ("freshness bound", [
-    r'(">=" | "<=") int-lit time-unit',
-])
-
-RULES["time-unit"] = ("d|h|m|s", [
-    r'"d"', r'"h"', r'"m"', r'"s"',
+RULES["contract-field-list"] = ("fields; per field: optional one \",\" then optional one \";\" (parser form)", [
+    "(contract-field \",\"? \";\"?)*",
 ])
 
 RULES["contract-decl"] = ("typed output contract", [
@@ -147,23 +148,29 @@ RULES["type-spec"] = ("builtin type with optional parameters", [
     r'"decimal" "(" int-lit "," int-lit ")"',
     r'"array" "(" type-kw ")"',
     r'"money" ("(" ident ")")?',
-    "type-kw",
+    "type-kw-scalar",
 ])
 
-RULES["type-annot"] = ("column annotation", [
+RULES["type-kw-scalar"] = ("builtin type keyword sans decimal/array (must be parameterized)", [
+    "TYPE_KW_SCALAR",
+])
+
+RULES["type-annot"] = ("column annotation (parser.accepts: nonnull/unique/primary_key/protected/enum/classification)", [
     r'"nonnull"', r'"unique"', r'"primary_key"', r'"protected"',
-    r'"enum" "{" string-list "}"',
-    r'"classification" ":" string',
-    r'"partition_by"',
-    r'"freshness" ":" interval-expr',
+    r'"enum" "{" enum-value-list "}"',
+    r'"classification" ":" (string | ident)',
 ])
 
-RULES["string-list"] = ("quoted strings, comma separated", [
-    "(string (\",\" string)*)?",
+RULES["enum-value-list"] = ("enum values: quoted strings or bare identifiers, comma separated", [
+    "(enum-value (\",\" enum-value)* \",\"?)?",
+])
+
+RULES["enum-value"] = ("a single enum value", [
+    "string", "ident",
 ])
 
 RULES["model-decl"] = ("model: pure Table -> Table with optional contract", [
-    r'"model" ident ("->" "contract" ident)? "{" model-item* "}"',
+    r'"model" (ident | string) ("->" "contract" ident)? "{" model-item* "}"',
 ])
 
 RULES["model-item"] = ("model attribute or statement", [
@@ -209,7 +216,7 @@ RULES["aggregate-stmt"] = ("aggregation", [
 ])
 
 RULES["out-assign-list"] = ("ident = expr assignments", [
-    "out-assign (:: \",\" out-assign)*",
+    "(out-assign (\",\" out-assign)* \",\"?)?",
 ])
 
 RULES["out-assign"] = ("ident = expr", [
@@ -229,7 +236,7 @@ RULES["sort-stmt"] = ("ordering keys", [
 ])
 
 RULES["sort-key-list"] = ("keys, comma separated", [
-    "sort-key (:: \",\" sort-key)*",
+    "(sort-key (\",\" sort-key)* \",\"?)?",
 ])
 
 RULES["sort-key"] = ("expr with optional asc/desc (parser form)", [
@@ -241,26 +248,25 @@ RULES["take-stmt"] = ("take N [.. M] (parser form)", [
 ])
 
 RULES["pipeline-decl"] = ("pipeline: models + source overrides", [
-    r'"pipeline" ident ("env" ":" ident)? "{" pipeline-item* "}"',
+    r'"pipeline" ident ("env" ":" ident)? "{" pipeline-item-list "}"',
 ])
 
-RULES["pipeline-item"] = ("pipeline attribute or entry", [
+RULES["pipeline-item-list"] = ("pipeline items (comma separated, trailing comma allowed, may be empty)", [
+    '(pipeline-item ("," pipeline-item)* ","?)?',
+])
+
+RULES["pipeline-item"] = ("pipeline attribute or entry (parser keys: env, models, sources)", [
     r'"env" ":" ident',
-    r'"description" ":" string',
-    r'"models" ":" "[" path-ref-list "]"',
+    r'"models" ":" "[" expr-list "]"',
     r'"sources" ":" "{" source-override-list "}"',
 ])
 
-RULES["path-ref-list"] = ("model refs", [
-    "(path-ref (\",\" path-ref)*)?",
-])
-
 RULES["source-override-list"] = ("per-source from(...) overrides", [
-    "(source-override (\",\" source-override)*)?",
+    "(source-override (\",\" source-override)* \",\"?)?",
 ])
 
-RULES["source-override"] = ("ident: from(named-args)", [
-    r'ident "from" "(" named-arg-list? ")"',
+RULES["source-override"] = ("ident (optional override: `ident: from(kv)`)", [
+    r'ident (":" "from" "(" named-arg-list? ")")?',
 ])
 
 RULES["fn-decl"] = ("compile-time pure function (braces optional)", [
@@ -268,8 +274,8 @@ RULES["fn-decl"] = ("compile-time pure function (braces optional)", [
     r'"fn" ident "(" param-list? ")" "->" type-str expr',
 ])
 
-RULES["param-list"] = ("fn parameters", [
-    'ident ":" type-str (:: "," ident ":" type-str)*',
+RULES["param-list"] = ("fn parameters (no trailing comma)", [
+    'ident ":" type-str (\",\" ident ":" type-str)*',
 ])
 
 RULES["type-str"] = ("List<...> | TYPE_KW | ident", [
@@ -278,7 +284,7 @@ RULES["type-str"] = ("List<...> | TYPE_KW | ident", [
 ])
 
 RULES["expr-list"] = ("expressions, comma separated", [
-    "expr (:: \",\" expr)*",
+    "(expr (\",\" expr)* \",\"?)?",
 ])
 
 RULES["string"] = ("double-quoted, \\n \\t \\\" \\\\ escapes, ${expr} slots", [
@@ -312,7 +318,7 @@ RULES["column-ref"] = ("bare or schema-qualified column", [
 RULES["kwarg"] = ("named call argument", [r'ident ":" expr'])
 RULES["call-arg"] = ("positional or named argument", ["expr", "kwarg"])
 RULES["call-args"] = ("comma-separated call arguments", [
-    r'call-arg ("," call-arg)*',
+    r'call-arg ("," call-arg)* ","?',
 ])
 RULES["call-expr"] = ("built-in or user call", [
     r'ident "(" call-args? ")"',
@@ -320,7 +326,7 @@ RULES["call-expr"] = ("built-in or user call", [
 ])
 
 RULES["window-spec-list"] = ("over clauses, comma separated", [
-    "window-spec (:: \",\" window-spec)*",
+    '(window-spec ("," window-spec)?)?',
 ])
 
 RULES["window-spec"] = ("partition_by: [expr-list] | sort: [expr desc, ...]", [
@@ -367,7 +373,7 @@ PRECEDENCE: List[List[str]] = [
 
 # lexer-reserved words with no production in the reference grammar yet
 # (kept in lockstep with lexer.KEYWORDS by test_grammar)
-RESERVED_UNUSED = {"all", "is", "=>"}
+RESERVED_UNUSED = {"all", "is", "=>", "freshness"}
 
 LEXICAL = {
     "STR": STR_GBNF,
@@ -375,6 +381,7 @@ LEXICAL = {
     "FLOAT": FLOAT_GBNF,
     "IDENT": "[a-zA-Z_] [a-zA-Z0-9_]*",
     "TYPE_KW": TYPE_KW_GBNF,
+    "TYPE_KW_SCALAR": TYPE_KW_SCALAR_GBNF,
     "WS": r"[ \t\r\n]*",
 }
 
@@ -410,6 +417,8 @@ def _emit_alt(alt: str) -> str:
         return LEXICAL["IDENT"]
     if alt == "TYPE_KW":
         return TYPE_KW_GBNF
+    if alt == "TYPE_KW_SCALAR":
+        return TYPE_KW_SCALAR_GBNF
     return _norm_hyphens(_strip_seps(alt))
 
 
@@ -433,7 +442,7 @@ def emit_gbnf() -> str:
     for tname, shape in LEXICAL.items():
         if tname == "WS":
             continue
-        if tname == "STR" or tname == "INT" or tname == "FLOAT" or tname == "IDENT" or tname == "TYPE_KW":
+        if tname == "STR" or tname == "INT" or tname == "FLOAT" or tname == "IDENT" or tname == "TYPE_KW" or tname == "TYPE_KW_SCALAR":
             continue  # already inlined at use sites
         lines.append(f"{tname.lower()} ::= {shape}")
     lines.append(r'ws ::= [ \t\r\n]*')

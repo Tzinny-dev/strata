@@ -108,7 +108,7 @@ class Lexer:
                 self._token("SYM", "${")
             elif ch.isalpha() or ch in "_":
                 self._ident()
-            elif ch in "{}[](),:;=.<>+-*/%|":
+            elif ch in "{}[](),:;=.<>+-*/%|!":
                 if any(self.text.startswith(s, self.pos) for s in SYMBOLS):
                     for s in sorted(SYMBOLS, key=len, reverse=True):
                         if self.text.startswith(s, self.pos):

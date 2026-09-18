@@ -13,7 +13,7 @@ Lockstep guarantees under test:
 import io
 import re
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from strata import grammar
@@ -94,7 +94,7 @@ class TestGrammarCli(unittest.TestCase):
             rc = cli_main(["grammar"])
         self.assertEqual(rc, 0)
         self.assertIn("root ::= top_decl*", buf.getvalue())
-        self.assertIn('model_decl ::= "model" ident', buf.getvalue())
+        self.assertIn('model_decl ::= "model" (ident | string)', buf.getvalue())
 
     def test_cli_grammar_doc(self):
         buf = io.StringIO()
@@ -104,6 +104,26 @@ class TestGrammarCli(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("# top_decl:", out)
         self.assertIn("root ::= top_decl*", out)
+
+    def test_cli_grammar_check_accepts_corpus(self):
+        f = ROOT / "examples" / "daily_orders.strata"
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cli_main(["grammar", "--check", str(f)])
+        self.assertEqual(rc, 0)
+        self.assertIn("accepted", buf.getvalue())
+
+    def test_cli_grammar_check_rejects_garbage(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".strata", delete=False) as tf:
+            tf.write("model { from broken start}")
+            path = tf.name
+        buf = io.StringIO()
+        err = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(err):
+            rc = cli_main(["grammar", "--check", path])
+        self.assertEqual(rc, 2)
+        self.assertIn("REJECTED", err.getvalue())
 
 
 if __name__ == "__main__":

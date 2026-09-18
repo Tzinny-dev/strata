@@ -276,13 +276,24 @@ def cmd_grammar(args):
     The grammar is grammar-as-code (strata/grammar.py) kept in lockstep with the
     lexer by tests/test_grammar.py; this command validates it fail-loud (exit 2)
     and then prints the GBNF text ready to feed a constrained sampler. --doc
-    annotates every rule with its spec sentence for human supervision.
+    annotates every rule with its spec sentence for human supervision. --check
+    runs the independent consumer engine (strata/gbnf.py) over a program,
+    proving the emitted grammar covers it (exit 0) or not (exit 2).
     """
     from . import grammar
     problems = grammar.validate()
     if problems:
         for pr in problems:
             print(f"error: grammar inconsistency: {pr}", file=sys.stderr)
+        return 2
+    if args.check:
+        from . import gbnf, lexer
+        g = gbnf.GbnfGrammar.from_text(grammar.emit_gbnf())
+        toks = lexer.Lexer(Path(args.check).read_text()).tokenize()
+        if gbnf.accepts_program(toks, g):
+            print(f"{args.check}: accepted by the GBNF grammar (independent consumer)")
+            return 0
+        print(f"{args.check}: REJECTED by the GBNF grammar", file=sys.stderr)
         return 2
     if not args.doc:
         sys.stdout.write(grammar.emit_gbnf())
@@ -757,6 +768,9 @@ def main(argv=None):
     p = sub.add_parser("grammar", help="emit the Strata grammar as llama.cpp GBNF (constrained decoding)")
     p.add_argument("--doc", action="store_true",
                    help="prefix each rule with its spec sentence as a comment")
+    p.add_argument("--check", metavar="FILE", default=None,
+                   help="verify a .strata program is accepted by the emitted GBNF "
+                        "(exit 0 accepted, 2 rejected) — independent consumer engine")
     p.set_defaults(fn=cmd_grammar)
 
     p = sub.add_parser("dashboard",
