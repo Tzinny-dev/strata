@@ -8,7 +8,14 @@ from . import ast
 
 
 class ParseError(Exception):
-    pass
+    def __init__(self, msg, file="<strata>", line=1, col=1,
+                 end_line=1, end_col=1):
+        super().__init__(msg)
+        self.file = file
+        self.line = line
+        self.col = col
+        self.end_line = end_line
+        self.end_col = end_col
 
 
 PREC = {"or": 1, "and": 2, "cmp": 3, "add": 4, "mul": 5}
@@ -20,7 +27,7 @@ MODEL_ATTRS = {"owner", "reason", "description", "label"}
 
 class Parser:
     def __init__(self, text: str, path: str = "<strata>"):
-        self.ts = Lexer(text).tokenize()
+        self.ts = Lexer(text, path=path).tokenize()
         self.i = 0
         self.path = path
 
@@ -52,12 +59,12 @@ class Parser:
         if (value is None and t.kind == kind) or (value is not None and t.kind == kind and t.value == value):
             return self.advance()
         raise ParseError(
-            f"{self.path}:{t.line}:{t.col}: expected {kind} {value or ''} but found "
-            f"{t.kind} {t.value!r}"
-        )
+            f"expected {kind} {value or ''} but found {t.kind} {t.value!r}",
+            file=self.path, line=t.line, col=t.col,
+            end_line=t.end_line, end_col=t.end_col)
 
     def span(self, tok: Token):
-        return (tok.line, tok.col)
+        return (tok.line, tok.col, tok.end_line, tok.end_col)
 
     # ------------------------------------------------------------ top level
     def parse_module(self) -> ast.Module:
@@ -89,9 +96,10 @@ class Parser:
             else:
                 t = self.cur()
                 raise ParseError(
-                    f"{self.path}:{t.line}:{t.col}: expected top-level declaration "
-                    f"(source|contract|model|fn|pipeline|import|domain) but found {t.value!r}"
-                )
+                    f"expected top-level declaration "
+                    f"(source|contract|model|fn|pipeline|import|domain) but found {t.value!r}",
+                    file=self.path, line=t.line, col=t.col,
+                    end_line=t.end_line, end_col=t.end_col)
         return m
 
     def parse_test(self) -> ast.TestDecl:
@@ -124,9 +132,12 @@ class Parser:
             elif self.match("KW", "null"):
                 chk.value = None
             else:
+                t = self.cur()
                 raise ParseError(
-                    f"{self.path}:{t.line}:{t.col}: expected literal after "
-                    f"'{chk.col or chk.kind} {chk.op}' in expect")
+                    f"expected literal after "
+                    f"'{chk.col or chk.kind} {chk.op}' in expect",
+                    file=self.path, line=t.line, col=t.col,
+                    end_line=t.end_line, end_col=t.end_col)
             if not self.match("SYM", ";"):
                 if not (self.at("KW", "expect") or self.at("SYM", "}")):
                     self.expect("SYM", ";")
@@ -221,8 +232,9 @@ class Parser:
             return self.advance().value, []
         if tok.kind != "TYPE_KW":
             raise ParseError(
-                f"{self.path}:{tok.line}:{tok.col}: expected type "
-                f"but found {tok.kind} {tok.value!r}")
+                f"expected type but found {tok.kind} {tok.value!r}",
+                file=self.path, line=tok.line, col=tok.col,
+                end_line=tok.end_line, end_col=tok.end_col)
         spec = self.advance().value
         if spec == "decimal":
             self.expect("SYM", "(")
@@ -294,7 +306,10 @@ class Parser:
         elif self.at("STR"):
             decl.name = "".join(p[1] for p in self.advance().value)
         else:
-            raise ParseError(f"{self.path}:{name_tok.line}:{name_tok.col}: expected model name")
+            raise ParseError("expected model name",
+                             file=self.path, line=name_tok.line,
+                             col=name_tok.col, end_line=name_tok.end_line,
+                             end_col=name_tok.end_col)
         if self.match("SYM", "->"):
             self.expect("KW", "contract")
             decl.contract = self.expect("ID").value
@@ -342,7 +357,11 @@ class Parser:
                 body = []
                 while not self.at("SYM", ")"):
                     if not self.at("KW"):
-                        raise ParseError(f"{self.path}:{self.cur().line}:{self.cur().col}: expected statement")
+                        t = self.cur()
+                        raise ParseError("expected statement",
+                                         file=self.path, line=t.line,
+                                         col=t.col, end_line=t.end_line,
+                                         end_col=t.end_col)
                     k = self.cur().value
                     if k in ("filter", "where"):
                         tt = self.advance()
@@ -357,8 +376,11 @@ class Parser:
                         tt = self.advance()
                         body.append(self.parse_take(tt))
                     else:
+                        t = self.cur()
                         raise ParseError(
-                            f"{self.path}:{self.cur().line}:{self.cur().col}: unexpected {k} in group body")
+                            f"unexpected {k} in group body",
+                            file=self.path, line=t.line, col=t.col,
+                            end_line=t.end_line, end_col=t.end_col)
                 self.expect("SYM", ")")
                 decl.stmts.append(ast.GroupStmt(keys=keys, body=body, span=self.span(t)))
             elif self.at("KW", "sort"):
@@ -391,9 +413,11 @@ class Parser:
                 t = self.advance()
                 decl.stmts.append(ast.SelectStmt(assigns=self.parse_assigns(), span=self.span(t)))
             else:
+                t = self.cur()
                 raise ParseError(
-                    f"{self.path}:{self.cur().line}:{self.cur().col}: unexpected token "
-                    f"{self.cur().value!r} in model body")
+                    f"unexpected token {t.value!r} in model body",
+                    file=self.path, line=t.line, col=t.col,
+                    end_line=t.end_line, end_col=t.end_col)
         self.expect("SYM", "}")
         return decl
 
@@ -407,8 +431,10 @@ class Parser:
             return self.advance().value
         t = self.cur()
         raise ParseError(
-            f"{self.path}:{t.line}:{t.col}: expected join cardinality "
-            f"many_to_one or one_to_one but found {t.kind} {t.value!r}")
+            f"expected join cardinality many_to_one or one_to_one "
+            f"but found {t.kind} {t.value!r}",
+            file=self.path, line=t.line, col=t.col,
+            end_line=t.end_line, end_col=t.end_col)
 
     def parse_sort(self, t):
         self.expect("SYM", "{")
@@ -479,7 +505,10 @@ class Parser:
         if self.at("TYPE_KW") or self.at("ID"):
             self.advance()
             return [self.ts[self.i - 1].value]
-        raise ParseError(f"{self.path}:{self.cur().line}:{self.cur().col}: expected type")
+        raise ParseError("expected type",
+                         file=self.path, line=self.cur().line,
+                         col=self.cur().col, end_line=self.cur().end_line,
+                         end_col=self.cur().end_col)
 
     # ------------------------------------------------------------ expressions
     def parse_expr(self, min_prec: int = 0):
@@ -590,7 +619,10 @@ class Parser:
                 return ast.Call(name=t.value, args=args, span=span)
             return ast.ColumnRef(name=t.value, span=span)
 
-        raise ParseError(f"{self.path}:{t.line}:{t.col}: unexpected {t.value!r} in expression")
+        raise ParseError(
+            f"unexpected {t.value!r} in expression",
+            file=self.path, line=t.line, col=t.col,
+            end_line=t.end_line, end_col=t.end_col)
 
     def parse_window_call(self, name: str, args: list, span) -> ast.WindowCall:
         """`fn(args) over (partition_by: [...], sort: [expr desc, ...])`.
@@ -633,8 +665,9 @@ class Parser:
         else:
             t = self.cur()
             raise ParseError(
-                f"{self.path}:{t.line}:{t.col}: expected 'partition_by:' or "
-                f"'sort:' in over(...), found {kw!r}")
+                f"expected 'partition_by:' or 'sort:' in over(...), found {kw!r}",
+                file=self.path, line=t.line, col=t.col,
+                end_line=t.end_line, end_col=t.end_col)
 
     def parse_list(self, span):
         # [ ... ] or [ body for var in iter ]
@@ -668,7 +701,10 @@ class Parser:
             else:
                 mv.name = ast.TemplateStr(parts=tok.value)
         else:
-            raise ParseError(f"{self.path}:{name_tok.line}:{name_tok.col}: expected model name")
+            raise ParseError("expected model name",
+                             file=self.path, line=name_tok.line,
+                             col=name_tok.col, end_line=name_tok.end_line,
+                             end_col=name_tok.end_col)
         if self.match("SYM", "->"):
             self.expect("KW", "contract")
             mv.contract = self.expect("ID").value
@@ -703,8 +739,11 @@ class Parser:
                 tt = self.advance()
                 mv.stmts.append(self.parse_take(tt))
             else:
+                t = self.cur()
                 raise ParseError(
-                    f"{self.path}:{self.cur().line}:{self.cur().col}: unexpected token in fn model body")
+                    f"unexpected token {t.value!r} in fn model body",
+                    file=self.path, line=t.line, col=t.col,
+                    end_line=t.end_line, end_col=t.end_col)
         self.expect("SYM", "}")
         return mv
 
@@ -753,7 +792,11 @@ class Parser:
                     self.match("SYM", ",")
                 self.expect("SYM", "}")
             else:
-                raise ParseError(f"{self.path}:{self.cur().line}:{self.cur().col}: unknown pipeline key {k!r}")
+                t = self.cur()
+                raise ParseError(
+                    f"unknown pipeline key {k!r}",
+                    file=self.path, line=t.line, col=t.col,
+                    end_line=t.end_line, end_col=t.end_col)
             self.match("SYM", ",")
         self.expect("SYM", "}")
         return decl

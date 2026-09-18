@@ -22,14 +22,20 @@ from .types import (
 
 
 class StrataError(Exception):
-    def __init__(self, msg, code="E099", span=None):
+    def __init__(self, msg, code="E099", span=None, file=None,
+                 severity="error", help=None):
         super().__init__(msg)
         self.code = code
         self.span = span
+        self.file = file
+        self.severity = severity
+        self.help = help
 
 
-def err(code: str, msg: str, span=None):
-    return StrataError(msg, code=code, span=span)
+def err(code: str, msg: str, span=None, file=None,
+        severity="error", help=None):
+    return StrataError(msg, code=code, span=span, file=file,
+                       severity=severity, help=help)
 
 
 # Function classification and signatures live in functions.py: one declaration,
@@ -249,7 +255,7 @@ class FnEvaluator:
         if isinstance(e, ast.ColumnRef):
             if e.name in env:
                 return env[e.name]
-            raise err("F040", f"unknown identifier {e.name!r} in fn body", e.span)
+            raise self._err("F040", f"unknown identifier {e.name!r} in fn body", e.span)
         if isinstance(e, ast.ListExpr):
             return [self._val(i, env) for i in e.items]
         if isinstance(e, ast.ListComprehension):
@@ -266,7 +272,7 @@ class FnEvaluator:
                 return len(self._val(e.args[0], env))
             if e.name in self.project.fns:
                 return self.call(self.project.fns[e.name], [self._val(a, env) for a in e.args])
-            raise err("F041", f"unknown fn call {e.name!r}", e.span)
+            raise self._err("F041", f"unknown fn call {e.name!r}", e.span)
         if isinstance(e, ast.BinOp):
             lval = self._val(e.left, env)
             rval = self._val(e.right, env)
@@ -277,7 +283,7 @@ class FnEvaluator:
             return (lval, e.op, rval)
         if isinstance(e, ast.ModelValue):
             return self._model_value(e, env)
-        raise err("F042", f"unsupported expression in fn body: {type(e).__name__}", e.span)
+        raise self._err("F042", f"unsupported expression in fn body: {type(e).__name__}", e.span)
 
     def _model_value(self, mv: ast.ModelValue, env) -> ast.ModelDecl:
         import copy
@@ -583,6 +589,10 @@ class Checker:
     def __init__(self, project: Project):
         self.p = project
         self.all_reads: Dict[str, Set[Tuple[str, str]]] = {}
+        self.file = project.module.path or "<strata>"
+
+    def _err(self, code: str, msg: str, span=None, help: str = None):
+        raise err(code, msg, span=span, file=self.file, help=help)
 
     def check_all(self, model_names: Optional[List[str]] = None) -> Dict[str, TypedModel]:
         names = model_names if (model_names is not None and model_names) else list(self.p.models)
@@ -599,27 +609,32 @@ class Checker:
             for td in tds:
                 mname = td.model
                 if mname not in self.p.typed:
-                    raise err("E091", f"test references non-existent model {mname!r}", td.span)
+                    raise self._err("E091",
+                                    f"test references non-existent model {mname!r}",
+                                    td.span, help="declare the model or check the test name")
                 tm = self.p.typed[mname]
                 for c in td.checks:
                     if c.kind == "row_count":
                         continue
                     if c.col and c.col not in tm.schema:
-                        raise err("E092",
-                                  f"test references unknown column {c.col!r} in model {mname!r}",
-                                  c.span)
+                        raise self._err("E092",
+                                        f"test references unknown column {c.col!r} in model {mname!r}",
+                                        c.span, help="check the column name and spelling")
                     if c.op not in ("==", "!=", "<", ">", "<=", ">="):
-                        raise err("E093", f"test uses unsupported operator {c.op!r}", c.span)
+                        raise self._err("E093",
+                                        f"test uses unsupported operator {c.op!r}",
+                                        c.span, help="use ==, !=, <, >, <= or >=")
                     if c.col is None:
                         continue
                     col = tm.schema[c.col]
                     # literal value must be comparable to column type
                     lit_type = _literal_type(c.value)
                     if lit_type != col.t:
-                        raise err("E094",
-                                  f"test value {c.value!r} has type {lit_type.name} "
-                                  f"but column {mname}.{c.col} is {col.t.name}",
-                                  c.span)
+                        raise self._err("E094",
+                                          f"test value {c.value!r} has type {lit_type.name} "
+                                          f"but column {mname}.{c.col} is {col.t.name}",
+                                          c.span,
+                                          help="check the literal type matches the column type")
         return sum(len(tds) for tds in self.p.tests.values())
 
     def _topo(self, names: List[str]) -> List[str]:
@@ -663,6 +678,7 @@ class _ModelState:
     def __init__(self, decl: ast.ModelDecl, checker: Checker):
         self.decl = decl
         self.c = checker
+        self.file = checker.p.module.path or "<strata>"
         tm = TypedModel(name=decl.name, contract=decl.contract, attrs=dict(decl.attrs),
                         deps=[d for d in checker._deps(decl)])
         tm.plan = Plan()
@@ -677,6 +693,9 @@ class _ModelState:
         self.group_keys: Set[str] = set()
         self.in_group = False
 
+    def _err(self, code: str, msg: str, span=None, help: str = None):
+        raise err(code, msg, span=span, file=self.file, help=help)
+
     def run(self) -> TypedModel:
         for s in self.decl.stmts:
             self.stmt(s)
@@ -690,13 +709,13 @@ class _ModelState:
                 if inp.alias == e.qualifier:
                     col = inp.cols.get(e.name)
                     if col is None:
-                        raise err("E040", f"no column {e.name!r} in input {e.qualifier!r}", e.span)
+                        raise self._err("E040", f"no column {e.name!r} in input {e.qualifier!r}", e.span)
                     return col
-            raise err("E041", f"unknown input qualifier {e.qualifier!r}", e.span)
+            raise self._err("E041", f"unknown input qualifier {e.qualifier!r}", e.span)
         col = self.cols.get(e.name)
         if col is None:
             where = "group output" if self.in_group else "input columns"
-            raise err("E040", f"unknown column {e.name!r} in {where}", e.span)
+            raise self._err("E040", f"unknown column {e.name!r} in {where}", e.span)
         return col
 
     def origin_of(self, e: ast.ColumnRef) -> List[Origin]:
@@ -743,28 +762,28 @@ class _ModelState:
         if isinstance(e, ast.WindowCall):
             return self.infer_window(e)
         if isinstance(e, ast.Kwarg):
-            raise err(functions.E_DATE_ARG,
+            raise self._err(functions.E_DATE_ARG,
                       "keyword arguments are only allowed as date_add/date_sub units", e.span)
         if isinstance(e, ast.Star):
-            raise err(functions.E_STRAY_STAR, "'*' is only valid as count(*)", e.span)
-        raise err("E055", f"unsupported expression {type(e).__name__}", e.span)
+            raise self._err(functions.E_STRAY_STAR, "'*' is only valid as count(*)", e.span)
+        raise self._err("E055", f"unsupported expression {type(e).__name__}", e.span)
 
     def infer_window(self, e: ast.WindowCall) -> Inf:
         fn = functions.get(e.name)
         if fn is None:
-            raise err("E059", f"unknown function {e.name!r}", e.span)
+            raise self._err("E059", f"unknown function {e.name!r}", e.span)
         if not fn.window:
-            raise err(functions.E_WINDOW_PLACEMENT,
+            raise self._err(functions.E_WINDOW_PLACEMENT,
                       f"{e.name}() is not a window function: it takes no over(...)", e.span)
         if fn.aggregate and self.in_group:
             # An aggregate already collapses the group; a window over it would
             # stack two reductions on the same column — write the aggregate in
             # an upstream model and window over that model instead.
-            raise err(functions.E_WINDOW_PLACEMENT,
+            raise self._err(functions.E_WINDOW_PLACEMENT,
                       f"aggregate {e.name}() cannot take over(...) inside a group body", e.span)
         star = [a for a in e.args if isinstance(a, ast.Star)]
         if star:
-            raise err(functions.E_STRAY_STAR,
+            raise self._err(functions.E_STRAY_STAR,
                       f"'*' is only valid as count(*), not in {e.name}()", e.span)
         for sub in e.args:
             self._reject_nested_window(sub, e.span)
@@ -778,12 +797,12 @@ class _ModelState:
         problem = functions.check(fn, args)
         if problem is not None:
             code, msg = problem
-            raise err(code, msg, e.span)
+            raise self._err(code, msg, e.span)
         return fn.ret(args)
 
     def _reject_nested_window(self, e: ast.Node, span):
         if isinstance(e, ast.WindowCall):
-            raise err(functions.E_WINDOW_PLACEMENT, "a window cannot appear inside a window", span)
+            raise self._err(functions.E_WINDOW_PLACEMENT, "a window cannot appear inside a window", span)
         if isinstance(e, ast.Call):
             for a in e.args:
                 self._reject_nested_window(a, span)
@@ -798,25 +817,25 @@ class _ModelState:
     def infer_call(self, e: ast.Call, window_allowed: bool = False) -> Inf:
         name = e.name
         if name == "cast" and any(isinstance(a, ast.Kwarg) for a in e.args):
-            raise err(functions.E_DATE_ARG, "cast() does not accept keyword arguments", e.span)
+            raise self._err(functions.E_DATE_ARG, "cast() does not accept keyword arguments", e.span)
         if name == "cast":
             # cast() takes a type name (not an expression) as its second
             # argument, so it stays a language construct rather than a catalog
             # entry; its arity is checked here.
             if len(e.args) != 2:
-                raise err("E062", "cast() takes exactly 2 arguments", e.span)
+                raise self._err("E062", "cast() takes exactly 2 arguments", e.span)
             a = self.infer(e.args[0])
             spec = str(e.args[1].value) if isinstance(e.args[1], ast.Literal) else "string"
             return Inf(type_from_spec(spec, [], self.c.p.domain_types), a.nullable)
         fn = functions.get(name)
         if fn is None:
-            raise err("E059", f"unknown function {name!r}", e.span)
+            raise self._err("E059", f"unknown function {name!r}", e.span)
         if fn.aggregate and not self.in_group:
-            raise err("E056", f"aggregate {name}() only allowed inside group body", e.span)
+            raise self._err("E056", f"aggregate {name}() only allowed inside group body", e.span)
         # Star is not an expression: reject a stray one before inferring args.
         star = [a for a in e.args if isinstance(a, ast.Star)]
         if star and not fn.accepts_star:
-            raise err(functions.E_STRAY_STAR,
+            raise self._err(functions.E_STRAY_STAR,
                       f"'*' is only valid as count(*), not in {name}()", e.span)
         if name in ("date_add", "date_sub", "date_trunc", "date_diff"):
             return self.infer_date_call(e, fn)
@@ -824,7 +843,7 @@ class _ModelState:
         problem = functions.check(fn, args, has_star=bool(star))
         if problem is not None:
             code, msg = problem
-            raise err(code, msg, e.span)
+            raise self._err(code, msg, e.span)
         if fn.collection:
             # array_prepend's array is the second argument; json_build has no
             # array base (its type is the return type).  Everything else uses
@@ -848,7 +867,7 @@ class _ModelState:
             # it is a string is the job of the argument kind checked above.
             key = e.args[1]
             if isinstance(key, ast.Literal) and not functions.valid_json_key(key.value):
-                raise err(functions.E_JSON_KEY,
+                raise self._err(functions.E_JSON_KEY,
                           f'{name}() literal key must match [A-Za-z_][A-Za-z0-9_]*; '
                           'use json_path() for path expressions',
                           key.span)
@@ -859,17 +878,17 @@ class _ModelState:
             # the generator.
             path = e.args[1]
             if not isinstance(path, ast.Literal) or not isinstance(path.value, str):
-                raise err(functions.E_JSON_KEY,
+                raise self._err(functions.E_JSON_KEY,
                           'json_path() requires a string literal path', path.span)
             problem = functions.json_path_problem(path.value)
             if problem is not None:
-                raise err(functions.E_JSON_KEY, f'json_path(): {problem}', path.span)
+                raise self._err(functions.E_JSON_KEY, f'json_path(): {problem}', path.span)
         if name == "json_build":
             for i in range(0, len(e.args), 2):
                 key = e.args[i]
                 if not isinstance(key, ast.Literal) or not isinstance(key.value, str) \
                         or not functions.valid_json_key(key.value):
-                    raise err(functions.E_JSON_KEY,
+                    raise self._err(functions.E_JSON_KEY,
                               f"json_build() key at position {i + 1} must be a "
                               "simple ASCII identifier literal",
                               key.span)
@@ -887,37 +906,37 @@ class _ModelState:
     def infer_date_call(self, e: ast.Call, fn: "functions.Fn") -> Inf:
         # Check arity before indexing; symbolic units never resolve as columns.
         if len(e.args) != fn.min_args:
-            raise err(functions.E_ARITY,
+            raise self._err(functions.E_ARITY,
                       f"{fn.name}() takes exactly {fn.min_args} arguments", e.span)
         base = self.infer(e.args[0])
         if base.t not in (DATE, TIMESTAMP):
-            raise err(functions.E_ARG_TYPE,
+            raise self._err(functions.E_ARG_TYPE,
                       f"{fn.name}() argument 1 must be date or timestamp, got {base.t}", e.span)
         if fn.name in ("date_add", "date_sub"):
             kw = e.args[1]
             if not isinstance(kw, ast.Kwarg):
-                raise err(functions.E_DATE_ARG,
+                raise self._err(functions.E_DATE_ARG,
                           f"{fn.name}() requires a unit kwarg, e.g. days: 1", e.span)
             unit = kw.name
             args = [base, self.infer(kw.value)]
         else:
             unit_arg = e.args[-1]
             if not isinstance(unit_arg, ast.Literal) or not isinstance(unit_arg.value, str):
-                raise err(functions.E_DATE_ARG,
+                raise self._err(functions.E_DATE_ARG,
                           f"{fn.name}() requires a symbolic unit or string literal", e.span)
             unit = unit_arg.value
             args = [base]
             if fn.name == "date_diff":
                 second = self.infer(e.args[1])
                 if base.t != second.t:
-                    raise err(functions.E_DATE_TYPE,
+                    raise self._err(functions.E_DATE_TYPE,
                               "date_diff() arguments must share one temporal type", e.span)
                 args.append(second)
             args.append(Inf(STRING, False))
         problem = functions.check_date_call(fn, unit) or functions.check(fn, args)
         if problem is not None:
             code, msg = problem
-            raise err(code, msg, e.span)
+            raise self._err(code, msg, e.span)
         self.tm.plan.date_arg_types[id(e)] = base.t
         return fn.ret(args)
 
@@ -962,11 +981,11 @@ class _ModelState:
             for a in s.assigns:
                 self.do_output(a)
         else:
-            raise err("E060", f"unsupported statement {type(s).__name__}", s.span)
+            raise self._err("E060", f"unsupported statement {type(s).__name__}", s.span)
 
     def do_from(self, s: ast.FromStmt):
         if self.tm.plan.set_op is not None:
-            raise err("E076", "a set model combines exactly one from with one "
+            raise self._err("E076", "a set model combines exactly one from with one "
                               "named model; chain further inputs downstream", s.span)
         cols, is_src, node = self.c.p.input_schema(s.table)
         inp = InputSpec(alias=s.table, node=node, is_source=is_src,
@@ -981,7 +1000,7 @@ class _ModelState:
 
     def do_join(self, s: ast.JoinStmt):
         if self.tm.plan.set_op is not None:
-            raise err("E076", f"{s.kind} join after a set operation is not supported; "
+            raise self._err("E076", f"{s.kind} join after a set operation is not supported; "
                               "join the combined rows in a downstream model", s.span)
         idx = len(self.inputs)
         cols, is_src, node = self.c.p.input_schema(s.table)
@@ -1015,7 +1034,7 @@ class _ModelState:
         the upstream uniqueness probe cannot cover it.
         """
         if s.kind in ("anti", "semi"):
-            raise err("E079", f"expect {s.expect} does not apply to a {s.kind} "
+            raise self._err("E079", f"expect {s.expect} does not apply to a {s.kind} "
                               f"join (it never multiplies rows)", s.span)
         left_alias = self.inputs[0].alias
         true_pairs: List[Tuple[str, str]] = []
@@ -1067,12 +1086,12 @@ class _ModelState:
                     if not refs_right(other):
                         right_only.append(rn); return
                 if refs_right(e.left) or refs_right(e.right):
-                    raise err("E079", f"expect {s.expect} needs the right side "
+                    raise self._err("E079", f"expect {s.expect} needs the right side "
                                       f"referenced only through equi-join keys "
                                       f"(found an exotic condition)", s.span)
                 return  # left-local filter or tautology: removes matches only
             if refs_right(e):
-                raise err("E079", f"expect {s.expect} needs equi-join keys on plain "
+                raise self._err("E079", f"expect {s.expect} needs equi-join keys on plain "
                                   f"columns (top-level AND of col == col)", s.span)
             return  # left-local filter: ignore
 
@@ -1088,10 +1107,10 @@ class _ModelState:
         left_keys = ordered([l for l, _ in true_pairs])
         right_keys = ordered([r for _, r in true_pairs] + right_only)
         if not right_keys:
-            raise err("E079", f"expect {s.expect} needs at least one equi-join key "
+            raise self._err("E079", f"expect {s.expect} needs at least one equi-join key "
                               f"on {inp.alias}", s.span)
         if s.expect == "one_to_one" and not true_pairs:
-            raise err("E079", "expect one_to_one needs at least one equi-join key "
+            raise self._err("E079", "expect one_to_one needs at least one equi-join key "
                               "pair relating a left column to a right column", s.span)
         return s.expect, left_keys, right_keys
 
@@ -1114,30 +1133,30 @@ class _ModelState:
         ``expand xs as e`` keeps ``xs`` and adds ``e``.
         """
         if self.in_group:
-            raise err("E075", "expand is only allowed before grouping, "
+            raise self._err("E075", "expand is only allowed before grouping, "
                               "not inside a group body", s.span)
         if self.tm.plan.expand is not None:
-            raise err("E075", "only one expand per model (a second lateral "
+            raise self._err("E075", "only one expand per model (a second lateral "
                               "unnest would cross-multiply rows)", s.span)
         if self.tm.plan.set_op is not None:
-            raise err("E076", "expand after a set operation is not supported; "
+            raise self._err("E076", "expand after a set operation is not supported; "
                               "expand a branch before combining, or the combined "
                               "rows in a downstream model", s.span)
         if not self.inputs:
-            raise err("E075", "expand requires a from first", s.span)
+            raise self._err("E075", "expand requires a from first", s.span)
         if s.name not in self.inputs[0].cols:
-            raise err("E075", f"expand source {s.name!r} must be a column of "
+            raise self._err("E075", f"expand source {s.name!r} must be a column of "
                               "the from table", s.span)
         src = self.inputs[0].cols[s.name]
         if src.t.name != "array":
-            raise err("E075", f"expand source {s.name!r} must be a typed array "
+            raise self._err("E075", f"expand source {s.name!r} must be a typed array "
                               f"column, got {src.t}", s.span)
         elem = src.t.elem
         if elem is None or elem.name == "array":
-            raise err("E075", f"expand source {s.name!r} must be a "
+            raise self._err("E075", f"expand source {s.name!r} must be a "
                               "one-dimensional array of scalar elements", s.span)
         if s.as_name in self.inputs[0].cols and s.as_name != s.name:
-            raise err("E075", f"expand output {s.as_name!r} collides with an "
+            raise self._err("E075", f"expand output {s.as_name!r} collides with an "
                               "existing column of the from table", s.span)
         self.tm.plan.expand = (s.name, s.as_name, elem.name)
         self.cols[s.as_name] = Col(name=s.as_name, t=elem, nullable=True)
@@ -1155,30 +1174,30 @@ class _ModelState:
         """
         plan = self.tm.plan
         if plan.set_op is not None:
-            raise err("E076", "only one set operation per model (chain them "
+            raise self._err("E076", "only one set operation per model (chain them "
                               "through downstream models)", s.span)
         if not self.inputs:
-            raise err("E076", f"{s.op} requires a from first", s.span)
+            raise self._err("E076", f"{s.op} requires a from first", s.span)
         if plan.joins:
-            raise err("E076", f"{s.op} combines single-table row sets; join "
+            raise self._err("E076", f"{s.op} combines single-table row sets; join "
                               "in a downstream model instead", s.span)
         if self.outputs or plan.sorts or plan.limit is not None or self.group_keys:
-            raise err("E076", f"{s.op} must come before select/derive/aggregate/"
+            raise self._err("E076", f"{s.op} must come before select/derive/aggregate/"
                               "group/sort/take (those see the combined rows)", s.span)
         cols, is_src, node = self.c.p.input_schema(s.table)
         if is_src:
-            raise err("E076", f"{s.op} combines models, not sources; wrap "
+            raise self._err("E076", f"{s.op} combines models, not sources; wrap "
                               f"{s.table!r} in a model first", s.span)
         names = list(self.cols)
         if list(cols) != names:
-            raise err("E077", f"{s.op} {s.table!r} must carry the same columns "
+            raise self._err("E077", f"{s.op} {s.table!r} must carry the same columns "
                               f"in the same order (left {names}, "
                               f"right {list(cols)})", s.span)
         for n in names:
             lt, rt = self.cols[n].t, cols[n].t
             u = lt if lt == rt else unify(lt, rt)
             if u.name == "unknown" or (u.name == "money" and lt != rt):
-                raise err("E077", f"{s.op} column {n!r} cannot align {lt} "
+                raise self._err("E077", f"{s.op} column {n!r} cannot align {lt} "
                                   f"with {rt}", s.span)
             self.cols[n] = Col(name=n, t=u, nullable=self.cols[n].nullable or cols[n].nullable)
             self.own[n] = self.tm.name
@@ -1195,7 +1214,7 @@ class _ModelState:
         subquery), `filter`, group keys and `sort` must not contain them."""
         found = self._find_window(e)
         if found is not None:
-            raise err(functions.E_WINDOW_PLACEMENT,
+            raise self._err(functions.E_WINDOW_PLACEMENT,
                       f"over(...) is only allowed in select/derive/aggregate "
                       f"outputs, not in {where} (found {found})", span)
 
@@ -1230,10 +1249,10 @@ class _ModelState:
                 if isinstance(a.expr, ast.WindowCall):
                     # Aggregates already reduced the group here; window the
                     # upstream model's output instead (same rule as infer_window).
-                    raise err(functions.E_WINDOW_PLACEMENT,
+                    raise self._err(functions.E_WINDOW_PLACEMENT,
                               f"over(...) is not allowed inside a group body "
                               f"(found {a.expr.name}); window over an upstream model", a.span)
-                raise err("E050", f"output {a.name!r} in group body must be an aggregate "
+                raise self._err("E050", f"output {a.name!r} in group body must be an aggregate "
                                   f"or reference a group key", a.span)
             self.outputs.append(PlanOut(name=a.name, expr=a.expr))
         else:
@@ -1323,18 +1342,18 @@ class _ModelState:
             return
         cd = self.c.p.contracts.get(model.contract)
         if cd is None:
-            raise err("E061", f"unknown contract {model.contract!r}")
+            raise self._err("E061", f"unknown contract {model.contract!r}")
         for f in cd.fields:
             col = self.cols.get(f.name)
             exp = contract_field_col(f, self.c.p.domain_types)
             if col is None:
-                raise err("E010", f"model {model.name} missing contract column {f.name!r}")
+                raise self._err("E010", f"model {model.name} missing contract column {f.name!r}")
             if not types_compat(exp.t, col.t):
-                raise err("E011", f"{model.name}.{f.name}: contract {exp.t} but inferred {col.t}")
+                raise self._err("E011", f"{model.name}.{f.name}: contract {exp.t} but inferred {col.t}")
             if not exp.nullable and col.nullable:
-                raise err("E012", f"{model.name}.{f.name}: contract nonnull but value nullable")
+                raise self._err("E012", f"{model.name}.{f.name}: contract nonnull but value nullable")
             if (exp.enum or exp.classification) and col.t != STRING:
-                raise err("E013", f"{model.name}.{f.name}: contract enum/classification requires string, got {col.t}")
+                raise self._err("E013", f"{model.name}.{f.name}: contract enum/classification requires string, got {col.t}")
 
     def fingerprint(self):
         # Canonical fingerprint: AST-shape, not source-whitespace. `str(decl)`

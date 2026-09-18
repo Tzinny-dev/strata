@@ -17,6 +17,7 @@ from .dialects import get_dialect
 from .lexer import LexError
 from .parser import ParseError, parse_strata
 from .analysis import StrataError, Checker, build_down_edges, blast_radius
+from .diagnostic import format_diagnostic
 
 
 def load(path: str, search_dirs=None):
@@ -963,7 +964,7 @@ def main(argv=None):
     try:
         return args.fn(args)
     except (ParseError, LexError, StrataError) as e:
-        print(f"error: {getattr(e, 'code', 'E000')}: {e}", file=sys.stderr)
+        print(format_diagnostic(e), file=sys.stderr)
         return 1
     except FileNotFoundError as e:
         print(f"error: {e}", file=sys.stderr)

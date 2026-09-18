@@ -6,7 +6,13 @@ from typing import List, Optional
 
 
 class LexError(Exception):
-    pass
+    def __init__(self, msg, file="<strata>", line=1, col=1, end_line=1, end_col=1):
+        super().__init__(msg)
+        self.file = file
+        self.line = line
+        self.col = col
+        self.end_line = end_line
+        self.end_col = end_col
 
 
 @dataclass
@@ -15,9 +21,12 @@ class Token:
     value: object
     line: int
     col: int
+    end_line: int = 0
+    end_col: int = 0
 
     def __repr__(self):
-        return f"Token({self.kind}, {self.value!r}, {self.line}:{self.col})"
+        return (f"Token({self.kind}, {self.value!r}, "
+                f"{self.line}:{self.col})")
 
 
 KEYWORDS = {
@@ -45,8 +54,9 @@ SYMBOLS = ["->", "==", "!=", "<=", ">=", "${", "=>", "||"]
 
 
 class Lexer:
-    def __init__(self, text: str):
+    def __init__(self, text: str, path: str = "<strata>"):
         self.text = text
+        self.path = path
         self.pos = 0
         self.line = 1
         self.col = 1
@@ -89,7 +99,12 @@ class Lexer:
                 break
 
     def _token(self, kind, value=None):
-        self.tokens.append(Token(kind, value, self.line, self.col))
+        end_line, end_col = self.line, self.col
+        self.tokens.append(Token(kind, value, self.line, self.col,
+                                 end_line=end_line, end_col=end_col))
+
+    def _advance_to(self):
+        pass
 
     def tokenize(self) -> List[Token]:
         while self.pos < len(self.text):
@@ -122,8 +137,11 @@ class Lexer:
                     self._advance()
                     self._token("SYM", ch)
             else:
-                raise LexError(f"unexpected character {ch!r} at {line}:{col}")
-        self.tokens.append(Token("EOF", None, self.line, self.col))
+                raise LexError(f"unexpected character {ch!r}",
+                               file=self.path, line=line, col=col,
+                               end_line=line, end_col=col + 1)
+        self.tokens.append(Token("EOF", None, self.line, self.col,
+                                  end_line=self.line, end_col=self.col))
         return self.tokens
 
     def _number(self):
@@ -138,7 +156,9 @@ class Lexer:
             while self.pos < len(self.text) and (self._peek().isdigit() or self._peek() == "_"):
                 self._advance()
         raw = self.text[start:self.pos].replace("_", "")
-        self.tokens.append(Token("INT" if not is_float else "FLOAT", raw, line, col))
+        self.tokens.append(Token("INT" if not is_float else "FLOAT", raw,
+                                  line, col, end_line=self.line,
+                                  end_col=self.col))
 
     def _string(self):
         line, col = self.line, self.col
@@ -147,7 +167,9 @@ class Lexer:
         cur = []
         while True:
             if self.pos >= len(self.text):
-                raise LexError(f"unterminated string at {line}:{col}")
+                raise LexError(f"unterminated string",
+                               path=self.path, line=line, col=col,
+                               end_line=self.line, end_col=self.col)
             ch = self._peek()
             if ch == '"':
                 self._advance()
@@ -161,9 +183,15 @@ class Lexer:
                 while self.pos < len(self.text) and (self._peek().isalnum() or self._peek() == "_"):
                     ident.append(self._advance())
                 if not ident:
-                    raise LexError(f"empty interpolation at {self.line}:{self.col}")
+                    raise LexError(f"empty interpolation",
+                                   path=self.path, line=self.line,
+                                   col=self.col, end_line=self.line,
+                                   end_col=self.col)
                 if self._peek() != "}":
-                    raise LexError(f"expected '}}' at {self.line}:{self.col}")
+                    raise LexError(f"expected '}}'",
+                                   path=self.path, line=self.line,
+                                   col=self.col, end_line=self.line,
+                                   end_col=self.col)
                 self._advance()
                 parts.append(("var", "".join(ident)))
             elif ch == "\\":
@@ -174,7 +202,8 @@ class Lexer:
                 cur.append(self._advance())
         if cur:
             parts.append(("lit", "".join(cur)))
-        self.tokens.append(Token("STR", parts, line, col))
+        self.tokens.append(Token("STR", parts, line, col,
+                                  end_line=self.line, end_col=self.col))
 
     def _ident(self):
         line, col = self.line, self.col
@@ -183,8 +212,11 @@ class Lexer:
             self._advance()
         word = self.text[start:self.pos]
         if word in TYPE_KEYWORDS:
-            self.tokens.append(Token("TYPE_KW", word, line, col))
+            self.tokens.append(Token("TYPE_KW", word, line, col,
+                                      end_line=self.line, end_col=self.col))
         elif word in KEYWORDS:
-            self.tokens.append(Token("KW", word, line, col))
+            self.tokens.append(Token("KW", word, line, col,
+                                      end_line=self.line, end_col=self.col))
         else:
-            self.tokens.append(Token("ID", word, line, col))
+            self.tokens.append(Token("ID", word, line, col,
+                                      end_line=self.line, end_col=self.col))
