@@ -41,7 +41,7 @@ KEYWORDS: List[str] = [
     "union", "intersect", "except", "dedup",
     "domain",
     "nonnull", "unique", "primary_key", "protected", "enum",
-    "classification", "partition_by", "freshness",
+    "classification", "partition_by", "freshness", "freshness_column",
     "not", "and", "or", "in", "is", "null", "true", "false",
     "for", "over", "->", "=>", "test", "expect",
 ]
@@ -393,7 +393,7 @@ PRECEDENCE: List[List[str]] = [
 
 # lexer-reserved words with no production in the reference grammar yet
 # (kept in lockstep with lexer.KEYWORDS by test_grammar)
-RESERVED_UNUSED = {"is", "=>", "freshness"}
+RESERVED_UNUSED = {"is", "=>", "freshness", "freshness_column"}
 
 LEXICAL = {
     "STR": STR_GBNF,

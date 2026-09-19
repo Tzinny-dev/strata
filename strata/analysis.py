@@ -113,6 +113,7 @@ class PlanOut:
 class Plan:
     partition_by: List[Node] = field(default_factory=list)
     freshness: Optional[str] = None
+    freshness_column: Optional[str] = None  # event-time column for freshness check
     inputs: List[InputSpec] = field(default_factory=list)
     joins: List[JoinSpec] = field(default_factory=list)
     base_cols: List[BaseCol] = field(default_factory=list)
@@ -686,6 +687,7 @@ class _ModelState:
         tm.plan = Plan()
         tm.plan.partition_by = decl.partition_by
         tm.plan.freshness = decl.freshness
+        tm.plan.freshness_column = decl.freshness_column
         self.tm = tm
         self.inputs: List[InputSpec] = []
         self.base_cols: List[BaseCol] = []

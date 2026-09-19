@@ -8,7 +8,7 @@ instead of emitting a silently-wrong query.
 """
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 
 from .types import StrataType
@@ -17,7 +17,9 @@ from .types import StrataType
 class Dialect:
     def __init__(self, name: str, quote_ident, type_map: Dict[str, str],
                  decimal, money: str, array, supports_anti_semi: bool,
-                 function_map: Optional[Dict[str, str]] = None):
+                 function_map: Optional[Dict[str, str]] = None,
+                 supports_partitioning: bool = False,
+                 partition_clause: Optional[str] = None):
         self.name = name
         self._quote = quote_ident
         self.type_map = type_map
@@ -26,6 +28,8 @@ class Dialect:
         self.money = money
         self.supports_anti_semi = supports_anti_semi
         self.function_map = function_map or {}
+        self.supports_partitioning = supports_partitioning
+        self._partition_clause = partition_clause
 
     # -- identifiers --------------------------------------------------
     def ident(self, name: str) -> str:
@@ -56,6 +60,18 @@ class Dialect:
         if spec == "array":
             return self.array_sql("VARCHAR")
         raise ValueError(f"dialect {self.name}: unknown cast target {spec!r}")
+
+    # -- partitioning --------------------------------------------------
+    def partition_clause(self, columns: List[str]) -> str:
+        """Generate partitioning clause for CTAS if supported.
+
+        Returns empty string if dialect doesn't support partitioning.
+        """
+        if not self.supports_partitioning or not columns:
+            return ""
+        if self._partition_clause:
+            return self._partition_clause(columns)
+        return ""
 
 
 def _backtick(name: str) -> str:

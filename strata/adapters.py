@@ -51,8 +51,12 @@ class Warehouse(abc.ABC):
         ...
 
     @abc.abstractmethod
-    def materialize(self, name: str, sql: str) -> None:
-        """CREATE TABLE <name> AS <sql> atomically."""
+    def materialize(self, name: str, sql: str, partition_by: Optional[List[str]] = None) -> None:
+        """CREATE TABLE <name> AS <sql> atomically.
+
+        If partition_by is provided and dialect supports it, the table
+        will be partitioned by those columns.
+        """
         ...
 
     @abc.abstractmethod
@@ -110,7 +114,8 @@ class DuckDBWarehouse(Warehouse):
     def fetch(self, sql: str) -> List[tuple]:
         return self.con.execute(sql).fetchall()
 
-    def materialize(self, name: str, sql: str) -> None:
+    def materialize(self, name: str, sql: str, partition_by: Optional[List[str]] = None) -> None:
+        # DuckDB doesn't support partitioning in CTAS, so we ignore it
         self.con.execute(f"CREATE TABLE {name} AS {sql}")
 
     def drop(self, name: str) -> None:

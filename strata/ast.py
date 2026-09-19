@@ -263,6 +263,7 @@ class ModelDecl(Node):
     attrs: Dict[str, str] = field(default_factory=dict)
     partition_by: List[Node] = field(default_factory=list)
     freshness: Optional[str] = None       # e.g. 'incremental', 'watermark', time-spec
+    freshness_column: Optional[str] = None  # event-time column for freshness check
     stmts: List[Stmt] = field(default_factory=list)
     generated: bool = False       # produced by fn expansion
 

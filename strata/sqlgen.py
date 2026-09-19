@@ -617,8 +617,8 @@ def _base_select(plan, dialect, base_cols, preds, upstream_prefix: str = "v_") -
         selects.append(f"{t.expr(bc.expr)} AS {bc.name}")
     # Add partition_by expressions to SELECT if defined
     if plan.partition_by:
-        for p_expr in plan.partition_by:
-            selects.append(f"{t.expr(p_expr)} AS __partition_col")
+        for idx, p_expr in enumerate(plan.partition_by):
+            selects.append(f"{t.expr(p_expr)} AS __partition_col_{idx}")
 
     froms = [f"{left_table} t0"]
     for j in plan.joins:

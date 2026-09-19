@@ -37,7 +37,7 @@ KEYWORDS = {
     "union", "intersect", "except", "dedup",
     "domain",
     "nonnull", "unique", "primary_key", "protected", "enum",
-    "classification", "partition_by", "freshness",
+    "classification", "partition_by", "freshness", "freshness_column",
     "nonnull",  # dedupe-safe
     "not", "and", "or", "in", "is", "null", "true", "false",
     "for", "over",

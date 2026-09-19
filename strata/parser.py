@@ -348,18 +348,28 @@ class Parser:
                 # After partition_by, check for freshness
                 if self.at("KW", "freshness"):
                     t = self.advance()
-                    if self.at("COLON"):
+                    if self.at("SYM", ":"):
                         self.advance()
                     decl.freshness = self._parse_freshness_value()
+                    # Check for freshness_column
+                    if self.at("KW", "freshness_column"):
+                        self.advance()
+                        self.expect("SYM", ":")
+                        decl.freshness_column = self.expect("ID").value
             elif self.at("KW", "freshness"):
                 t = self.advance()
                 # freshness: <value>
-                if self.at("COLON"):
+                if self.at("SYM", ":"):
                     self.advance()
                     decl.freshness = self._parse_freshness_value()
                 else:
                     # Maybe it's just a keyword without colon
                     decl.freshness = self._parse_freshness_value()
+                # Check for freshness_column
+                if self.at("KW", "freshness_column"):
+                    self.advance()
+                    self.expect("SYM", ":")
+                    decl.freshness_column = self.expect("ID").value
             elif self.at("KW") and self.cur().value in JOIN_KINDS:
                 k, t = self.cur().value, self.advance()
                 decl.stmts.append(ast.JoinStmt(

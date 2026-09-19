@@ -981,9 +981,40 @@ def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
                 if tm and tm.plan.freshness:
                     threshold = parse_freshness_threshold(tm.plan.freshness)
                     if threshold is not None:
-                        age = now - prev_time
-                        if age > threshold:
-                            stale.add(name)
+                        # If freshness_column is specified, check max value of that column
+                        if tm.plan.freshness_column:
+                            try:
+                                view_name = promoted_name(name)
+                                max_val = con.execute(
+                                    f"SELECT MAX({tm.plan.freshness_column}) FROM {view_name}"
+                                ).fetchone()[0]
+                                if max_val is not None:
+                                    # Convert to datetime if it's a string
+                                    if isinstance(max_val, str):
+                                        max_val = datetime.datetime.fromisoformat(max_val)
+                                    # Check if the data is older than threshold
+                                    if isinstance(max_val, datetime.datetime):
+                                        age = now - max_val
+                                        if age > threshold:
+                                            stale.add(name)
+                                    else:
+                                        # Not a datetime column, use time-based staleness
+                                        age = now - prev_time
+                                        if age > threshold:
+                                            stale.add(name)
+                                else:
+                                    # No data, mark as stale
+                                    stale.add(name)
+                            except Exception:
+                                # If we can't check the column, fall back to time-based
+                                age = now - prev_time
+                                if age > threshold:
+                                    stale.add(name)
+                        else:
+                            # No freshness_column, use time-based staleness
+                            age = now - prev_time
+                            if age > threshold:
+                                stale.add(name)
         # A rollback (or a different warehouse) may not expose the last run.
         live = dict(con.execute("SELECT view_name, sql FROM duckdb_views() "
                                 "WHERE schema_name='main'").fetchall())

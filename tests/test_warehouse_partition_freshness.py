@@ -190,5 +190,26 @@ class TestFreshnessStaleness(unittest.TestCase):
         self.assertEqual(m.plan.freshness, "7d")
 
 
+class TestFreshnessColumn(unittest.TestCase):
+    def test_freshness_column_parsed(self):
+        """Freshness with freshness_column is parsed correctly."""
+        text = SRC + 'model m { from s freshness 1h freshness_column: ts }\n'
+        proj = Project(parse_strata(text, "<test>"))
+        Checker(proj).check_all()
+        m = proj.typed["m"]
+        self.assertEqual(m.plan.freshness, "1h")
+        self.assertEqual(m.plan.freshness_column, "ts")
+
+    def test_freshness_column_with_partition_by(self):
+        """Freshness with partition_by and freshness_column is parsed correctly."""
+        text = SRC + 'model m { from s partition_by [ds] freshness daily freshness_column: ts }\n'
+        proj = Project(parse_strata(text, "<test>"))
+        Checker(proj).check_all()
+        m = proj.typed["m"]
+        self.assertEqual(m.plan.freshness, "daily")
+        self.assertEqual(m.plan.freshness_column, "ts")
+        self.assertEqual(len(m.plan.partition_by), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
