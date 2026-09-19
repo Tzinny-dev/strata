@@ -315,6 +315,10 @@ class Parser:
         elif self.at("STR"):
             # Custom expression as string
             values.append("".join(p[1] for p in self.advance().value))
+        elif self.at("KW", "incremental"):
+            # 'incremental' is a keyword but used as freshness value
+            self.advance()
+            values.append("incremental")
         else:
             values.append(self.expect("ID").value)
         # Check for comma-separated values
@@ -329,6 +333,10 @@ class Parser:
             elif self.at("STR"):
                 # Custom expression as string
                 values.append("".join(p[1] for p in self.advance().value))
+            elif self.at("KW", "incremental"):
+                # 'incremental' is a keyword but used as freshness value
+                self.advance()
+                values.append("incremental")
             else:
                 values.append(self.expect("ID").value)
         return values
@@ -394,6 +402,56 @@ class Parser:
                     self.advance()
                     self.expect("SYM", ":")
                     decl.freshness_column = self.expect("ID").value
+                # Check for incremental configuration
+                if self.at("KW", "incremental"):
+                    self.advance()
+                    decl.incremental = True
+                    # Check for merge_strategy
+                    if self.at("KW", "merge_strategy"):
+                        self.advance()
+                        self.expect("SYM", ":")
+                        decl.merge_strategy = self.expect("ID").value
+                    # Check for merge_keys
+                    if self.at("KW", "merge_keys"):
+                        self.advance()
+                        self.expect("SYM", ":")
+                        self.expect("SYM", "[")
+                        if not self.at("SYM", "]"):
+                            while True:
+                                decl.merge_keys.append(self.parse_expr())
+                                if not self.match("SYM", ","):
+                                    break
+                        self.expect("SYM", "]")
+                    # Check for cdc_column
+                    if self.at("KW", "cdc_column"):
+                        self.advance()
+                        self.expect("SYM", ":")
+                        decl.cdc_column = self.expect("ID").value
+            elif self.at("KW", "incremental"):
+                # Incremental model without freshness
+                self.advance()
+                decl.incremental = True
+                # Check for merge_strategy
+                if self.at("KW", "merge_strategy"):
+                    self.advance()
+                    self.expect("SYM", ":")
+                    decl.merge_strategy = self.expect("ID").value
+                # Check for merge_keys
+                if self.at("KW", "merge_keys"):
+                    self.advance()
+                    self.expect("SYM", ":")
+                    self.expect("SYM", "[")
+                    if not self.at("SYM", "]"):
+                        while True:
+                            decl.merge_keys.append(self.parse_expr())
+                            if not self.match("SYM", ","):
+                                break
+                    self.expect("SYM", "]")
+                # Check for cdc_column
+                if self.at("KW", "cdc_column"):
+                    self.advance()
+                    self.expect("SYM", ":")
+                    decl.cdc_column = self.expect("ID").value
             elif self.at("KW") and self.cur().value in JOIN_KINDS:
                 k, t = self.cur().value, self.advance()
                 decl.stmts.append(ast.JoinStmt(

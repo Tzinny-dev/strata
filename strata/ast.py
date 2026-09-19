@@ -264,6 +264,11 @@ class ModelDecl(Node):
     partition_by: List[Node] = field(default_factory=list)
     freshness: Optional[List[str]] = None  # e.g. ['incremental'], ['1h', 'daily']
     freshness_column: Optional[str] = None  # event-time column for freshness check
+    # Incremental model configuration
+    incremental: bool = False  # True if this is an incremental model
+    merge_keys: List[Node] = field(default_factory=list)  # Keys for upsert/merge
+    merge_strategy: Optional[str] = None  # 'upsert', 'append', 'replace'
+    cdc_column: Optional[str] = None  # Change Data Capture column
     stmts: List[Stmt] = field(default_factory=list)
     generated: bool = False       # produced by fn expansion
 

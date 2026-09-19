@@ -38,6 +38,7 @@ KEYWORDS = {
     "domain",
     "nonnull", "unique", "primary_key", "protected", "enum",
     "classification", "partition_by", "freshness", "freshness_column",
+    "incremental", "merge_keys", "merge_strategy", "cdc_column",
     "nonnull",  # dedupe-safe
     "not", "and", "or", "in", "is", "null", "true", "false",
     "for", "over",

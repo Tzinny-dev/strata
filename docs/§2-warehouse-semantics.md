@@ -410,3 +410,67 @@ partition_by [to_date(ds)]
 # Particionamiento por region y tiempo
 partition_by [region, year, month]
 ```
+
+---
+
+## Cambios Recientes (2026-09-18) - Prioridad Baja
+
+### 1. Freshness custom con expressions complejas
+
+**Syntax**:
+```strata
+model m {
+  from s
+  freshness "now() - interval '1 day'"
+}
+```
+
+**Comportamiento**:
+- Soporta expressions SQL como strings
+- Evaluated by warehouse at runtime
+- Can be mixed with standard freshness specs
+
+**Ejemplos**:
+```strata
+# Custom expression
+freshness "now() - interval '1 day'"
+
+# Mixed with standard freshness
+freshness 1h, "now() - interval '7 days'"
+
+# Multiple custom expressions
+freshness "now() - interval '1 hour'", "now() - interval '1 day'"
+```
+
+### 2. Staleness cascade a modelos downstream
+
+**Comportamiento**:
+- Si un modelo es stale, todos los modelos que dependen de el tambien se marcan como stale
+- Utiliza la funcion existente `_downstream_models()`
+- Asegura que los pipelines se mantengan consistentes
+
+**Ejemplo**:
+```strata
+model m1 { from s freshness 1h }  # Si m1 es stale...
+model m2 { from m1 }              # ...m2 tambien sera stale
+model m3 { from m2 }              # ...y m3 tambien
+```
+
+### 3. Freshness override en tiempo de ejecucion
+
+**Syntax CLI**:
+```bash
+strata run module.strata --freshness 2h
+strata run module.strata --freshness daily
+strata run module.strata --freshness 7d
+```
+
+**Comportamiento**:
+- Override el freshness threshold para todos los modelos en el pipeline
+- Util para testing o emergencias
+- No modifica el archivo .strata original
+
+**Casos de uso**:
+- Testing: Forzar reconstruccion de modelos
+- Emeracias: Override freshness para datos criticos
+- Debugging: Investigar issues de staleness

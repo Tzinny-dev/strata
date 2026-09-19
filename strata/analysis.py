@@ -114,6 +114,11 @@ class Plan:
     partition_by: List[Node] = field(default_factory=list)
     freshness: Optional[List[str]] = None  # e.g. ['incremental'], ['1h', 'daily']
     freshness_column: Optional[str] = None  # event-time column for freshness check
+    # Incremental model configuration
+    incremental: bool = False  # True if this is an incremental model
+    merge_keys: List[Node] = field(default_factory=list)  # Keys for upsert/merge
+    merge_strategy: Optional[str] = None  # 'upsert', 'append', 'replace'
+    cdc_column: Optional[str] = None  # Change Data Capture column
     inputs: List[InputSpec] = field(default_factory=list)
     joins: List[JoinSpec] = field(default_factory=list)
     base_cols: List[BaseCol] = field(default_factory=list)
@@ -688,6 +693,10 @@ class _ModelState:
         tm.plan.partition_by = decl.partition_by
         tm.plan.freshness = decl.freshness
         tm.plan.freshness_column = decl.freshness_column
+        tm.plan.incremental = decl.incremental
+        tm.plan.merge_keys = decl.merge_keys
+        tm.plan.merge_strategy = decl.merge_strategy
+        tm.plan.cdc_column = decl.cdc_column
         self.tm = tm
         self.inputs: List[InputSpec] = []
         self.base_cols: List[BaseCol] = []
