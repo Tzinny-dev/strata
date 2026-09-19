@@ -57,13 +57,13 @@ class TestPartitionBySQL(unittest.TestCase):
         self.assertIn("SELECT", sql)
 
     def test_partition_by_with_freshness(self):
-        """partition_by + freshness: both attributes stored in plan."""
+        """partition_by with freshness: partition_by columns + freshness."""
         text = SRC + 'model m { from s partition_by [ds] freshness incremental }\n'
         proj = Project(parse_strata(text, "<test>"))
         Checker(proj).check_all()
         m = proj.typed["m"]
         self.assertEqual(len(m.plan.partition_by), 1)
-        self.assertEqual(m.plan.freshness, "incremental")
+        self.assertEqual(m.plan.freshness, ["incremental"])
 
     def test_freshness_only(self):
         """freshness without partition_by: no partition validation."""
@@ -72,7 +72,7 @@ class TestPartitionBySQL(unittest.TestCase):
         Checker(proj).check_all()
         m = proj.typed["m"]
         self.assertEqual(m.plan.partition_by, [])
-        self.assertEqual(m.plan.freshness, "incremental")
+        self.assertEqual(m.plan.freshness, ["incremental"])
 
 
 class TestPartitionByExecution(unittest.TestCase):
@@ -171,7 +171,7 @@ class TestFreshnessStaleness(unittest.TestCase):
         proj = Project(parse_strata(text, "<test>"))
         Checker(proj).check_all()
         m = proj.typed["m"]
-        self.assertEqual(m.plan.freshness, "daily")
+        self.assertEqual(m.plan.freshness, ["daily"])
 
     def test_freshness_1h_parsed(self):
         """Freshness '1h' is parsed correctly."""
@@ -179,7 +179,7 @@ class TestFreshnessStaleness(unittest.TestCase):
         proj = Project(parse_strata(text, "<test>"))
         Checker(proj).check_all()
         m = proj.typed["m"]
-        self.assertEqual(m.plan.freshness, "1h")
+        self.assertEqual(m.plan.freshness, ["1h"])
 
     def test_freshness_7d_parsed(self):
         """Freshness '7d' is parsed correctly."""
@@ -187,7 +187,7 @@ class TestFreshnessStaleness(unittest.TestCase):
         proj = Project(parse_strata(text, "<test>"))
         Checker(proj).check_all()
         m = proj.typed["m"]
-        self.assertEqual(m.plan.freshness, "7d")
+        self.assertEqual(m.plan.freshness, ["7d"])
 
 
 class TestFreshnessColumn(unittest.TestCase):
@@ -197,7 +197,7 @@ class TestFreshnessColumn(unittest.TestCase):
         proj = Project(parse_strata(text, "<test>"))
         Checker(proj).check_all()
         m = proj.typed["m"]
-        self.assertEqual(m.plan.freshness, "1h")
+        self.assertEqual(m.plan.freshness, ["1h"])
         self.assertEqual(m.plan.freshness_column, "ts")
 
     def test_freshness_column_with_partition_by(self):
@@ -206,8 +206,46 @@ class TestFreshnessColumn(unittest.TestCase):
         proj = Project(parse_strata(text, "<test>"))
         Checker(proj).check_all()
         m = proj.typed["m"]
-        self.assertEqual(m.plan.freshness, "daily")
+        self.assertEqual(m.plan.freshness, ["daily"])
         self.assertEqual(m.plan.freshness_column, "ts")
+        self.assertEqual(len(m.plan.partition_by), 1)
+
+
+class TestStalenessOk(unittest.TestCase):
+    def test_staleness_ok_parsed(self):
+        """staleness_ok attribute is parsed correctly."""
+        text = SRC + 'model m { from s staleness_ok: "true" }\n'
+        proj = Project(parse_strata(text, "<test>"))
+        Checker(proj).check_all()
+        m = proj.typed["m"]
+        self.assertEqual(m.attrs.get("staleness_ok"), "true")
+
+    def test_staleness_ok_with_freshness(self):
+        """staleness_ok works with freshness."""
+        text = SRC + 'model m { from s freshness 1h staleness_ok: "true" }\n'
+        proj = Project(parse_strata(text, "<test>"))
+        Checker(proj).check_all()
+        m = proj.typed["m"]
+        self.assertEqual(m.plan.freshness, ["1h"])
+        self.assertEqual(m.attrs.get("staleness_ok"), "true")
+
+
+class TestMultipleFreshness(unittest.TestCase):
+    def test_multiple_freshness_parsed(self):
+        """Multiple freshness thresholds are parsed correctly."""
+        text = SRC + 'model m { from s freshness 1h, daily }\n'
+        proj = Project(parse_strata(text, "<test>"))
+        Checker(proj).check_all()
+        m = proj.typed["m"]
+        self.assertEqual(m.plan.freshness, ["1h", "daily"])
+
+    def test_multiple_freshness_with_partition_by(self):
+        """Multiple freshness with partition_by is parsed correctly."""
+        text = SRC + 'model m { from s partition_by [ds] freshness 1h, weekly }\n'
+        proj = Project(parse_strata(text, "<test>"))
+        Checker(proj).check_all()
+        m = proj.typed["m"]
+        self.assertEqual(m.plan.freshness, ["1h", "weekly"])
         self.assertEqual(len(m.plan.partition_by), 1)
 
 

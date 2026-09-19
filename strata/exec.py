@@ -972,49 +972,56 @@ def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
             changed = {s for s, h in source_fps.items() if prev_fps.get(s) != h}
             changed |= {s for s in prev_fps if s not in source_fps}
             stale = set(stale_models(tms, module_path)) | _downstream_models(tms, changed)
-        # §2 freshness-based staleness: check if data is older than threshold
+        # §2 freshness-based staleness: check if data is older than any threshold
         if previous and "committed_at" in previous:
             prev_time = datetime.datetime.fromisoformat(previous["committed_at"])
             now = datetime.datetime.now()
             for name in names:
                 tm = tms.get(name)
                 if tm and tm.plan.freshness:
-                    threshold = parse_freshness_threshold(tm.plan.freshness)
-                    if threshold is not None:
-                        # If freshness_column is specified, check max value of that column
-                        if tm.plan.freshness_column:
-                            try:
-                                view_name = promoted_name(name)
-                                max_val = con.execute(
-                                    f"SELECT MAX({tm.plan.freshness_column}) FROM {view_name}"
-                                ).fetchone()[0]
-                                if max_val is not None:
-                                    # Convert to datetime if it's a string
-                                    if isinstance(max_val, str):
-                                        max_val = datetime.datetime.fromisoformat(max_val)
-                                    # Check if the data is older than threshold
-                                    if isinstance(max_val, datetime.datetime):
-                                        age = now - max_val
-                                        if age > threshold:
-                                            stale.add(name)
+                    # Check each freshness threshold
+                    for freshness_spec in tm.plan.freshness:
+                        threshold = parse_freshness_threshold(freshness_spec)
+                        if threshold is not None:
+                            # If freshness_column is specified, check max value of that column
+                            if tm.plan.freshness_column:
+                                try:
+                                    view_name = promoted_name(name)
+                                    max_val = con.execute(
+                                        f"SELECT MAX({tm.plan.freshness_column}) FROM {view_name}"
+                                    ).fetchone()[0]
+                                    if max_val is not None:
+                                        # Convert to datetime if it's a string
+                                        if isinstance(max_val, str):
+                                            max_val = datetime.datetime.fromisoformat(max_val)
+                                        # Check if the data is older than threshold
+                                        if isinstance(max_val, datetime.datetime):
+                                            age = now - max_val
+                                            if age > threshold:
+                                                stale.add(name)
+                                                break  # No need to check other thresholds
+                                        else:
+                                            # Not a datetime column, use time-based staleness
+                                            age = now - prev_time
+                                            if age > threshold:
+                                                stale.add(name)
+                                                break
                                     else:
-                                        # Not a datetime column, use time-based staleness
-                                        age = now - prev_time
-                                        if age > threshold:
-                                            stale.add(name)
-                                else:
-                                    # No data, mark as stale
-                                    stale.add(name)
-                            except Exception:
-                                # If we can't check the column, fall back to time-based
+                                        # No data, mark as stale
+                                        stale.add(name)
+                                        break
+                                except Exception:
+                                    # If we can't check the column, fall back to time-based
+                                    age = now - prev_time
+                                    if age > threshold:
+                                        stale.add(name)
+                                        break
+                            else:
+                                # No freshness_column, use time-based staleness
                                 age = now - prev_time
                                 if age > threshold:
                                     stale.add(name)
-                        else:
-                            # No freshness_column, use time-based staleness
-                            age = now - prev_time
-                            if age > threshold:
-                                stale.add(name)
+                                    break  # No need to check other thresholds
         # A rollback (or a different warehouse) may not expose the last run.
         live = dict(con.execute("SELECT view_name, sql FROM duckdb_views() "
                                 "WHERE schema_name='main'").fetchall())
@@ -1023,6 +1030,11 @@ def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
                 snap = previous.get("snapshots", {}).get(name)
                 if not snap or snap not in live.get(promoted_name(name), ""):
                     stale.add(name)
+        # Exclude models with staleness_ok attribute from stale set
+        for name in list(stale):
+            tm = tms.get(name)
+            if tm and tm.attrs.get("staleness_ok"):
+                stale.discard(name)
         names = [n for n in names if n in stale]
         if not names:
             return [], [], "everything up to date (nothing to do)"

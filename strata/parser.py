@@ -22,7 +22,7 @@ PREC = {"or": 1, "and": 2, "cmp": 3, "add": 4, "mul": 5}
 
 JOIN_KINDS = {"join_left": "left", "join_inner": "inner", "join_anti": "anti", "join_semi": "semi"}
 
-MODEL_ATTRS = {"owner", "reason", "description", "label"}
+MODEL_ATTRS = {"owner", "reason", "description", "label", "staleness_ok"}
 
 
 class Parser:
@@ -297,17 +297,34 @@ class Parser:
                 break
         return f
 
-    def _parse_freshness_value(self) -> str:
-        """Parse freshness value: incremental, daily, weekly, 1h, 24h, etc."""
-        # Check for INT followed by ID (e.g., 1h, 24h)
+    def _parse_freshness_value(self) -> List[str]:
+        """Parse freshness value(s): incremental, daily, weekly, 1h, 24h, etc.
+
+        Supports comma-separated multiple values: freshness 1h, daily
+        """
+        values = []
+        # Parse first value
         if self.at("INT"):
             num = self.advance().value
             if self.at("ID"):
                 unit = self.advance().value
-                return f"{num}{unit}"
-            return num
-        # Otherwise, expect an ID (incremental, daily, weekly, etc.)
-        return self.expect("ID").value
+                values.append(f"{num}{unit}")
+            else:
+                values.append(num)
+        else:
+            values.append(self.expect("ID").value)
+        # Check for comma-separated values
+        while self.match("SYM", ","):
+            if self.at("INT"):
+                num = self.advance().value
+                if self.at("ID"):
+                    unit = self.advance().value
+                    values.append(f"{num}{unit}")
+                else:
+                    values.append(num)
+            else:
+                values.append(self.expect("ID").value)
+        return values
 
     def parse_model_decl(self) -> ast.ModelDecl:
         kw = self.expect("KW", "model")

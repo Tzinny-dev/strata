@@ -264,3 +264,67 @@ Herramientas para:
 - **§2 Spec**: `docs/strata-plan.md` - Definicion original de partition_by y freshness
 - **§5 Warehouse Adapters**: `docs/warehouse-adapters-plan.md` - Soporte multi-warehouse
 - **Commit**: `fa2bf29` - Implementacion base completa
+
+---
+
+## Cambios Recientes (2026-09-18)
+
+### 1. Fix: partition_col aliases unicos
+
+**Problema**: Cuando se usaban multiples columnas en `partition_by`, todas obtenian el mismo alias `__partition_col`, causando conflictos en SQL.
+
+**Solucion**: Cada columna ahora tiene un alias unico: `__partition_col_0`, `__partition_col_1`, etc.
+
+```strata
+-- Antes (con bug)
+model m { from s partition_by [ds, region] }
+-- SQL: ds AS __partition_col, region AS __partition_col  -- CONFLICTO!
+
+-- Despues (corregido)
+model m { from s partition_by [ds, region] }
+-- SQL: ds AS __partition_col_0, region AS __partition_col_1  -- OK
+```
+
+### 2. freshness_column: Staleness basado en event-time
+
+**Nuevo syntax**:
+```strata
+model m { from s freshness 1h freshness_column: ts }
+```
+
+**Comportamiento**:
+- Si se especifica `freshness_column`, se verifica `SELECT MAX(column) FROM view`
+- Si el maximo es mayor que el threshold, el modelo se marca como stale
+- Si no se especifica, se usa el tiempo desde el ultimo run (comportamiento anterior)
+
+**Casos de uso**:
+- Datos con event-time diferente del processing-time
+- Pipelines donde los datos llegan con delay
+- Monitoreo de calidad de datos
+
+### 3. Warehouse partitioning (infraestructura)
+
+**Cambios en Dialect**:
+```python
+class Dialect:
+    supports_partitioning: bool  # True si el warehouse soporta particionamiento
+    partition_clause(columns)    # Genera la clausula de particionamiento
+```
+
+**Cambios en Warehouse**:
+```python
+class Warehouse:
+    def materialize(self, name, sql, partition_by=None):
+        # partition_by: lista de columnas para particionar
+        ...
+```
+
+**Estado actual**:
+- DuckDB: No soporta particionamiento (ignorado)
+- Snowflake: Soportaria `CLUSTER BY`
+- BigQuery: Soportaria `PARTITION BY`
+- Redshift: Soportaria `DISTKEY` / `SORTKEY`
+
+**Nota**: La implementacion completa de particionamiento fisico requiere
+modificar `publish_snapshots()` para incluir la clausula de particionamiento
+al crear las tablas snapshot.

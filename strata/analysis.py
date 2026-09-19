@@ -112,7 +112,7 @@ class PlanOut:
 @dataclass
 class Plan:
     partition_by: List[Node] = field(default_factory=list)
-    freshness: Optional[str] = None
+    freshness: Optional[List[str]] = None  # e.g. ['incremental'], ['1h', 'daily']
     freshness_column: Optional[str] = None  # event-time column for freshness check
     inputs: List[InputSpec] = field(default_factory=list)
     joins: List[JoinSpec] = field(default_factory=list)

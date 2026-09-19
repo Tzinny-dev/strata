@@ -262,7 +262,7 @@ class ModelDecl(Node):
     contract: Optional[str] = None
     attrs: Dict[str, str] = field(default_factory=dict)
     partition_by: List[Node] = field(default_factory=list)
-    freshness: Optional[str] = None       # e.g. 'incremental', 'watermark', time-spec
+    freshness: Optional[List[str]] = None  # e.g. ['incremental'], ['1h', 'daily']
     freshness_column: Optional[str] = None  # event-time column for freshness check
     stmts: List[Stmt] = field(default_factory=list)
     generated: bool = False       # produced by fn expansion
