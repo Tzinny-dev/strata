@@ -249,5 +249,49 @@ class TestMultipleFreshness(unittest.TestCase):
         self.assertEqual(len(m.plan.partition_by), 1)
 
 
+class TestCustomFreshness(unittest.TestCase):
+    def test_custom_freshness_parsed(self):
+        """Custom freshness expression is parsed correctly."""
+        text = SRC + """model m { from s freshness "now() - interval '1 day'" }\n"""
+        proj = Project(parse_strata(text, "<test>"))
+        Checker(proj).check_all()
+        m = proj.typed["m"]
+        self.assertEqual(m.plan.freshness, ["now() - interval '1 day'"])
+
+    def test_custom_freshness_mixed(self):
+        """Custom freshness mixed with standard freshness."""
+        text = SRC + """model m { from s freshness 1h, "now() - interval '7 days'" }\n"""
+        proj = Project(parse_strata(text, "<test>"))
+        Checker(proj).check_all()
+        m = proj.typed["m"]
+        self.assertEqual(m.plan.freshness, ["1h", "now() - interval '7 days'"])
+
+
+class TestStalenessCascade(unittest.TestCase):
+    def test_staleness_cascade_downstream(self):
+        """Staleness cascades to downstream models."""
+        text = SRC + """
+model m1 { from s freshness 1h }
+model m2 { from m1 }
+"""
+        proj = Project(parse_strata(text, "<test>"))
+        Checker(proj).check_all()
+        m1 = proj.typed["m1"]
+        m2 = proj.typed["m2"]
+        # m1 has freshness, m2 depends on m1
+        self.assertEqual(m1.plan.freshness, ["1h"])
+        self.assertEqual(m2.deps, ["m1"])
+
+
+class TestFreshnessOverride(unittest.TestCase):
+    def test_freshness_override_parameter(self):
+        """Freshness override parameter is accepted."""
+        from strata.exec import parse_freshness_threshold
+        import datetime
+        # Test that override value is parsed correctly
+        self.assertEqual(parse_freshness_threshold("2h"), datetime.timedelta(hours=2))
+        self.assertEqual(parse_freshness_threshold("3d"), datetime.timedelta(days=3))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -301,6 +301,7 @@ class Parser:
         """Parse freshness value(s): incremental, daily, weekly, 1h, 24h, etc.
 
         Supports comma-separated multiple values: freshness 1h, daily
+        Supports custom expressions: freshness "now() - interval '1 day'"
         """
         values = []
         # Parse first value
@@ -311,6 +312,9 @@ class Parser:
                 values.append(f"{num}{unit}")
             else:
                 values.append(num)
+        elif self.at("STR"):
+            # Custom expression as string
+            values.append("".join(p[1] for p in self.advance().value))
         else:
             values.append(self.expect("ID").value)
         # Check for comma-separated values
@@ -322,6 +326,9 @@ class Parser:
                     values.append(f"{num}{unit}")
                 else:
                     values.append(num)
+            elif self.at("STR"):
+                # Custom expression as string
+                values.append("".join(p[1] for p in self.advance().value))
             else:
                 values.append(self.expect("ID").value)
         return values

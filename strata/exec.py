@@ -36,6 +36,7 @@ def parse_freshness_threshold(freshness: str) -> Optional[datetime.timedelta]:
     - 'daily': 24 hours
     - 'weekly': 7 days
     - 'monthly': 30 days
+    - Custom expressions (e.g., "now() - interval '1 day'"): returns CUSTOM_MARKER
     """
     if freshness == "incremental":
         return None  # Not time-based, handled by source staleness
@@ -60,7 +61,16 @@ def parse_freshness_threshold(freshness: str) -> Optional[datetime.timedelta]:
         elif unit == "w":
             return datetime.timedelta(weeks=num)
 
+    # Custom expression (contains SQL-like syntax)
+    if "(" in freshness or "interval" in freshness.lower():
+        return CUSTOM_FRESHNESS_MARKER  # Needs warehouse evaluation
+
     return None  # Unknown format, skip time-based staleness
+
+
+# Sentinel value indicating a custom freshness expression that needs
+# to be evaluated by the warehouse (not a simple timedelta).
+CUSTOM_FRESHNESS_MARKER = datetime.timedelta(days=-1)
 
 
 MANIFEST_SUFFIX = ".strata-manifest.json"
@@ -946,7 +956,8 @@ def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
         only_stale: bool = False, names: Optional[List[str]] = None,
         dialect=DUCKDB, source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
         branch: str = "main", stage_only: bool = False,
-        reason: Optional[str] = None, backfill_of: Optional[str] = None):
+        reason: Optional[str] = None, backfill_of: Optional[str] = None,
+        freshness_override: Optional[str] = None):
     if names is None:
         names = list(tms)
     for src in source_overrides or {}:
@@ -979,10 +990,40 @@ def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
             for name in names:
                 tm = tms.get(name)
                 if tm and tm.plan.freshness:
+                    # Use freshness_override if specified, otherwise use model's freshness
+                    freshness_specs = [freshness_override] if freshness_override else tm.plan.freshness
                     # Check each freshness threshold
-                    for freshness_spec in tm.plan.freshness:
+                    for freshness_spec in freshness_specs:
                         threshold = parse_freshness_threshold(freshness_spec)
                         if threshold is not None:
+                            # Handle custom freshness expressions
+                            if threshold == CUSTOM_FRESHNESS_MARKER:
+                                try:
+                                    # Evaluate the custom expression against the warehouse
+                                    view_name = promoted_name(name)
+                                    result = con.execute(
+                                        f"SELECT {freshness_spec} FROM {view_name} LIMIT 1"
+                                    ).fetchone()
+                                    if result and result[0] is not None:
+                                        # Result should be a datetime or interval
+                                        custom_threshold = result[0]
+                                        if isinstance(custom_threshold, datetime.timedelta):
+                                            threshold = custom_threshold
+                                        elif isinstance(custom_threshold, datetime.datetime):
+                                            # If result is a datetime, use it as the cutoff
+                                            age = now - custom_threshold
+                                            if age > datetime.timedelta(0):
+                                                stale.add(name)
+                                                break
+                                        else:
+                                            # Unknown type, skip this check
+                                            continue
+                                    else:
+                                        # Expression returned NULL, skip this check
+                                        continue
+                                except Exception:
+                                    # If we can't evaluate the expression, skip it
+                                    continue
                             # If freshness_column is specified, check max value of that column
                             if tm.plan.freshness_column:
                                 try:
@@ -1022,6 +1063,11 @@ def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
                                 if age > threshold:
                                     stale.add(name)
                                     break  # No need to check other thresholds
+        # Cascade staleness to downstream models
+        # If a model is stale, all models that depend on it should also be stale
+        freshness_stale = set(stale)  # Models stale due to freshness
+        if freshness_stale:
+            stale |= _downstream_models(tms, freshness_stale)
         # A rollback (or a different warehouse) may not expose the last run.
         live = dict(con.execute("SELECT view_name, sql FROM duckdb_views() "
                                 "WHERE schema_name='main'").fetchall())

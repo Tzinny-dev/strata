@@ -259,7 +259,8 @@ def cmd_run(args):
                                        names=wanted,
                                        source_overrides=overrides or None,
                                        branch=getattr(args, "branch", "main"),
-                                       stage_only=getattr(args, "stage_only", False))
+                                       stage_only=getattr(args, "stage_only", False),
+                                       freshness_override=getattr(args, "freshness", None))
     if note:
         print(note)
     else:
@@ -892,6 +893,8 @@ def main(argv=None):
     p.add_argument("file")
     p.add_argument("--seed", action="store_true")
     p.add_argument("--only-stale", action="store_true")
+    p.add_argument("--freshness", default=None,
+                   help="override freshness threshold for all models (e.g., 1h, daily, 7d)")
     p.add_argument("--branch", default="main", help="staging branch (stg_<branch>__*, promoted to v_* on swap)")
     p.add_argument("--stage-only", action="store_true", help="build + pin staged views without promoting (blue-green hold)")
     p.add_argument("--pipeline", default=None,

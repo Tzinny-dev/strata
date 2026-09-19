@@ -328,3 +328,85 @@ class Warehouse:
 **Nota**: La implementacion completa de particionamiento fisico requiere
 modificar `publish_snapshots()` para incluir la clausula de particionamiento
 al crear las tablas snapshot.
+
+---
+
+## Cambios Recientes (2026-09-18) - Prioridad Media
+
+### 1. staleness_ok attribute
+
+**Syntax**:
+```strata
+model m {
+  from s
+  staleness_ok: "true"
+}
+```
+
+**Comportamiento**:
+- Los modelos con `staleness_ok: "true"` se excluyen del stale set
+- Util para queries ad-hoc donde el usuario acepta datos stale
+- Compatibles con `freshness` y otros atributos
+
+**Casos de uso**:
+- Modelos de desarrollo o testing
+- Queries exploratorias
+- Modelos con datos estaticos
+
+### 2. Multiples freshness thresholds
+
+**Syntax**:
+```strata
+model m {
+  from s
+  freshness 1h, daily
+}
+```
+
+**Comportamiento**:
+- Soporta valores separados por comas
+- El modelo se marca como stale si CUALQUIER umbral es excedido
+- Util para pipelines con multiples SLAs
+
+**Ejemplos**:
+```strata
+# Stale si datos tienen > 1 hora O > 24 horas
+freshness 1h, daily
+
+# Stale si datos tienen > 7 dias
+freshness weekly
+
+# Combinacion con partition_by
+model m {
+  from s
+  partition_by [ds]
+  freshness 1h, weekly
+}
+```
+
+### 3. partition_by compuesto (ya soportado)
+
+**Syntax**:
+```strata
+model m {
+  from s
+  partition_by [year, month, day]
+}
+```
+
+**Comportamiento**:
+- Cada columna genera un alias unico: `__partition_col_0`, `__partition_col_1`, etc.
+- Soporta expresiones: `partition_by [substring(ds, 1, 4)]`
+- Soporta jerarquia de particionamiento
+
+**Ejemplos**:
+```strata
+# Particionamiento por tiempo
+partition_by [year, month, day]
+
+# Particionamiento por expresion
+partition_by [to_date(ds)]
+
+# Particionamiento por region y tiempo
+partition_by [region, year, month]
+```
