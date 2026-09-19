@@ -26,6 +26,43 @@ class PinError(Exception):
     pass
 
 
+def parse_freshness_threshold(freshness: str) -> Optional[datetime.timedelta]:
+    """Parse freshness spec to timedelta threshold.
+
+    Supported formats:
+    - 'incremental': None (handled separately, not time-based)
+    - '1h', '24h': hours
+    - '1d', '7d': days
+    - 'daily': 24 hours
+    - 'weekly': 7 days
+    - 'monthly': 30 days
+    """
+    if freshness == "incremental":
+        return None  # Not time-based, handled by source staleness
+
+    # Named periods
+    named_periods = {
+        "daily": datetime.timedelta(hours=24),
+        "weekly": datetime.timedelta(days=7),
+        "monthly": datetime.timedelta(days=30),
+    }
+    if freshness in named_periods:
+        return named_periods[freshness]
+
+    # Numeric + unit: 1h, 24h, 1d, 7d
+    m = re.match(r"^(\d+)([hdw])$", freshness)
+    if m:
+        num, unit = int(m.group(1)), m.group(2)
+        if unit == "h":
+            return datetime.timedelta(hours=num)
+        elif unit == "d":
+            return datetime.timedelta(days=num)
+        elif unit == "w":
+            return datetime.timedelta(weeks=num)
+
+    return None  # Unknown format, skip time-based staleness
+
+
 MANIFEST_SUFFIX = ".strata-manifest.json"
 HISTORY_SUFFIX = ".strata-history.jsonl"
 
@@ -271,6 +308,25 @@ def runtime_pins(con, project: Project, tm: TypedModel, view: str, report: List[
             if dups:
                 bad(f"expected {('primary_key' if f.primary else 'unique')} but {dups} duplicate values")
             report.append(f"  ok  {tm.name}.{f.name}: {'primary_key' if f.primary else 'unique'}")
+
+    # §2 warehouse semantics: freshness validation
+    if tm.plan.freshness and tm.plan.partition_by:
+        for p_expr in tm.plan.partition_by:
+            if hasattr(p_expr, 'name'):
+                col_name = p_expr.name
+                if col_name not in physical:
+                    raise PinError(
+                        f"phase-C pin FAILED [{tm.name}] freshness "
+                        f"partition_by column {col_name!r} not in materialized schema")
+                report.append(f"  ok  {tm.name}.{col_name}: freshness partition_by present")
+            elif hasattr(p_expr, 'items'):
+                for item in p_expr.items:
+                    if hasattr(item, 'name'):
+                        if item.name not in physical:
+                            raise PinError(
+                                f"phase-C pin FAILED [{tm.name}] freshness "
+                                f"partition_by column {item.name!r} not in materialized schema")
+                        report.append(f"  ok  {tm.name}.{item.name}: freshness partition_by present")
 
 
 def check_physical_schema(dialect: str, tms: Dict[str, TypedModel]) -> Dict[str, List[str]]:
@@ -916,6 +972,18 @@ def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
             changed = {s for s, h in source_fps.items() if prev_fps.get(s) != h}
             changed |= {s for s in prev_fps if s not in source_fps}
             stale = set(stale_models(tms, module_path)) | _downstream_models(tms, changed)
+        # §2 freshness-based staleness: check if data is older than threshold
+        if previous and "committed_at" in previous:
+            prev_time = datetime.datetime.fromisoformat(previous["committed_at"])
+            now = datetime.datetime.now()
+            for name in names:
+                tm = tms.get(name)
+                if tm and tm.plan.freshness:
+                    threshold = parse_freshness_threshold(tm.plan.freshness)
+                    if threshold is not None:
+                        age = now - prev_time
+                        if age > threshold:
+                            stale.add(name)
         # A rollback (or a different warehouse) may not expose the last run.
         live = dict(con.execute("SELECT view_name, sql FROM duckdb_views() "
                                 "WHERE schema_name='main'").fetchall())

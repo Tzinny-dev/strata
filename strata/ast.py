@@ -261,6 +261,8 @@ class ModelDecl(Node):
     name: str = ""
     contract: Optional[str] = None
     attrs: Dict[str, str] = field(default_factory=dict)
+    partition_by: List[Node] = field(default_factory=list)
+    freshness: Optional[str] = None       # e.g. 'incremental', 'watermark', time-spec
     stmts: List[Stmt] = field(default_factory=list)
     generated: bool = False       # produced by fn expansion
 

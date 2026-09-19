@@ -111,6 +111,8 @@ class PlanOut:
 
 @dataclass
 class Plan:
+    partition_by: List[Node] = field(default_factory=list)
+    freshness: Optional[str] = None
     inputs: List[InputSpec] = field(default_factory=list)
     joins: List[JoinSpec] = field(default_factory=list)
     base_cols: List[BaseCol] = field(default_factory=list)
@@ -682,6 +684,8 @@ class _ModelState:
         tm = TypedModel(name=decl.name, contract=decl.contract, attrs=dict(decl.attrs),
                         deps=[d for d in checker._deps(decl)])
         tm.plan = Plan()
+        tm.plan.partition_by = decl.partition_by
+        tm.plan.freshness = decl.freshness
         self.tm = tm
         self.inputs: List[InputSpec] = []
         self.base_cols: List[BaseCol] = []

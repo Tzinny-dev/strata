@@ -297,6 +297,18 @@ class Parser:
                 break
         return f
 
+    def _parse_freshness_value(self) -> str:
+        """Parse freshness value: incremental, daily, weekly, 1h, 24h, etc."""
+        # Check for INT followed by ID (e.g., 1h, 24h)
+        if self.at("INT"):
+            num = self.advance().value
+            if self.at("ID"):
+                unit = self.advance().value
+                return f"{num}{unit}"
+            return num
+        # Otherwise, expect an ID (incremental, daily, weekly, etc.)
+        return self.expect("ID").value
+
     def parse_model_decl(self) -> ast.ModelDecl:
         kw = self.expect("KW", "model")
         decl = ast.ModelDecl(span=self.span(kw))
@@ -323,6 +335,31 @@ class Parser:
             elif self.at("KW", "from"):
                 t = self.advance()
                 decl.stmts.append(ast.FromStmt(table=self.expect("ID").value, span=self.span(t)))
+            elif self.at("KW", "partition_by"):
+                t = self.advance()
+                decl.partition_by = []
+                self.expect("SYM", "[")
+                if not self.at("SYM", "]"):
+                    while True:
+                        decl.partition_by.append(self.parse_expr())
+                        if not self.match("SYM", ","):
+                            break
+                self.expect("SYM", "]")
+                # After partition_by, check for freshness
+                if self.at("KW", "freshness"):
+                    t = self.advance()
+                    if self.at("COLON"):
+                        self.advance()
+                    decl.freshness = self._parse_freshness_value()
+            elif self.at("KW", "freshness"):
+                t = self.advance()
+                # freshness: <value>
+                if self.at("COLON"):
+                    self.advance()
+                    decl.freshness = self._parse_freshness_value()
+                else:
+                    # Maybe it's just a keyword without colon
+                    decl.freshness = self._parse_freshness_value()
             elif self.at("KW") and self.cur().value in JOIN_KINDS:
                 k, t = self.cur().value, self.advance()
                 decl.stmts.append(ast.JoinStmt(
