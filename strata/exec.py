@@ -6,7 +6,9 @@ and the last-known-good stays live (blue-green repointing is done by the caller)
 """
 from __future__ import annotations
 
+import contextlib
 import datetime
+import fcntl
 import hashlib
 import json
 import os
@@ -77,11 +79,50 @@ CUSTOM_FRESHNESS_MARKER = datetime.timedelta(days=-1)
 
 MANIFEST_SUFFIX = ".strata-manifest.json"
 HISTORY_SUFFIX = ".strata-history.jsonl"
+LOCK_SUFFIX = ".strata-lock"
 
 
 def history_path(module_path: str) -> Path:
     p = Path(module_path)
     return p.parent / (p.stem + HISTORY_SUFFIX)
+
+
+def _lock_path(module_path: str) -> Path:
+    p = Path(module_path)
+    return p.parent / (p.stem + LOCK_SUFFIX)
+
+
+@contextlib.contextmanager
+def _module_lock(module_path: str):
+    """Mutual exclusion across PROCESSES for anything that reads or writes
+    this module's history/manifest: without it, `record_run`'s read-modify-
+    write (read the whole history, append a line, overwrite) loses another
+    writer's entry outright if it races with a concurrent one — DuckDB
+    hides this by accident (opening the same .duckdb file twice normally
+    just fails), Postgres does not.
+
+    Coarse-grained on purpose: held for the WHOLE operation (run/replay/gc/
+    rollback), not just the metadata write. The goal is one writer in
+    flight per module, not fine-grained per-row locking — and holding it
+    end to end is also what closes gc_snapshots' own plan-then-apply
+    window for free (a concurrent run() blocks on this same lock instead
+    of publishing a run gc's plan never saw).
+
+    Discipline: only the four top-level entry points (run, execute_run,
+    gc_snapshots, rollback_to_run) acquire this. record_run/save_manifest/
+    recover_metadata never do — they always run already inside one of
+    those, and flock is not reentrant across separate os.open() calls in
+    the same process, so a nested acquire would deadlock the process
+    against itself. POSIX advisory lock: released automatically if the
+    holding process dies, so a crash never leaves an orphaned lock; not
+    supported on Windows, consistent with the rest of this prototype."""
+    fd = os.open(str(_lock_path(module_path)), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def _run_id(entry: dict) -> str:
@@ -638,6 +679,15 @@ def publish_snapshots(con, names: List[str], run_id: str,
 
 
 def rollback_to_run(con, e: dict, module_path: Optional[str] = None) -> List[str]:
+    """Public entry point: holds the module lock for the whole operation
+    (see _module_lock) when `module_path` is given — no history file to
+    protect without one."""
+    lock = _module_lock(module_path) if module_path is not None else contextlib.nullcontext()
+    with lock:
+        return _rollback_to_run_locked(con, e, module_path)
+
+
+def _rollback_to_run_locked(con, e: dict, module_path: Optional[str] = None) -> List[str]:
     """Repoint live views to the snapshot tables recorded by a past run.
 
     Snapshots are materialized tables, so rollback never re-executes and is
@@ -1000,6 +1050,18 @@ def gc_plan(con, module_path: str, keep: int = 2,
 def gc_snapshots(con, module_path: str, keep: int = 2,
                  keep_days: Optional[float] = None,
                  apply: bool = False) -> dict:
+    """Public entry point: holds the module lock for the whole operation
+    (see _module_lock) — including the report-only path, so a report
+    reflects a consistent snapshot instead of racing a concurrent run(),
+    and so a concurrent run() can never publish a new run in the window
+    between this plan and its apply."""
+    with _module_lock(module_path):
+        return _gc_snapshots_locked(con, module_path, keep, keep_days, apply)
+
+
+def _gc_snapshots_locked(con, module_path: str, keep: int = 2,
+                         keep_days: Optional[float] = None,
+                         apply: bool = False) -> dict:
     """Report (default) or drop unreferenced snapshot tables, all-or-nothing."""
     plan = gc_plan(con, module_path, keep, keep_days)
     if not apply or not plan["drop_tables"]:
@@ -1105,6 +1167,21 @@ def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
         branch: str = "main", stage_only: bool = False,
         reason: Optional[str] = None, backfill_of: Optional[str] = None,
         freshness_override: Optional[str] = None):
+    """Public entry point: holds the module lock for the whole operation
+    (see _module_lock) around the actual implementation below."""
+    with _module_lock(module_path):
+        return _run_locked(con, project, tms, module_path, only_stale=only_stale,
+                           names=names, dialect=dialect, source_overrides=source_overrides,
+                           branch=branch, stage_only=stage_only, reason=reason,
+                           backfill_of=backfill_of, freshness_override=freshness_override)
+
+
+def _run_locked(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
+                only_stale: bool = False, names: Optional[List[str]] = None,
+                dialect=DUCKDB, source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+                branch: str = "main", stage_only: bool = False,
+                reason: Optional[str] = None, backfill_of: Optional[str] = None,
+                freshness_override: Optional[str] = None):
     if names is None:
         names = list(tms)
     for src in source_overrides or {}:
@@ -1287,6 +1364,14 @@ def verify_run(module_path: str, run_id: str) -> dict:
 
 def execute_run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
                 run_id: str, dialect=DUCKDB):
+    """Public entry point: holds the module lock for the whole operation
+    (see _module_lock) around the actual implementation below."""
+    with _module_lock(module_path):
+        return _execute_run_locked(con, project, tms, module_path, run_id, dialect=dialect)
+
+
+def _execute_run_locked(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
+                        run_id: str, dialect=DUCKDB):
     """Replay WITH re-execution (spec §5): re-materialize a recorded run from
     its content-addressed record. The record must verify first (same gate as
     `verify_run`) — a drifted module never re-executes (fail-loud). Branch,
