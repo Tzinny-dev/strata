@@ -8,6 +8,7 @@ query — the same philosophy as the 3-phase pins.
 """
 from __future__ import annotations
 
+import datetime
 from typing import List
 
 from . import ast
@@ -36,6 +37,13 @@ def _lit(value) -> str:
         return "NULL"
     if isinstance(value, str):
         return "'" + value.replace("'", "''") + "'"
+    # datetime is a date subclass; check it first or a timestamp watermark
+    # (e.g. from an incremental cdc_column pushdown predicate) would lose
+    # its time component and silently become a bare DATE literal.
+    if isinstance(value, datetime.datetime):
+        return f"TIMESTAMP '{value.isoformat(sep=' ')}'"
+    if isinstance(value, datetime.date):
+        return f"DATE '{value.isoformat()}'"
     return str(value)
 
 

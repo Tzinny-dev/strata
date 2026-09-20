@@ -89,18 +89,37 @@ incorrecto en silencio), falta de `cdc_column` como columna de salida real
 `merge_strategy`) no tiene requisitos extra: sigue siendo el rebuild
 completo de siempre.
 
-Límite medido, no supuesto: el recómputo completo (`__full`) se sigue
-ejecutando cada run — el filtro por `cdc_column` recorta qué filas del
-resultado entran al delta, no cuánto de las fuentes se escanea. Es correcto
-(las pruebas verifican que una fila ya fusionada, mutada sin adelantar su
-`cdc_column`, nunca reaparece) pero no reduce el escaneo de las fuentes; eso
-requeriría empujar el filtro dentro de `gen_base_subquery`, pendiente.
-La primera ejecución de un modelo (sin snapshot previa) siempre es un
-recómputo completo, sea cual sea `merge_strategy`. Tests:
-`tests/test_incremental.py` (validación) y `tests/test_incremental_merge.py`
-(ejecución real en DuckDB, incluida la prueba que distingue esto de un
-rebuild completo: mutar una fila ya fusionada sin tocar `cdc_column` no debe
-verse en el siguiente run).
+**Pushdown a la fuente (cerrado 2026-09-19)**: cuando `cdc_column` es
+resoluble dentro del scope de la propia subconsulta base —un passthrough
+directo de la fuente, o un `let` ya computado ahí— y el modelo no tiene
+`join`/set-op/`expand`, el filtro `cdc_column > watermark` se agrega a
+`plan.preds` **antes** de compilar el SQL (el mismo mecanismo que ya usa
+`filter`), así que el propio `WHERE` de la subconsulta base recorta lo que
+se lee, no un filtro posterior sobre el recómputo completo:
+`_pushdown_base_expr` en `strata/exec.py` decide la elegibilidad;
+`sqlgen._lit()` ganó soporte para literales `datetime.date`/
+`datetime.datetime` (el watermark se lee con `MAX(cdc_column)` contra la
+snapshot anterior, no se parsea de texto Strata) para poder embeber el
+valor. Verificado inspeccionando el SQL generado, no solo el resultado:
+el `WHERE` aparece dentro del CTE `base`, y `__full` (la envoltura del
+camino anterior) no aparece en absoluto para este caso.
+
+Fuera de ese caso —`cdc_column` depende de un join, un set-op, un
+`expand`, o solo existe como expresión del `select`/`derive` exterior—
+el comportamiento es exactamente el de antes: se recomputa todo y se
+filtra después (`__full`/`__delta`), correcto pero sin el ahorro de
+escaneo. Nunca falla por esto; es una optimización oportunista, no un
+requisito. La primera ejecución de un modelo (sin snapshot previa)
+siempre es un recómputo completo, sea cual sea `merge_strategy`.
+
+Tests: `tests/test_incremental.py` (validación) y
+`tests/test_incremental_merge.py` (ejecución real en DuckDB): la prueba
+que distingue esto de un rebuild completo (mutar una fila ya fusionada sin
+tocar `cdc_column` no debe verse en el siguiente run), más
+`TestIncrementalPushdown` (el `WHERE` cae dentro del CTE base para
+passthrough/`let`; un `join_left` cae al camino de antes y sigue
+correcto; `cdc_column` de tipo `date` también hace pushdown) y
+`TestDateTimeLiterals` (`_lit()` con `datetime.date`/`datetime.datetime`).
 
 ## Límites
 

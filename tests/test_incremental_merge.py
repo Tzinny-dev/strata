@@ -208,5 +208,144 @@ class TestIncrementalReplaceIsFullRebuild(unittest.TestCase):
         self.assertEqual(v, 999)
 
 
+def _staged_sql(con, name, branch="main"):
+    row = con.execute(
+        "SELECT sql FROM duckdb_views() WHERE view_name=?",
+        [f"stg_{branch}__{name}"]).fetchone()
+    return row[0] if row else None
+
+
+class TestIncrementalPushdown(unittest.TestCase):
+    """cdc_column pushed into the base subquery's own WHERE (plan-hito-2.md
+    backlog #6), instead of recomputing everything and filtering the
+    result afterward. Eligible only when cdc_column is a plain passthrough
+    (or a `let` already computed in the base subquery) and the model has
+    no join/set-op/expand; everywhere else, the pre-pushdown behavior
+    (test_incremental_merge_replace/append/upsert classes above) is
+    unchanged and already covers correctness."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.con = duckdb.connect()
+        self.con.execute("CREATE TABLE s (id BIGINT, v BIGINT, ts TIMESTAMP)")
+
+    def _run(self, text, only_stale):
+        path = write_module(self.d, text)
+        proj = build(text, path)
+        return ex.run(self.con, proj, proj.typed, path, only_stale=only_stale)
+
+    def test_plain_passthrough_pushes_filter_into_base_subquery(self):
+        text = SRC + '''model m {
+  from s
+  incremental
+  merge_strategy: upsert
+  merge_keys: [id]
+  cdc_column: ts
+}
+'''
+        self.con.execute("INSERT INTO s VALUES (1, 10, '2026-01-01 00:00:00')")
+        self._run(text, only_stale=False)
+        self.con.execute("INSERT INTO s VALUES (2, 20, '2026-01-02 00:00:00')")
+        self._run(text, only_stale=True)
+        sql = _staged_sql(self.con, "m")
+        self.assertNotIn("__full", sql, "post-filter path should not run "
+                         "when the pushdown path is eligible")
+        base = sql.split("__delta AS (", 1)[1].split("SELECT id AS id", 1)[0]
+        self.assertIn("WHERE", base)
+        self.assertIn("ts >", base)
+
+    def test_let_computed_cdc_column_still_pushes_down(self):
+        text = SRC + '''model m {
+  from s
+  let event_ts = ts
+  incremental
+  merge_strategy: append
+  cdc_column: event_ts
+  select { id = id, v = v, event_ts = event_ts }
+}
+'''
+        self.con.execute("INSERT INTO s VALUES (1, 10, '2026-01-01 00:00:00')")
+        self._run(text, only_stale=False)
+        self.con.execute("INSERT INTO s VALUES (2, 20, '2026-01-02 00:00:00')")
+        self._run(text, only_stale=True)
+        sql = _staged_sql(self.con, "m")
+        self.assertNotIn("__full", sql)
+        rows = self.con.execute("SELECT id, v FROM v_m ORDER BY id").fetchall()
+        self.assertEqual(rows, [(1, 10), (2, 20)])
+
+    def test_join_falls_back_to_post_filter_but_stays_correct(self):
+        text = '''source s(ns: "n", dataset: "s") {
+  columns: { id: int64, v: int64, ts: timestamp }
+}
+source labels(ns: "n", dataset: "labels") {
+  columns: { id: int64, label: string }
+}
+model m {
+  from s
+  join_left labels on s.id == labels.id
+  incremental
+  merge_strategy: upsert
+  merge_keys: [id]
+  cdc_column: ts
+  select { id = s.id, v = s.v, ts = s.ts, label = labels.label }
+}
+'''
+        self.con.execute("CREATE TABLE labels (id BIGINT, label VARCHAR)")
+        self.con.execute("INSERT INTO labels VALUES (1, 'a'), (2, 'b')")
+        self.con.execute("INSERT INTO s VALUES (1, 10, '2026-01-01 00:00:00')")
+        self._run(text, only_stale=False)
+        self.con.execute("UPDATE s SET v = 999 WHERE id = 1")  # no ts bump
+        self.con.execute("INSERT INTO s VALUES (2, 20, '2026-01-02 00:00:00')")
+        self._run(text, only_stale=True)
+        sql = _staged_sql(self.con, "m")
+        self.assertIn("__full", sql, "a join must fall back to the "
+                      "post-filter path, not push the predicate into the "
+                      "joined base subquery")
+        rows = dict((r[0], r[1:]) for r in self.con.execute(
+            "SELECT id, v, label FROM v_m ORDER BY id").fetchall())
+        self.assertEqual(rows[1], (10, "a"))  # stale mutation still ignored
+        self.assertEqual(rows[2], (20, "b"))
+
+    def test_date_typed_cdc_column_pushes_down_and_merges(self):
+        self.con.execute("CREATE TABLE d (id BIGINT, v BIGINT, day DATE)")
+        text = '''source d(ns: "n", dataset: "d") {
+  columns: { id: int64, v: int64, day: date }
+}
+model m {
+  from d
+  incremental
+  merge_strategy: upsert
+  merge_keys: [id]
+  cdc_column: day
+}
+'''
+        self.con.execute("INSERT INTO d VALUES (1, 10, DATE '2026-01-01')")
+        self._run(text, only_stale=False)
+        self.con.execute("INSERT INTO d VALUES (2, 20, DATE '2026-01-02')")
+        self._run(text, only_stale=True)
+        sql = _staged_sql(self.con, "m")
+        self.assertNotIn("__full", sql)
+        rows = self.con.execute("SELECT id, v FROM v_m ORDER BY id").fetchall()
+        self.assertEqual(rows, [(1, 10), (2, 20)])
+
+
+class TestDateTimeLiterals(unittest.TestCase):
+    """sqlgen._lit() gained datetime.date/datetime.datetime support to make
+    the pushdown watermark (fetched straight from a DB driver, not parsed
+    from Strata source text) embeddable as a literal at all."""
+
+    def test_date_literal(self):
+        import datetime
+        from strata.sqlgen import _lit
+        self.assertEqual(_lit(datetime.date(2026, 1, 1)), "DATE '2026-01-01'")
+
+    def test_datetime_literal_keeps_time_component(self):
+        import datetime
+        from strata.sqlgen import _lit
+        self.assertEqual(
+            _lit(datetime.datetime(2026, 1, 1, 10, 30, 0)),
+            "TIMESTAMP '2026-01-01 10:30:00'")
+
+
 if __name__ == "__main__":
     unittest.main()

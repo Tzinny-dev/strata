@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from . import ast
 from . import sqlgen
 from . import dbcompat
 from .dialects import DUCKDB, get_dialect, physical_type
@@ -402,30 +403,59 @@ def materialize(con, project: Project, tms: Dict[str, TypedModel],
     staged_prefix = STAGED_PREFIX + branch + BRANCH_SEP
     for name in order:
         tm = tms[name]
-        # Layered read: live v_* for upstreams already promoted, staged for
-        # upstreams built in THIS run (never a half-promoted mix).
-        sql_live = sqlgen.full_sql(tms, [name], dialect=dialect,
-                                   view_prefix=staged_prefix,
-                                   upstream_prefix=PROMOTED_PREFIX)
-        sql_staged = sqlgen.full_sql(tms, [name], dialect=dialect,
-                                     view_prefix=staged_prefix,
-                                     upstream_prefix=staged_prefix)
-        sql = sql_live
-        for d in tm.deps:
-            if d in order:
-                sql = sql_staged
-                break
-        if source_overrides:
-            sql, _ = _apply_source_overrides(sql, project, source_overrides)
-        for stmt in sql.split(";\n"):
-            if stmt.strip():
-                con.execute(stmt)
-        applied.append(name)
-        if tm.plan.incremental and tm.plan.merge_strategy in ("append", "upsert"):
+        plan = tm.plan
+        is_merge = plan.incremental and plan.merge_strategy in ("append", "upsert")
+        prev_snap = _current_snapshot_table(con, name) if is_merge else None
+        # Pushdown eligibility: cdc_column must be resolvable inside the
+        # base subquery's own scope (see _pushdown_base_expr), and no
+        # join/set-op/expand may change what row each base row represents.
+        # Outside that, correctness already holds via the post-filter path
+        # below — this is strictly an opportunistic performance narrowing.
+        pushdown_pred = None
+        if prev_snap is not None and not plan.joins and plan.set_op is None \
+                and plan.expand is None:
+            base_expr = _pushdown_base_expr(plan, plan.cdc_column)
+            if base_expr is not None:
+                watermark = con.execute(
+                    f"SELECT MAX({plan.cdc_column}) FROM {prev_snap}").fetchone()[0]
+                if watermark is not None:
+                    pushdown_pred = ast.BinOp(op=">", left=base_expr,
+                                              right=ast.Literal(value=watermark))
+                    plan.preds.append(pushdown_pred)
+        try:
+            # Layered read: live v_* for upstreams already promoted, staged for
+            # upstreams built in THIS run (never a half-promoted mix).
+            sql_live = sqlgen.full_sql(tms, [name], dialect=dialect,
+                                       view_prefix=staged_prefix,
+                                       upstream_prefix=PROMOTED_PREFIX)
+            sql_staged = sqlgen.full_sql(tms, [name], dialect=dialect,
+                                         view_prefix=staged_prefix,
+                                         upstream_prefix=staged_prefix)
+            sql = sql_live
+            for d in tm.deps:
+                if d in order:
+                    sql = sql_staged
+                    break
+            if source_overrides:
+                sql, _ = _apply_source_overrides(sql, project, source_overrides)
             prefix = f"CREATE OR REPLACE VIEW {staged_name(name, branch)} AS\n"
-            if sql.startswith(prefix):
+            if pushdown_pred is not None and sql.startswith(prefix):
+                # cdc_column is already filtered inside `sql` itself (the
+                # base subquery's own WHERE): this compiled query IS the
+                # delta, so it never executes the pre-pushdown full scan.
                 _apply_incremental_merge(con, tm, staged_name(name, branch),
-                                          sql[len(prefix):])
+                                         sql[len(prefix):], delta_is_prefiltered=True)
+            else:
+                for stmt in sql.split(";\n"):
+                    if stmt.strip():
+                        con.execute(stmt)
+                if is_merge and prev_snap is not None and sql.startswith(prefix):
+                    _apply_incremental_merge(con, tm, staged_name(name, branch),
+                                             sql[len(prefix):])
+        finally:
+            if pushdown_pred is not None:
+                plan.preds.remove(pushdown_pred)
+        applied.append(name)
         runtime_pins(con, project, tm, staged_name(name, branch), pins)
         check_join_cardinality(con, project, tm, order, branch, source_overrides, pins)
     if not stage_only:
@@ -494,11 +524,22 @@ def _current_snapshot_table(con, name: str) -> Optional[str]:
     return m.group(0) if m else None
 
 
-def _apply_incremental_merge(con, tm: TypedModel, staged: str, full_select_sql: str) -> None:
+def _apply_incremental_merge(con, tm: TypedModel, staged: str, select_sql: str,
+                             delta_is_prefiltered: bool = False) -> None:
     """Rewrite the just-recomputed staged view for an incremental
     append/upsert model so it publishes prev_snapshot merged with only the
-    slice of the fresh recompute whose cdc_column is newer than
-    prev_snapshot's watermark, instead of the full recompute.
+    cdc_column-new slice, instead of the full recompute.
+
+    `delta_is_prefiltered=False` (the general case: cdc_column depends on a
+    join/set-op/expand, or isn't resolvable in the base subquery's scope —
+    see `_pushdown_base_expr`): `select_sql` is the full, unfiltered
+    recompute; this wraps it and filters by cdc_column here, after the
+    fact. `delta_is_prefiltered=True` (the common case: cdc_column is a
+    plain passthrough or a `let` already computed in the base subquery):
+    the caller already compiled `select_sql` with the cdc_column watermark
+    pushed into the base subquery's own WHERE (materialize()'s
+    `plan.preds`), so `select_sql` already IS the delta — the source scan
+    itself is smaller, not just the row count kept afterward.
 
     First run for this model (no live snapshot yet): a no-op, the full
     recompute already staged by the caller is the correct (and only
@@ -510,9 +551,14 @@ def _apply_incremental_merge(con, tm: TypedModel, staged: str, full_select_sql: 
     prev_snap = _current_snapshot_table(con, tm.name)
     if prev_snap is None:
         return
-    cdc = plan.cdc_column
-    watermark = f"(SELECT MAX({cdc}) FROM {prev_snap})"
-    delta_filter = f"{watermark} IS NULL OR {cdc} > {watermark}"
+    if delta_is_prefiltered:
+        delta_cte = f"WITH __delta AS (\n{select_sql}\n)\n"
+    else:
+        cdc = plan.cdc_column
+        watermark = f"(SELECT MAX({cdc}) FROM {prev_snap})"
+        delta_filter = f"{watermark} IS NULL OR {cdc} > {watermark}"
+        delta_cte = (f"WITH __full AS (\n{select_sql}\n),\n"
+                     f"__delta AS (\n  SELECT * FROM __full WHERE {delta_filter}\n)\n")
     if plan.merge_strategy == "append":
         merge_body = f"SELECT * FROM {prev_snap}\nUNION ALL\nSELECT * FROM __delta"
     else:  # upsert: cdc-new rows replace any prior row sharing the same merge_keys
@@ -523,11 +569,24 @@ def _apply_incremental_merge(con, tm: TypedModel, staged: str, full_select_sql: 
             f"WHERE NOT EXISTS (SELECT 1 FROM __delta WHERE {on})\n"
             f"UNION ALL\nSELECT * FROM __delta"
         )
-    con.execute(
-        f"CREATE OR REPLACE VIEW {staged} AS\n"
-        f"WITH __full AS (\n{full_select_sql}\n),\n"
-        f"__delta AS (\n  SELECT * FROM __full WHERE {delta_filter}\n)\n"
-        f"{merge_body}\n")
+    con.execute(f"CREATE OR REPLACE VIEW {staged} AS\n{delta_cte}{merge_body}\n")
+
+
+def _pushdown_base_expr(plan, name: str) -> Optional[ast.Node]:
+    """The expression `name` already has in the base subquery's own scope
+    (`sqlgen._base_select`) — a plain passthrough of the source's own
+    column, or a `let` already computed there — or None if `name` is not
+    resolvable at that level (only exists as a select/derive expression in
+    the outer query, or depends on a join/set-op/expand). Reusing the
+    expression `_base_select` already knows how to project is what makes
+    pushing a `cdc_column > watermark` predicate into `plan.preds` safe:
+    it is exactly the same shape `filter` already relies on."""
+    for bc in plan.base_cols:
+        if bc.name == name and bc.expr is not None:
+            return bc.expr
+    if name in plan.inputs[0].cols:
+        return ast.ColumnRef(name=name)
+    return None
 
 
 def publish_snapshots(con, names: List[str], run_id: str,
