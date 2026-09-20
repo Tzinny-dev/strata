@@ -1,5 +1,7 @@
 """Failure injection for the DuckDB publication outbox (single writer)."""
 import json
+import shutil
+from pathlib import Path
 from unittest.mock import patch
 
 import duckdb
@@ -49,6 +51,37 @@ def test_recovers_after_commit_and_reopen(pipeline, writer):
     assert history[0]["commit_id"] == event
     assert history[0]["snapshots"] == payload["snapshots"]
     assert ex.load_manifest(module) == payload["fingerprints"]
+
+
+def test_pending_commit_survives_moving_the_module(pipeline):
+    """strata_commits.module_path used to be the module's resolved absolute
+    path: moving the module (with its sidecars) to a new directory — e.g. a
+    CI checkout at a fresh path every run — made an interrupted publication
+    from before the move permanently invisible to recover_metadata, because
+    the new path never matched the old key. _module_id (a small persisted
+    token, ID_SUFFIX) makes that identity travel with the module instead."""
+    con, project, tms, module, warehouse = pipeline
+    with patch.object(ex, "record_run", side_effect=OSError("disk full")):
+        with pytest.raises(OSError, match="disk full"):
+            ex.run(con, project, tms, module)
+    event = con.execute("SELECT event_id FROM strata_commits").fetchone()[0]
+    con.close()
+
+    old = Path(module)
+    new_dir = old.parent / "moved"
+    new_dir.mkdir()
+    for suffix in ("", ex.HISTORY_SUFFIX, ex.MANIFEST_SUFFIX, ex.ID_SUFFIX,
+                   ex.LOCK_SUFFIX):
+        src = old.parent / (old.stem + suffix) if suffix else old
+        if src.exists():
+            shutil.move(str(src), str(new_dir / src.name))
+    new_module = str(new_dir / old.name)
+
+    with duckdb.connect(str(warehouse)) as reopened:
+        reopened.execute("DROP TABLE s")
+        assert ex.recover_metadata(reopened, new_module) == [event]
+        assert ex.recover_metadata(reopened, new_module) == []
+    assert len(ex.load_history(new_module)) == 1
 
 
 def test_failure_before_commit_rolls_back_registry_and_snapshots(pipeline):

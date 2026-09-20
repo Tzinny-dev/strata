@@ -80,6 +80,7 @@ CUSTOM_FRESHNESS_MARKER = datetime.timedelta(days=-1)
 MANIFEST_SUFFIX = ".strata-manifest.json"
 HISTORY_SUFFIX = ".strata-history.jsonl"
 LOCK_SUFFIX = ".strata-lock"
+ID_SUFFIX = ".strata-id"
 
 
 def history_path(module_path: str) -> Path:
@@ -90,6 +91,33 @@ def history_path(module_path: str) -> Path:
 def _lock_path(module_path: str) -> Path:
     p = Path(module_path)
     return p.parent / (p.stem + LOCK_SUFFIX)
+
+
+def _id_path(module_path: str) -> Path:
+    p = Path(module_path)
+    return p.parent / (p.stem + ID_SUFFIX)
+
+
+def _module_id(module_path: str) -> str:
+    """Stable identity for this module's warehouse-side bookkeeping
+    (strata_commits.module_path), independent of its absolute path — so
+    moving the module together with its sidecars (history/manifest/lock/
+    id) to a new location, e.g. a CI checkout at a fresh path every run,
+    keeps pending-commit recovery working. Generated once and persisted
+    alongside the other sidecars.
+
+    Known, accepted gap: pending_commit_runs/recover_metadata can be
+    called outside _module_lock (e.g. gc_plan called directly, not through
+    gc_snapshots), so the very first creation of this file for a brand new
+    module has a narrow race if two processes touch it at once. Not worth
+    forcing a read-only function like gc_plan to take an exclusive lock to
+    close a window this narrow."""
+    ip = _id_path(module_path)
+    if ip.exists():
+        return ip.read_text().strip()
+    token = uuid.uuid4().hex
+    _atomic_write(ip, token)
+    return token
 
 
 @contextlib.contextmanager
@@ -511,17 +539,22 @@ def materialize(con, project: Project, tms: Dict[str, TypedModel],
             publish_snapshots(con, order, run_id, branch, validate=validate_snapshots,
                               manage_transaction=manage_transaction)
         else:
-            swap_branch(con, order, branch)
-            run_tests(con, project, tms, names, dialect, branch)
+            swap_branch(con, order, branch,
+                       validate=lambda: run_tests(con, project, tms, names, dialect, branch))
     return applied, pins
 
 
-def swap_branch(con, names: List[str], branch: str = "main") -> List[str]:
+def swap_branch(con, names: List[str], branch: str = "main", validate=None) -> List[str]:
     """Atomic promote: staged stg_<branch>__<m> -> live v_<m>.
 
     Last-known-good stays queryable until every staged view exists; the swap
-    itself is one transaction (CREATE OR REPLACE VIEW per model). Returns
-    the promoted view names.
+    itself is one transaction (CREATE OR REPLACE VIEW per model). `validate`
+    (if given) runs AFTER the repoint but before COMMIT, same contract as
+    `publish_snapshots`' own `validate`: a failing declarative test rolls
+    back the repoint too, instead of leaving already-live views that never
+    passed their tests (this legacy path used to run tests only after the
+    swap had already committed — no way back if one failed). Returns the
+    promoted view names.
     """
     done: List[str] = []
     con.execute("BEGIN TRANSACTION")
@@ -531,6 +564,8 @@ def swap_branch(con, names: List[str], branch: str = "main") -> List[str]:
             live = promoted_name(name)
             con.execute(f"CREATE OR REPLACE VIEW {live} AS SELECT * FROM {stg}")
             done.append(live)
+        if validate is not None:
+            validate()
         con.execute("COMMIT")
     except Exception:
         try:
@@ -898,7 +933,7 @@ def _record_commit(con, module_path, entry, rid):
     event = uuid.uuid4().hex
     payload = dict(entry, run_id=rid, commit_id=event)
     con.execute(f"INSERT INTO {COMMIT_REGISTRY} VALUES (?, ?, now(), ?, false)",
-                [event, str(Path(module_path).resolve()), json.dumps(payload)])
+                [event, _module_id(module_path), json.dumps(payload)])
 
 
 def recover_metadata(con, module_path: str) -> list:
@@ -916,7 +951,7 @@ def recover_metadata(con, module_path: str) -> list:
     pending = con.execute(
         f"SELECT event_id, entry FROM {COMMIT_REGISTRY} "
         "WHERE module_path=? AND NOT exported ORDER BY committed_at, event_id",
-        [str(Path(module_path).resolve())]).fetchall()
+        [_module_id(module_path)]).fetchall()
     history = load_history(module_path)
     known = {e.get("commit_id") for e in history}
     recovered = []
@@ -965,7 +1000,7 @@ def pending_commit_runs(con, module_path: str) -> set:
         return set()
     rows = con.execute(f"SELECT entry FROM {COMMIT_REGISTRY} "
                        "WHERE module_path=? AND NOT exported",
-                       [str(Path(module_path).resolve())]).fetchall()
+                       [_module_id(module_path)]).fetchall()
     out = set()
     for (raw,) in rows:
         try:

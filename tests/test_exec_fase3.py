@@ -76,6 +76,25 @@ def test_swap_promotes_all_or_nothing(tmp_path):
     assert {"v_m0", "stg_main__m0"} <= have
 
 
+def test_legacy_swap_rolls_back_on_failing_test(tmp_path):
+    """The legacy staged-view path (no run_id, e.g. standalone `strata
+    test`) used to commit the branch swap BEFORE running declarative
+    tests: a failing test left already-live views with no way back.
+    swap_branch's `validate` (run inside its transaction, same contract
+    publish_snapshots already had) closes that: a failing test rolls back
+    the repoint, v_m0 never goes live."""
+    text = BASE + "\ntest m0 { expect row_count == 999 }\n"
+    proj, tms, path = _proj(tmp_path, text)
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE TABLE orders(order_id BIGINT, country VARCHAR)")
+    con.execute("INSERT INTO orders VALUES (1, 'es')")
+    with pytest.raises(exec_mod.StrataTestError):
+        exec_mod.materialize(con, proj, tms, branch="main")
+    have = {r[0] for r in con.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema='main'").fetchall()}
+    assert "v_m0" not in have
+
+
 def test_layered_reads_in_one_run(tmp_path):
     # m1 reads m0: within a single staged run m0 must be read from the staging
     # view (never the public v_m0, which may still be last-known-good).

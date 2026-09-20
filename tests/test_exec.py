@@ -124,6 +124,30 @@ class TestExec(unittest.TestCase):
             self.assertEqual(float(net), 200.00)
             con2.close()
 
+    def test_run_without_output_warns_about_in_memory_warehouse(self):
+        with __import__("tempfile").TemporaryDirectory() as d:
+            src = Path(d) / "daily_orders.strata"
+            src.write_text((EX / "daily_orders.strata").read_text())
+            from strata.cli import main
+            import io as _io
+            err = _io.StringIO()
+            with __import__("contextlib").redirect_stderr(err):
+                code = main(["run", str(src), "--seed"])
+            self.assertEqual(code, 0)
+            self.assertIn("in-memory", err.getvalue())
+
+    def test_run_with_output_does_not_warn(self):
+        with __import__("tempfile").TemporaryDirectory() as d:
+            src = Path(d) / "daily_orders.strata"
+            src.write_text((EX / "daily_orders.strata").read_text())
+            warehouse = Path(d) / "warehouse.duckdb"
+            from strata.cli import main
+            import io as _io
+            err = _io.StringIO()
+            with __import__("contextlib").redirect_stderr(err):
+                code = main(["run", str(src), "--seed", "-o", str(warehouse)])
+            self.assertEqual(code, 0)
+            self.assertNotIn("in-memory", err.getvalue())
 
     def test_unique_pin_fails(self):
         import duckdb

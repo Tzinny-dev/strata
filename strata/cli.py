@@ -274,6 +274,10 @@ def cmd_run(args):
     if overrides:
         print(f"pipeline {pipeline.name!r} env={pipeline.env or '-'} "
               f"source overrides: {', '.join(f'{k}<-{v}' for k, v in sorted(overrides.items()))}")
+    if not getattr(args, "output", None):
+        print("warning: no -o given; this warehouse is in-memory and will "
+              "not survive process exit — later replay/rollback/gc on this "
+              "run will find nothing", file=sys.stderr)
     try:
         con = open_warehouse(getattr(args, "output", None))
     except RuntimeError as e:
@@ -743,6 +747,10 @@ def cmd_backfill(args):
             return 1
         overrides[src] = {"dataset": table.strip()}
     branch = getattr(args, "branch", None) or rec.get("branch", "main")
+    if not getattr(args, "output", None):
+        print("warning: no -o given; this warehouse is in-memory and will "
+              "not survive process exit — later replay/rollback/gc on this "
+              "run will find nothing", file=sys.stderr)
     try:
         con = open_warehouse(getattr(args, "output", None))
     except RuntimeError as e:
