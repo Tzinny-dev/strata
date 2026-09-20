@@ -652,6 +652,13 @@ def source_fingerprints(con, project: Project, source_overrides=None) -> Dict[st
 
 
 
+_ROW_COUNT_OPS = {
+    "==": lambda a, b: a == b, "!=": lambda a, b: a != b,
+    "<": lambda a, b: a < b, "<=": lambda a, b: a <= b,
+    ">": lambda a, b: a > b, ">=": lambda a, b: a >= b,
+}
+
+
 def run_tests(con, project: Project, tms: Dict[str, TypedModel],
               names: Optional[List[str]] = None, dialect=DUCKDB,
               branch: str = "main") -> List[str]:
@@ -683,11 +690,15 @@ def run_tests(con, project: Project, tms: Dict[str, TypedModel],
                 if check.kind == "row_count":
                     got = con.execute(f"SELECT count(*) FROM {view}").fetchone()[0]
                     expected = int(check.value)
-                    if got != expected:
+                    if not _ROW_COUNT_OPS[check.op](got, expected):
                         raise StrataTestError(
-                            f"test {td.model}: row_count {got} != {expected}"
+                            f"test {td.model}: row_count {got} {check.op} "
+                            f"{expected} is false"
                         )
-                    results.append(f"  ok  {td.model}: row_count == {got}")
+                    results.append(
+                        f"  ok  {td.model}: row_count {check.op} {expected} "
+                        f"(got {got})"
+                    )
                 else:
                     col = tm.schema[check.col]
                     # SELECT count(*) WHERE NOT (col op lit) — nonzero means violation

@@ -406,6 +406,12 @@ def cmd_test(args):
     except StrataError as se:
         print(f"error: {se.code}: {se}", file=sys.stderr)
         return 1
+    try:
+        import duckdb
+    except ImportError:
+        print("duckdb not available; run with the venv interpreter "
+              "(prototype/.venv/bin/python)", file=sys.stderr)
+        return 2
     con = duckdb.connect(getattr(args, "output", None) or ":memory:")
     if getattr(args, "seed", False):
         _run_seed(con, args.file)
