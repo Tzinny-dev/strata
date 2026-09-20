@@ -281,6 +281,19 @@ def cmd_run(args):
             print("    " + ", ".join(cols))
             for row in con.execute(f"SELECT * FROM {view} LIMIT 3").fetchall():
                 print("    " + ", ".join(str(v) for v in row))
+    if getattr(args, "gc", False) and not getattr(args, "stage_only", False):
+        try:
+            exec_mod.recover_metadata(con, args.file)
+            gc = exec_mod.gc_snapshots(con, args.file, keep=args.gc_keep,
+                                       keep_days=getattr(args, "gc_keep_days", None),
+                                       apply=True)
+        except exec_mod.PinError as e:
+            print(f"error: E084: {e}", file=sys.stderr)
+            if getattr(args, "output", None):
+                con.close()
+            return 1
+        print(f"  gc: dropped {len(gc['drop_tables'])} snapshot table(s), "
+              f"kept {len(gc['keep_tables'])}")
     if getattr(args, "output", None):
         con.close()
     return 0
@@ -807,6 +820,7 @@ def cmd_gc(args):
     try:
         exec_mod.recover_metadata(con, args.file)  # export pending events first
         plan = exec_mod.gc_snapshots(con, args.file, keep=args.keep,
+                                     keep_days=getattr(args, "keep_days", None),
                                      apply=args.apply)
     except (exec_mod.PinError, duckdb.Error) as e:
         print(f"error: E084: {e}", file=sys.stderr)
@@ -907,6 +921,13 @@ def main(argv=None):
     p.add_argument("--output", "-o",
                    help="persist the warehouse to this .duckdb file "
                         "(default: in-memory, discarded on exit)")
+    p.add_argument("--gc", action="store_true",
+                   help="drop retired snapshot tables after a successful run "
+                        "(same policy as `strata gc --apply`, run automatically)")
+    p.add_argument("--gc-keep", type=int, default=2,
+                   help="with --gc: most recent runs to retain (default: 2)")
+    p.add_argument("--gc-keep-days", type=float, default=None,
+                   help="with --gc: also retain runs newer than this many days")
     p.set_defaults(fn=cmd_run)
 
     p = sub.add_parser("init", help="write AGENTS.md")
@@ -983,6 +1004,10 @@ def main(argv=None):
     p.add_argument("-o", "--output", default=None, help="warehouse .duckdb file holding the snapshots")
     p.add_argument("--keep", type=int, default=2,
                    help="most recent runs to retain for rollback/replay (default: 2)")
+    p.add_argument("--keep-days", type=float, default=None,
+                   help="also retain any run with snapshots recorded within "
+                        "this many days, regardless of --keep (default: off, "
+                        "count-only)")
     p.add_argument("--apply", action="store_true", help="drop the reported tables (default: report only)")
     p.add_argument("--json", action="store_true", help="machine-readable plan (agent supervision artifact)")
     p.set_defaults(fn=cmd_gc)

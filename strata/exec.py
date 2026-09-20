@@ -855,11 +855,39 @@ def pending_commit_runs(con, module_path: str) -> set:
     return out
 
 
-def protected_runs(con, module_path: str, keep: int) -> set:
-    """Run ids a GC must preserve: recent, live, or metadata-pending."""
+def _recent_by_age(history: list, keep_days: Optional[float]) -> set:
+    """Run ids with snapshots recorded within the last `keep_days` days.
+
+    `entry["at"]` is the UTC ISO timestamp `record_run` stamps every history
+    entry with; a run without one (only possible on a hand-edited or
+    pre-timestamp history file) is never protected by age, only by `keep`
+    or liveness — never silently kept forever by a missing/malformed field.
+    """
+    if keep_days is None:
+        return set()
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=keep_days)
+    out = set()
+    for e in history:
+        if not e.get("snapshots") or not e.get("at"):
+            continue
+        try:
+            at = datetime.datetime.fromisoformat(e["at"])
+        except ValueError:
+            continue
+        if at >= cutoff:
+            out.add(e["run_id"])
+    return out
+
+
+def protected_runs(con, module_path: str, keep: int,
+                   keep_days: Optional[float] = None) -> set:
+    """Run ids a GC must preserve: recent (by count and/or by age), live, or
+    metadata-pending. `keep` and `keep_days` are independent floors — a run
+    needs to satisfy only one to be protected, never both."""
     history = load_history(module_path)
     runs = [e["run_id"] for e in history if e.get("snapshots")]
     protected = set(runs[-keep:]) if keep > 0 else set()
+    protected |= _recent_by_age(history, keep_days)
     live = list(dbcompat.live_view_defs(con).values())
     for tn, rid in run_tables(con).items():
         if any(tn in sql for sql in live):
@@ -867,17 +895,22 @@ def protected_runs(con, module_path: str, keep: int) -> set:
     return protected | pending_commit_runs(con, module_path)
 
 
-def gc_plan(con, module_path: str, keep: int = 2) -> dict:
+def gc_plan(con, module_path: str, keep: int = 2,
+           keep_days: Optional[float] = None) -> dict:
     """Compute snapshot garbage WITHOUT changing the warehouse.
 
-    Protected: the last `keep` runs with snapshots, every run referenced by a
-    live view, and every publication whose metadata export is still pending.
-    History is never pruned — a collected run stays on record, so rollback or
-    replay against it fails loud instead of silently reading wrong data.
+    Protected: the last `keep` runs with snapshots, every run with snapshots
+    recorded within the last `keep_days` days (if given), every run
+    referenced by a live view, and every publication whose metadata export
+    is still pending. History is never pruned — a collected run stays on
+    record, so rollback or replay against it fails loud instead of silently
+    reading wrong data.
     """
     if keep < 0:
         raise PinError("keep must be >= 0")
-    protected = protected_runs(con, module_path, keep)
+    if keep_days is not None and keep_days < 0:
+        raise PinError("keep_days must be >= 0")
+    protected = protected_runs(con, module_path, keep, keep_days)
     live = list(dbcompat.live_view_defs(con).values())
     drop, keep_tables = [], []
     for tn, rid in sorted(run_tables(con).items()):
@@ -891,13 +924,14 @@ def gc_plan(con, module_path: str, keep: int = 2) -> dict:
                       and all(s in drop for s in e["snapshots"].values())})
     return {"keep_runs": sorted(protected), "drop_tables": drop,
             "keep_tables": keep_tables, "retired_runs": retired,
-            "applied": False}
+            "keep_days": keep_days, "applied": False}
 
 
 def gc_snapshots(con, module_path: str, keep: int = 2,
+                 keep_days: Optional[float] = None,
                  apply: bool = False) -> dict:
     """Report (default) or drop unreferenced snapshot tables, all-or-nothing."""
-    plan = gc_plan(con, module_path, keep)
+    plan = gc_plan(con, module_path, keep, keep_days)
     if not apply or not plan["drop_tables"]:
         return plan
     live = list(dbcompat.live_view_defs(con).values())
