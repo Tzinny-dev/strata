@@ -1348,8 +1348,50 @@ class _ModelState:
                 self.tm.lineage[name] = list(self.origins.get(name, []))
         if plan.grouped and len(plan.outputs) < len(self.cols):
             pass  # passthrough cols after group not auto-added (keys enforce SQL grouping)
+        self.verify_incremental()
         self.verify_contract()
         self.fingerprint()
+
+    def verify_incremental(self):
+        """`incremental merge_strategy: append|upsert` is executed for real
+        (exec.materialize merges only cdc_column-new rows into the prior
+        snapshot) — so it needs the same rigor as any other pin: reject a
+        configuration the executor cannot honor instead of accepting it and
+        producing silently wrong data. `merge_strategy: replace` (or no
+        strategy at all) is still a plain full rebuild every run and has no
+        extra requirements."""
+        plan = self.tm.plan
+        if not plan.incremental:
+            return
+        strategy = plan.merge_strategy or "replace"
+        if strategy not in ("replace", "append", "upsert"):
+            raise self._err(
+                "E086",
+                f"{self.tm.name}: unknown merge_strategy {strategy!r} "
+                "(expected replace, append or upsert)", self.decl.span)
+        if strategy == "replace":
+            return
+        if plan.grouped:
+            raise self._err(
+                "E087",
+                f"{self.tm.name}: incremental merge_strategy {strategy!r} is not "
+                "supported on a grouped/aggregate model (a cdc_column delta cannot "
+                "re-aggregate rows already folded into a prior snapshot without "
+                "rescanning everything, which defeats the point)", self.decl.span)
+        if not plan.cdc_column or plan.cdc_column not in self.tm.schema:
+            raise self._err(
+                "E088",
+                f"{self.tm.name}: incremental merge_strategy {strategy!r} requires "
+                "cdc_column naming an output column of this model (used as the "
+                "append/upsert watermark)", self.decl.span)
+        if strategy == "upsert":
+            keys = [getattr(k, "name", None) for k in plan.merge_keys]
+            if not plan.merge_keys or any(k is None or k not in self.tm.schema for k in keys):
+                raise self._err(
+                    "E089",
+                    f"{self.tm.name}: merge_strategy upsert requires merge_keys "
+                    "naming one or more plain output columns of this model",
+                    self.decl.span)
 
     def verify_contract(self):
         model = self.tm

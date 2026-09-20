@@ -447,6 +447,11 @@ def materialize(con, project: Project, tms: Dict[str, TypedModel],
             if stmt.strip():
                 con.execute(stmt)
         applied.append(name)
+        if tm.plan.incremental and tm.plan.merge_strategy in ("append", "upsert"):
+            prefix = f"CREATE OR REPLACE VIEW {staged_name(name, branch)} AS\n"
+            if sql.startswith(prefix):
+                _apply_incremental_merge(con, tm, staged_name(name, branch),
+                                          sql[len(prefix):])
         runtime_pins(con, project, tm, staged_name(name, branch), pins)
         check_join_cardinality(con, project, tm, order, branch, source_overrides, pins)
     if not stage_only:
@@ -498,6 +503,59 @@ def snapshot_name(run_id: str, name: str) -> str:
     """Run-addressed snapshot TABLE: snap_<run_id>_<model>."""
     safe = "".join(c if (c.isalnum() or c == "_") else "_" for c in name)
     return f"{SNAP_PREFIX}{run_id}_{safe}"
+
+
+def _current_snapshot_table(con, name: str) -> Optional[str]:
+    """The snap_<run_id>_<model> table the live view v_<model> currently
+    reads from, or None if the model was never published (first/bootstrap
+    run). `publish_snapshots` only ever writes `CREATE OR REPLACE VIEW
+    {live} AS SELECT * FROM {snap}` (same pattern already trusted by
+    `protected_runs`/`gc_plan`), so matching that exact shape in the live
+    catalog SQL is as reliable as tracking it separately would be."""
+    live = promoted_name(name)
+    row = con.execute(
+        "SELECT sql FROM duckdb_views() WHERE schema_name='main' AND view_name=?",
+        [live]).fetchone()
+    if not row or not row[0]:
+        return None
+    m = re.search(re.escape(SNAP_PREFIX) + r"[0-9a-f]{12}_\w+", row[0])
+    return m.group(0) if m else None
+
+
+def _apply_incremental_merge(con, tm: TypedModel, staged: str, full_select_sql: str) -> None:
+    """Rewrite the just-recomputed staged view for an incremental
+    append/upsert model so it publishes prev_snapshot merged with only the
+    slice of the fresh recompute whose cdc_column is newer than
+    prev_snapshot's watermark, instead of the full recompute.
+
+    First run for this model (no live snapshot yet): a no-op, the full
+    recompute already staged by the caller is the correct (and only
+    possible) result. `merge_strategy: replace` is handled by never calling
+    this at all (plain full rebuild, unchanged behavior)."""
+    plan = tm.plan
+    if not plan.incremental or plan.merge_strategy not in ("append", "upsert"):
+        return
+    prev_snap = _current_snapshot_table(con, tm.name)
+    if prev_snap is None:
+        return
+    cdc = plan.cdc_column
+    watermark = f"(SELECT MAX({cdc}) FROM {prev_snap})"
+    delta_filter = f"{watermark} IS NULL OR {cdc} > {watermark}"
+    if plan.merge_strategy == "append":
+        merge_body = f"SELECT * FROM {prev_snap}\nUNION ALL\nSELECT * FROM __delta"
+    else:  # upsert: cdc-new rows replace any prior row sharing the same merge_keys
+        keys = [k.name for k in plan.merge_keys]
+        on = " AND ".join(f"__prev.{k} = __delta.{k}" for k in keys)
+        merge_body = (
+            f"SELECT __prev.* FROM {prev_snap} AS __prev\n"
+            f"WHERE NOT EXISTS (SELECT 1 FROM __delta WHERE {on})\n"
+            f"UNION ALL\nSELECT * FROM __delta"
+        )
+    con.execute(
+        f"CREATE OR REPLACE VIEW {staged} AS\n"
+        f"WITH __full AS (\n{full_select_sql}\n),\n"
+        f"__delta AS (\n  SELECT * FROM __full WHERE {delta_filter}\n)\n"
+        f"{merge_body}\n")
 
 
 def publish_snapshots(con, names: List[str], run_id: str,
