@@ -31,6 +31,7 @@ E_DATE_UNIT = "E071"
 E_DATE_ARG = "E072"
 E_DATE_TYPE = "E073"
 E_JSON_KEY = "E074"
+E_COND_TYPE = "E090"
 
 
 def valid_json_key(value) -> bool:
@@ -141,6 +142,60 @@ def _unify_all(args: List[Inf]) -> StrataType:
     return t
 
 
+def _if_ret(args: List[Inf]) -> Inf:
+    """if(cond, then, else): exactly one branch runs per row, and either one
+    could be the row that runs, so either being nullable makes the result
+    nullable — unlike coalesce, which only turns non-nullable once EVERY
+    candidate has been tried."""
+    branches = args[1:]
+    return Inf(_unify_all(branches), any(b.nullable for b in branches))
+
+
+def _case_values(args: List[Inf]) -> List[Inf]:
+    """The THEN/ELSE value slots of a case(cond, val, [cond, val, ...],
+    [else]) call: every odd-indexed arg, plus a trailing ELSE if the
+    argument count is odd."""
+    pairs = len(args) // 2
+    values = [args[2 * i + 1] for i in range(pairs)]
+    if len(args) % 2 == 1:
+        values.append(args[-1])
+    return values
+
+
+def _case_ret(args: List[Inf]) -> Inf:
+    """case(...): nullable whenever there's no ELSE (an unmatched row falls
+    through to SQL NULL regardless of branch types) or any value branch is
+    itself nullable."""
+    values = _case_values(args)
+    has_else = len(args) % 2 == 1
+    return Inf(_unify_all(values), (not has_else) or any(v.nullable for v in values))
+
+
+def _check_if(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
+    cond = args[0]
+    if cond.t.name not in ("unknown", "bool"):
+        return (E_COND_TYPE, f"if() condition must be bool, got {cond.t}")
+    t = _unify_all(args[1:])
+    if t.name == "unknown":
+        seen = ", ".join(str(a.t) for a in args[1:])
+        return ("E058", f"if() type mismatch ({seen})")
+    return None
+
+
+def _check_case(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
+    pairs = len(args) // 2
+    for i in range(pairs):
+        cond = args[2 * i]
+        if cond.t.name not in ("unknown", "bool"):
+            return (E_COND_TYPE, f"case() condition {i + 1} must be bool, got {cond.t}")
+    values = _case_values(args)
+    t = _unify_all(values)
+    if t.name == "unknown":
+        seen = ", ".join(str(v.t) for v in values)
+        return ("E058", f"case() type mismatch ({seen})")
+    return None
+
+
 def _arity_msg(fn: Fn) -> str:
     if fn.max_args < 0:
         want = f"at least {fn.min_args}"
@@ -174,8 +229,12 @@ def check(fn: Fn, args: List[Inf], has_star: bool = False) -> Optional[Tuple[str
         t = _unify_all(args)
         if t.name == "unknown":
             seen = ", ".join(str(a.t) for a in args)
-            return ("E058", f"coalesce type mismatch ({seen})")
+            return ("E058", f"coalesce() type mismatch ({seen})")
         return None
+    if fn.name == "if":
+        return _check_if(fn, args)
+    if fn.name == "case":
+        return _check_case(fn, args)
     if fn.name in ("array_construct", "array_contains", "array_concat",
                    "array_append", "array_prepend", "array_remove",
                    "array_index_of", "array_sort"):
@@ -322,6 +381,12 @@ FUNCTIONS: List[Fn] = [
        doc="smallest value in the group"),
     Fn("coalesce", 1, _unified, kind="coalesce",
        doc="first non-NULL argument; result type is the least upper bound"),
+    Fn("if", 3, _if_ret, max_args=3,
+       doc="if(cond, then, else): cond must be bool; result type is the "
+           "least upper bound of then/else"),
+    Fn("case", 2, _case_ret, max_args=-1,
+       doc="case(cond, val, [cond, val, ...], [else]): first matching "
+           "condition wins; no else means NULL when none match"),
     Fn("upper", 1, lambda a: Inf(STRING, a[0].nullable), max_args=1, kind="string",
        doc="uppercase string"),
     Fn("lower", 1, lambda a: Inf(STRING, a[0].nullable), max_args=1, kind="string",

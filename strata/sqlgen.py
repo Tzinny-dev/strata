@@ -102,6 +102,8 @@ class Translator:
                 return self._collection_call(e, fn)
             if fn is not None and fn.unit_names is not None:
                 return self._date_call(e, name)
+            if name in ("if", "case"):
+                return self._case_sql(e)
             args = ", ".join(self.expr(a) for a in e.args)
             if name == "cast":
                 spec = e.args[1].value if len(e.args) > 1 and isinstance(e.args[1], ast.Literal) else "string"
@@ -590,6 +592,31 @@ class Translator:
         items = e.args[1].items if isinstance(e.args[1], ast.ListExpr) else e.args[1:]
         parts = ", ".join(self.expr(i) for i in items)
         return f"({lhs} IN ({parts}))"
+
+    def _case_sql(self, e: ast.Call) -> str:
+        """if(cond, then, else) / case(cond, val, [cond, val, ...], [else])
+        both compile to CASE WHEN...END, identical across DuckDB/Postgres/
+        BigQuery/Snowflake (no dialect branching needed at this level — the
+        two existing CASE WHEN emitters elsewhere in this file, array_get's
+        bounds check and json_is_null, already share one shape across all
+        four; only nested sub-expressions ever need per-dialect treatment,
+        and those already get it via the recursive self.expr(...) calls
+        below). Omitting ELSE when case() has none lets SQL's own implicit
+        NULL-on-no-match do the work, matching functions._case_ret's
+        nullability."""
+        args = e.args
+        if e.name == "if":
+            cond, then, els = args
+            return (f"CASE WHEN {self.expr(cond)} THEN {self.expr(then)} "
+                    f"ELSE {self.expr(els)} END")
+        pairs = len(args) // 2
+        parts = ["CASE"]
+        for i in range(pairs):
+            parts.append(f"WHEN {self.expr(args[2 * i])} THEN {self.expr(args[2 * i + 1])}")
+        if len(args) % 2 == 1:
+            parts.append(f"ELSE {self.expr(args[-1])}")
+        parts.append("END")
+        return " ".join(parts)
 
 
 def _base_select(plan, dialect, base_cols, preds, upstream_prefix: str = "v_") -> str:
