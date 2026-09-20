@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import sqlgen
+from . import dbcompat
 from .dialects import DUCKDB, get_dialect, physical_type
 from .analysis import Project, TypedModel, StrataError, contract_field_col
 from .types import StrataType, STRING
@@ -199,49 +200,22 @@ def physical_schema(con, view: str) -> dict:
 
     Phase-C input: the compiled plan is trusted, the warehouse is not. An
     upstream table that drifted behind the declared source schema must be
-    caught here, before anything is published."""
+    caught here, before anything is published. Dialect-aware via
+    dbcompat.physical_schema (DuckDB and Postgres report/spell types
+    differently — see that module for what was actually measured)."""
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", view):
         raise PinError(f"physical schema check FAILED: unsafe view name {view!r}")
-    rows = con.execute(
-        "SELECT column_name, data_type FROM information_schema.columns "
-        f"WHERE table_schema = 'main' AND table_name = '{view}' "
-        "ORDER BY ordinal_position").fetchall()
-    if not rows:
+    out = dbcompat.physical_schema(con, view)
+    if not out:
         raise PinError(
             f"physical schema check FAILED: view {view!r} has no columns (does it exist?)")
-    return {name: dtype for name, dtype in rows}
+    return out
 
 
-# Integral storage types whose values widen losslessly into int64. Narrowing
-# (e.g. BIGINT promised, VARCHAR found) is never accepted implicitly.
-_INT64_PHYSICAL = {"BIGINT", "INTEGER", "HUGEINT"}
-
-
-def _physical_types(t: StrataType) -> set:
-    """Acceptable warehouse storage types for a declared Strata type."""
-    if t.name == "int64":
-        return set(_INT64_PHYSICAL)
-    if t.name == "float64":
-        return {"DOUBLE", "REAL"}
-    if t.name == "string":
-        return {"VARCHAR"}
-    if t.name == "bool":
-        return {"BOOLEAN"}
-    if t.name == "date":
-        return {"DATE"}
-    if t.name == "timestamp":
-        return {"TIMESTAMP", "TIMESTAMP WITHOUT TIME ZONE"}
-    if t.name == "uuid":
-        return {"UUID"}
-    if t.name == "json":
-        return {"JSON"}
-    if t.name == "decimal":
-        return {f"DECIMAL({t.precision},{t.scale})"}
-    if t.name == "money":
-        return {"DECIMAL(38,2)"}
-    if t.name == "array" and t.elem is not None:
-        return {elem + "[]" for elem in _physical_types(t.elem)}
-    return set()
+def _physical_types(con, t: StrataType) -> set:
+    """Acceptable warehouse storage types for a declared Strata type,
+    dialect-aware via the connection in use. See dbcompat.physical_types."""
+    return dbcompat.physical_types(con, t)
 
 
 def check_join_cardinality(con, project: Project, tm: TypedModel, order,
@@ -292,7 +266,7 @@ def runtime_pins(con, project: Project, tm: TypedModel, view: str, report: List[
 
         if f.name not in physical:
             bad("column missing from materialized schema")
-        allowed = _physical_types(exp.t)
+        allowed = _physical_types(con, exp.t)
         if not allowed:
             bad(f"no physical type check defined for contract type {exp.t}")
         if physical[f.name] not in allowed:
@@ -379,7 +353,7 @@ def list_branches(con) -> List[str]:
     try:
         rows = con.execute(
             "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema='main'").fetchall()
+            "WHERE table_schema = ?", [dbcompat.db_schema(con)]).fetchall()
     except Exception:
         return ["main"]
     branches = set()
@@ -513,12 +487,10 @@ def _current_snapshot_table(con, name: str) -> Optional[str]:
     `protected_runs`/`gc_plan`), so matching that exact shape in the live
     catalog SQL is as reliable as tracking it separately would be."""
     live = promoted_name(name)
-    row = con.execute(
-        "SELECT sql FROM duckdb_views() WHERE schema_name='main' AND view_name=?",
-        [live]).fetchone()
-    if not row or not row[0]:
+    defn = dbcompat.live_view_defs(con).get(live)
+    if not defn:
         return None
-    m = re.search(re.escape(SNAP_PREFIX) + r"[0-9a-f]{12}_\w+", row[0])
+    m = re.search(re.escape(SNAP_PREFIX) + r"[0-9a-f]{12}_\w+", defn)
     return m.group(0) if m else None
 
 
@@ -577,7 +549,8 @@ def publish_snapshots(con, names: List[str], run_id: str,
             staged = staged_name(name, branch)
             exists = con.execute(
                 "SELECT table_type FROM information_schema.tables "
-                "WHERE table_schema='main' AND table_name=?", [snap]).fetchone()
+                "WHERE table_schema = ? AND table_name=?",
+                [dbcompat.db_schema(con), snap]).fetchone()
             if exists:
                 if exists[0] != "BASE TABLE":
                     raise PinError(f"snapshot {snap!r} is not a table")
@@ -618,7 +591,7 @@ def rollback_to_run(con, e: dict, module_path: Optional[str] = None) -> List[str
             "(pre-snapshot history: use staged-view rollback)")
     have = {r[0] for r in con.execute(
         "SELECT table_name FROM information_schema.tables "
-        "WHERE table_schema='main'").fetchall()}
+        "WHERE table_schema = ?", [dbcompat.db_schema(con)]).fetchall()}
     missing = sorted(t for t in snaps.values() if t not in have)
     if missing:
         raise PinError(
@@ -659,9 +632,16 @@ def source_fingerprints(con, project: Project, source_overrides=None) -> Dict[st
         kv = overrides.get(name, {})
         table = kv.get("dataset") or kv.get("table") or name
         quoted = '"' + table.replace('"', '""') + '"'
-        schema = con.execute(f"DESCRIBE SELECT * FROM {quoted}").fetchall()
+        # DB-API `.description` (not DuckDB's `DESCRIBE`, Postgres has no
+        # such statement) — works identically on both connection types and
+        # is only ever hashed, never compared across dialects.
+        desc = con.execute(f"SELECT * FROM {quoted} LIMIT 0").description
+        schema = [(d[0], d[1]) for d in desc]
         digest = hashlib.sha256(json.dumps(schema, default=str).encode())
-        rows = con.execute(f"SELECT to_json(t) FROM {quoted} t ORDER BY 1")
+        # Cast to TEXT before ORDER BY: Postgres's plain `json` type (unlike
+        # `jsonb`) has no ordering operator, so ordering the JSON value
+        # itself fails there — measured against a real Postgres 16.
+        rows = con.execute(f"SELECT to_json(t)::TEXT FROM {quoted} t ORDER BY 1")
         while batch := rows.fetchmany(1024):
             for (row,) in batch:
                 data = row.encode()
@@ -788,7 +768,13 @@ def _record_commit(con, module_path, entry, rid):
     """Transactional outbox: one event per publication, not per content id."""
     con.execute(f"CREATE TABLE IF NOT EXISTS {COMMIT_REGISTRY} ("
                 "event_id VARCHAR PRIMARY KEY, module_path VARCHAR, "
-                "committed_at TIMESTAMP, entry JSON, exported BOOLEAN)")
+                # entry is a VARCHAR holding json.dumps() output, not a
+                # native JSON/JSONB column: psycopg2 auto-decodes json/jsonb
+                # columns into dicts on fetch, which would make the
+                # json.loads(raw) call sites below double-decode on
+                # Postgres. DuckDB has no such auto-decoding, so this keeps
+                # both dialects on the identical (str in, str out) contract.
+                "committed_at TIMESTAMP, entry VARCHAR, exported BOOLEAN)")
     event = uuid.uuid4().hex
     payload = dict(entry, run_id=rid, commit_id=event)
     con.execute(f"INSERT INTO {COMMIT_REGISTRY} VALUES (?, ?, now(), ?, false)",
@@ -803,8 +789,8 @@ def recover_metadata(con, module_path: str) -> list:
     is created by a read; legacy warehouses remain untouched.
     """
     exists = con.execute("SELECT count(*) FROM information_schema.tables "
-                         "WHERE table_schema='main' AND table_name=?",
-                         [COMMIT_REGISTRY]).fetchone()[0]
+                         "WHERE table_schema = ? AND table_name=?",
+                         [dbcompat.db_schema(con), COMMIT_REGISTRY]).fetchone()[0]
     if not exists:
         return []
     pending = con.execute(
@@ -823,8 +809,7 @@ def recover_metadata(con, module_path: str) -> list:
             known.add(event)
         # Do not undo an intentional rollback or another publication. Only
         # export the manifest if the recorded snapshots are still live.
-        live = dict(con.execute("SELECT view_name, sql FROM duckdb_views() "
-                                "WHERE schema_name='main'").fetchall())
+        live = dbcompat.live_view_defs(con)
         if all(snap in (live.get(promoted_name(n)) or "")
                for n, snap in entry["snapshots"].items()):
             save_manifest(module_path, entry["fingerprints"])
@@ -838,10 +823,11 @@ _RUN_TABLE_RE = re.compile(r"^(?:snap|input)_([0-9a-f]{12})_")
 
 
 def run_tables(con) -> Dict[str, str]:
-    """{snapshot table -> run id} over main-schema base tables."""
+    """{snapshot table -> run id} over the engine's default-schema base tables."""
     rows = con.execute(
         "SELECT table_name FROM information_schema.tables "
-        "WHERE table_schema='main' AND table_type='BASE TABLE'").fetchall()
+        "WHERE table_schema = ? AND table_type='BASE TABLE'",
+        [dbcompat.db_schema(con)]).fetchall()
     out: Dict[str, str] = {}
     for (tn,) in rows:
         m = _RUN_TABLE_RE.match(tn)
@@ -853,8 +839,8 @@ def run_tables(con) -> Dict[str, str]:
 def pending_commit_runs(con, module_path: str) -> set:
     """Runs whose metadata export is still outstanding (never collectable)."""
     exists = con.execute("SELECT count(*) FROM information_schema.tables "
-                         "WHERE table_schema='main' AND table_name=?",
-                         [COMMIT_REGISTRY]).fetchone()[0]
+                         "WHERE table_schema = ? AND table_name=?",
+                         [dbcompat.db_schema(con), COMMIT_REGISTRY]).fetchone()[0]
     if not exists:
         return set()
     rows = con.execute(f"SELECT entry FROM {COMMIT_REGISTRY} "
@@ -874,8 +860,7 @@ def protected_runs(con, module_path: str, keep: int) -> set:
     history = load_history(module_path)
     runs = [e["run_id"] for e in history if e.get("snapshots")]
     protected = set(runs[-keep:]) if keep > 0 else set()
-    live = [r[0] or "" for r in con.execute(
-        "SELECT sql FROM duckdb_views() WHERE schema_name='main'").fetchall()]
+    live = list(dbcompat.live_view_defs(con).values())
     for tn, rid in run_tables(con).items():
         if any(tn in sql for sql in live):
             protected.add(rid)
@@ -893,8 +878,7 @@ def gc_plan(con, module_path: str, keep: int = 2) -> dict:
     if keep < 0:
         raise PinError("keep must be >= 0")
     protected = protected_runs(con, module_path, keep)
-    live = [r[0] or "" for r in con.execute(
-        "SELECT sql FROM duckdb_views() WHERE schema_name='main'").fetchall()]
+    live = list(dbcompat.live_view_defs(con).values())
     drop, keep_tables = [], []
     for tn, rid in sorted(run_tables(con).items()):
         if rid in protected or any(tn in sql for sql in live):
@@ -916,8 +900,7 @@ def gc_snapshots(con, module_path: str, keep: int = 2,
     plan = gc_plan(con, module_path, keep)
     if not apply or not plan["drop_tables"]:
         return plan
-    live = [r[0] or "" for r in con.execute(
-        "SELECT sql FROM duckdb_views() WHERE schema_name='main'").fetchall()]
+    live = list(dbcompat.live_view_defs(con).values())
     con.execute("BEGIN TRANSACTION")
     try:
         for tn in plan["drop_tables"]:
@@ -944,8 +927,10 @@ def _frozen_materialize(con, project, tms, entry, source_overrides=None,
     """
     con.execute("BEGIN TRANSACTION")
     try:
-        if entry["dialect"] != "duckdb":
-            raise PinError("frozen execution currently supports only DuckDB")
+        if entry["dialect"] not in ("duckdb", "postgres"):
+            raise PinError(
+                f"frozen execution currently supports only DuckDB and "
+                f"Postgres, not {entry['dialect']!r}")
         entry["source_fingerprints"] = source_fingerprints(con, project, source_overrides)
         if expected_sources is not None and entry["source_fingerprints"] != expected_sources:
             raise PinError("input snapshot content changed since recorded run")
@@ -1127,8 +1112,7 @@ def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
         if freshness_stale:
             stale |= _downstream_models(tms, freshness_stale)
         # A rollback (or a different warehouse) may not expose the last run.
-        live = dict(con.execute("SELECT view_name, sql FROM duckdb_views() "
-                                "WHERE schema_name='main'").fetchall())
+        live = dbcompat.live_view_defs(con)
         if previous:
             for name in names:
                 snap = previous.get("snapshots", {}).get(name)
@@ -1216,7 +1200,8 @@ def execute_run(con, project: Project, tms: Dict[str, TypedModel], module_path: 
         raise PinError("incomplete input snapshot inventory")
     have = {r[0] for r in con.execute(
         "SELECT table_name FROM information_schema.tables "
-        "WHERE table_schema='main' AND table_type='BASE TABLE'").fetchall()}
+        "WHERE table_schema = ? AND table_type='BASE TABLE'",
+        [dbcompat.db_schema(con)]).fetchall()}
     if any(snap not in have for snap in inputs.values()):
         raise PinError("input snapshot table(s) missing")
     frozen = {name: {"dataset": snap} for name, snap in inputs.items()}
@@ -1240,7 +1225,7 @@ def warehouse_branches(con) -> dict:
     """Branch inventory of a warehouse: {branch: {staged: [views], live: [views]}}."""
     rows = con.execute(
         "SELECT table_name FROM information_schema.tables "
-        "WHERE table_schema='main'").fetchall()
+        "WHERE table_schema = ?", [dbcompat.db_schema(con)]).fetchall()
     have = {r[0] for r in rows}
     branches: dict = {}
     for tn in sorted(have):
