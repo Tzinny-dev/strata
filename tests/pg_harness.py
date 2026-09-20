@@ -66,6 +66,11 @@ def ephemeral_postgres(port: int = 55434, dbname: str = "strata_test"):
             raw = psycopg2.connect(host=str(sock), port=port, user="strata",
                                    dbname=dbname)
             con = PGConn(raw)
+            # A URL DSN equivalent to the keyword-args connection above, for
+            # tests that need to hand a `-o` value to the CLI itself
+            # (strata.cli.open_warehouse only accepts a DSN string, not a
+            # ready-made connection).
+            con.dsn = f"postgresql://strata@/{dbname}?host={sock}&port={port}"
             try:
                 yield con
             finally:

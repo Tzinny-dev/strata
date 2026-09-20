@@ -33,6 +33,35 @@ def check(proj, model_names=None):
     return tms
 
 
+def open_warehouse(output, read_only=False):
+    """Open a warehouse connection for `-o`/`--output`.
+
+    `postgres://...`/`postgresql://...` connects via psycopg2 (wrapped in
+    dbcompat.PGConn, see strata/dbcompat.py); anything else is a DuckDB
+    file path, or `:memory:` when `output` is falsy. `--dialect` (SQL
+    emission) and `-o` (which engine to connect to) are independent and
+    both explicit on purpose — no scheme-sniffing to infer one from the
+    other. Raises RuntimeError with an actionable message if the needed
+    driver isn't installed."""
+    if output and output.startswith(("postgres://", "postgresql://")):
+        try:
+            import psycopg2
+        except ImportError:
+            raise RuntimeError(
+                "postgres driver not available; pip install psycopg2-binary")
+        from . import dbcompat
+        return dbcompat.PGConn(psycopg2.connect(output))
+    try:
+        import duckdb
+    except ImportError:
+        raise RuntimeError(
+            "duckdb not available; run with the venv interpreter "
+            "(prototype/.venv/bin/python)")
+    if read_only:
+        return duckdb.connect(output, read_only=True)
+    return duckdb.connect(output or ":memory:")
+
+
 # ---------------------------------------------------------------- commands
 
 def cmd_build(args):
@@ -246,12 +275,10 @@ def cmd_run(args):
         print(f"pipeline {pipeline.name!r} env={pipeline.env or '-'} "
               f"source overrides: {', '.join(f'{k}<-{v}' for k, v in sorted(overrides.items()))}")
     try:
-        import duckdb
-    except ImportError as ie:
-        print("duckdb not available; run with the venv interpreter "
-              "(prototype/.venv/bin/python)", file=sys.stderr)
+        con = open_warehouse(getattr(args, "output", None))
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
         return 2
-    con = duckdb.connect(getattr(args, "output", None) or ":memory:")
     if args.seed:
         _run_seed(con, args.file)
     applied, pins, note = exec_mod.run(con, proj, tms, args.file,
@@ -407,12 +434,10 @@ def cmd_test(args):
         print(f"error: {se.code}: {se}", file=sys.stderr)
         return 1
     try:
-        import duckdb
-    except ImportError:
-        print("duckdb not available; run with the venv interpreter "
-              "(prototype/.venv/bin/python)", file=sys.stderr)
+        con = open_warehouse(getattr(args, "output", None))
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
         return 2
-    con = duckdb.connect(getattr(args, "output", None) or ":memory:")
     if getattr(args, "seed", False):
         _run_seed(con, args.file)
     tested_models = [getattr(args, "model", None)] if getattr(args, "model", None) else None
@@ -501,12 +526,10 @@ def cmd_seed(args):
     proj = load(args.file)
     tms = check(proj)
     try:
-        import duckdb
-    except ImportError as ie:
-        print("duckdb not available; run with the venv interpreter "
-              "(/tmp/opencode/strata-venv/bin/python3)", file=sys.stderr)
+        con = open_warehouse(getattr(args, "output", None))
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
         return 2
-    con = duckdb.connect(getattr(args, "output", None) or ":memory:")
     _run_seed(con, args.file)
     for tname, in con.execute(
             "SELECT table_name FROM information_schema.tables "
@@ -579,15 +602,15 @@ def cmd_branches(args):
     if not getattr(args, "output", None):
         print("(no warehouse: pass -o FILE.duckdb; an in-memory warehouse is always empty)")
         return 0
-    if not Path(args.output).exists():
+    is_dsn = args.output.startswith(("postgres://", "postgresql://"))
+    if not is_dsn and not Path(args.output).exists():
         print(f"error: E083: warehouse {args.output!r} not found", file=sys.stderr)
         return 1
     try:
-        import duckdb
-    except ImportError:
-        print("duckdb not available; run with the venv interpreter", file=sys.stderr)
+        con = open_warehouse(args.output, read_only=True)
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
         return 2
-    con = duckdb.connect(args.output, read_only=True)
     branches = exec_mod.warehouse_branches(con)
     con.close()
     if not branches:
@@ -649,11 +672,10 @@ def cmd_replay(args):
         proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, "search_dir", None) else None))
         tms = check(proj)
         try:
-            import duckdb
-        except ImportError:
-            print("duckdb not available; run with the venv interpreter", file=sys.stderr)
+            con = open_warehouse(getattr(args, "output", None))
+        except RuntimeError as e:
+            print(f"error: {e}", file=sys.stderr)
             return 2
-        con = duckdb.connect(getattr(args, "output", None) or ":memory:")
         if getattr(args, "seed", False):
             _run_seed(con, args.file)
         try:
@@ -722,11 +744,10 @@ def cmd_backfill(args):
         overrides[src] = {"dataset": table.strip()}
     branch = getattr(args, "branch", None) or rec.get("branch", "main")
     try:
-        import duckdb
-    except ImportError:
-        print("duckdb not available; run with the venv interpreter (prototype/.venv/bin/python)", file=sys.stderr)
+        con = open_warehouse(getattr(args, "output", None))
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
         return 2
-    con = duckdb.connect(getattr(args, "output", None) or ":memory:")
     try:
         applied, pins, note = exec_mod.run(
             con, proj, tms, args.file, only_stale=True, names=names,
@@ -755,16 +776,16 @@ def cmd_rollback(args):
         return 1
     fps = e.get("fingerprints", {})
     if getattr(args, "output", None):
-        try:
-            import duckdb
-        except ImportError:
-            print("duckdb not available; manifest repoint only")
-            return 1
-        if not Path(args.output).exists():
+        is_dsn = args.output.startswith(("postgres://", "postgresql://"))
+        if not is_dsn and not Path(args.output).exists():
             print(f"error: E083: warehouse {args.output!r} not found "
                   "(nothing to repoint)", file=sys.stderr)
             return 1
-        con = duckdb.connect(args.output)
+        try:
+            con = open_warehouse(args.output)
+        except RuntimeError as err:
+            print(f"error: {err}", file=sys.stderr)
+            return 1
         if e.get("snapshots"):
             # Snapshot-addressed rollback: repoint live views to the frozen
             # tables recorded by that run (immune to later source changes).
@@ -773,7 +794,7 @@ def cmd_rollback(args):
             # between swap and file write is repaired by recover_metadata.
             try:
                 exec_mod.rollback_to_run(con, e, module_path=args.file)
-            except (exec_mod.PinError, OSError, duckdb.Error) as pe:
+            except Exception as pe:  # PinError, OSError, or a driver-specific DB error
                 print(f"error: E083: {pe}", file=sys.stderr)
                 return 1
             finally:
@@ -814,21 +835,21 @@ def cmd_gc(args):
         print("error: E084: --output <warehouse.duckdb> is required "
               "(snapshots live in the warehouse)", file=sys.stderr)
         return 1
-    if not Path(args.output).exists():
+    is_dsn = args.output.startswith(("postgres://", "postgresql://"))
+    if not is_dsn and not Path(args.output).exists():
         print(f"error: E083: warehouse {args.output!r} not found", file=sys.stderr)
         return 1
     try:
-        import duckdb
-    except ImportError:
-        print("duckdb not available; run with the venv interpreter", file=sys.stderr)
+        con = open_warehouse(args.output)
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
         return 2
-    con = duckdb.connect(args.output)
     try:
         exec_mod.recover_metadata(con, args.file)  # export pending events first
         plan = exec_mod.gc_snapshots(con, args.file, keep=args.keep,
                                      keep_days=getattr(args, "keep_days", None),
                                      apply=args.apply)
-    except (exec_mod.PinError, duckdb.Error) as e:
+    except Exception as e:  # PinError, or a driver-specific DB error
         print(f"error: E084: {e}", file=sys.stderr)
         return 1
     finally:
