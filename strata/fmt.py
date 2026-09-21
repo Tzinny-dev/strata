@@ -83,7 +83,8 @@ def _expr(e: ast.Node) -> str:
         if e.name == "in" and len(e.args) == 2 and isinstance(e.args[1], ast.ListExpr):
             items = ", ".join(_expr(i) for i in e.args[1].items)
             return f"{_expr(e.args[0])} in [{items}]"
-        return f"{e.name}({', '.join(_expr(a) for a in e.args)})"
+        distinct = "distinct " if e.distinct else ""
+        return f"{e.name}({distinct}{', '.join(_expr(a) for a in e.args)})"
     if isinstance(e, ast.Kwarg):
         return f"{e.name}: {_expr(e.value)}"
     if isinstance(e, ast.Star):
@@ -164,7 +165,9 @@ def _stmts(stmts: List[ast.Stmt], ind: str) -> List[str]:
         elif isinstance(s, ast.SetOpStmt):
             out.append(f"{ind}{s.op}" + (" all" if s.all else "") + f" {s.table}")
         elif isinstance(s, ast.DedupStmt):
-            out.append(f"{ind}dedup")
+            by = (", ".join(_expr(k) for k in s.by)
+                  if s.by else "")
+            out.append(f"{ind}dedup" + (f" by {by}" if by else ""))
         else:
             raise ValueError(f"unsupported statement: {type(s).__name__}")
     return out

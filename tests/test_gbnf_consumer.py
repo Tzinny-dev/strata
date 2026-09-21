@@ -176,6 +176,16 @@ class TestGbnfMatchesParserLanguage(unittest.TestCase):
         mkw = re.search(r"found KW '([^']+)'", msg) or re.search(r"unexpected '([^']+)' in expression", msg)
         if mkw and mkw.group(1) in set(grammar.KEYWORDS):
             return True
+        # GBNF matched a keyword as an *ident spelling* (char-level); the
+        # token-aware parser then trips on the following symbol, e.g.
+        # `( -not )` -> unexpected ')' in expression, the keyword having been
+        # consumed one slot further left.
+        if mkw and mkw.group(1) in ("(", ")", "[", "]", ",", ":"):
+            vals = [tok.value for tok in toks]
+            kw = set(grammar.KEYWORDS)
+            for i, v in enumerate(vals):
+                if v == mkw.group(1) and i > 0 and vals[i - 1] in kw:
+                    return True
         # 2. take-range dots vs FLOAT absorption
         if ("FLOAT" in msg or "unexpected token" in msg) and re.search(r"\d[ \t]*\.[ \t]*\..\d", text):
             return True

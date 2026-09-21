@@ -513,7 +513,7 @@ def materialize(con: Any, project: Project, tms: Dict[str, TypedModel],
         # Outside that, correctness already holds via the post-filter path
         # below — this is strictly an opportunistic performance narrowing.
         pushdown_pred = None
-        if prev_snap is not None and not plan.joins and plan.set_op is None \
+        if prev_snap is not None and not plan.joins and not plan.set_ops \
                 and plan.expand is None:
             base_expr = _pushdown_base_expr(plan, plan.cdc_column)
             if base_expr is not None:

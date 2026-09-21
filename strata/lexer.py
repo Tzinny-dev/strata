@@ -35,7 +35,7 @@ KEYWORDS = {
     "from", "join_left", "join_inner", "join_anti", "join_semi", "on",
     "filter", "where", "let", "derive", "select", "aggregate", "group",
     "sort", "asc", "desc", "take", "all", "expand",
-    "union", "intersect", "except", "dedup",
+    "union", "intersect", "except", "dedup", "by", "distinct",
     "domain",
     "nonnull", "unique", "primary_key", "protected", "enum",
     "classification", "partition_by", "freshness", "freshness_column",

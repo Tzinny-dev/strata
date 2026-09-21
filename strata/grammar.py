@@ -38,7 +38,7 @@ KEYWORDS: List[str] = [
     "join_left", "join_inner", "join_anti", "join_semi", "on",
     "filter", "where", "let", "derive", "select", "aggregate", "group",
     "sort", "asc", "desc", "take", "all", "expand",
-    "union", "intersect", "except", "dedup",
+    "union", "intersect", "except", "dedup", "by", "distinct",
     "domain",
     "nonnull", "unique", "primary_key", "protected", "enum",
     "classification", "partition_by", "freshness", "freshness_column",
@@ -265,7 +265,7 @@ RULES["setop-stmt"] = ("combine the current rows with a same-shaped model", [
 ])
 
 RULES["dedup-stmt"] = ("duplicate-row elimination over the final row set", [
-    r'"dedup"',
+    r'"dedup" ("by" expr ("," expr)*)?',
 ])
 
 RULES["pipeline-decl"] = ("pipeline: models + source overrides", [
@@ -342,6 +342,7 @@ RULES["call-args"] = ("comma-separated call arguments", [
     r'call-arg ("," call-arg)* ","?',
 ])
 RULES["call-expr"] = ("built-in or user call", [
+    r'ident "(" "distinct" expr ")"',
     r'ident "(" call-args? ")"',
     r'ident "(" call-args? ")" "over" "(" window-spec-list? ")"',
 ])

@@ -29,6 +29,9 @@ class ColumnRef(Node):
 class Call(Node):
     name: str = ""
     args: List[Node] = field(default_factory=list)
+    # `count(distinct x)`: the only DISTINCT aggregate form the language
+    # offers (validated by the typechecker against the catalog).
+    distinct: bool = False
 
 
 @dataclass
@@ -63,6 +66,10 @@ class WindowCall(Node):
     name: str = ""
     args: List[Node] = field(default_factory=list)
     over: WindowSpec = None
+    # count(distinct x) inside a window: parsed but rejected by the
+    # typechecker (the DISTINCT aggregate form is only supported in the
+    # plain, non-windowed position).
+    distinct: bool = False
 
 
 @dataclass
@@ -202,11 +209,13 @@ class SetOpStmt(Stmt):
 
 @dataclass
 class DedupStmt(Stmt):
-    """Duplicate-row elimination over the final row set (SELECT DISTINCT).
+    """Duplicate-row elimination over the final row set.
 
-    Full-row only: key-based dedup without a tiebreak is engine-dependent,
-    so keeping one row per key must be written as an explicit group-by.
+    No keys: full-row SELECT DISTINCT. With `by` keys: deterministic
+    keep-one-row-per-key (ROW_NUMBER partitioned by the keys, ordered by the
+    remaining output columns, rn = 1), portable across all four engines.
     """
+    by: List[Node] = field(default_factory=list)
     span: Any = None
 
 

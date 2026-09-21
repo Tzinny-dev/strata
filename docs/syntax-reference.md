@@ -181,14 +181,22 @@ model mx { from mx_orders }
 model all_orders {
   from es_orders
   union mx      // o: union all mx / intersect mx / except mx
+  union more    // set-ops consecutivos encadenan
   dedup
+  // o: dedup by order_id → conserva una fila por clave, determinista
 }
 ```
 
-Límite documentado en `docs/setops.md`: un solo set-op por modelo, sin
-mezclar con joins, y el esquema de ambos lados debe alinear por nombre y
-tipo (unificado, como `coalesce`). `dedup` es `SELECT DISTINCT` sobre
-todas las columnas de salida (no deduplicación por clave).
+Los set-ops son consecutivos (`from a union b union c`); lo que haya antes
+del primero da forma a la rama izquierda y lo que haya después ve las filas
+combinadas (`filter`, `select`, `derive`, `group`, `sort`, `take` y también
+`join_*`). Una referencia calificada al modelo derecho (`b.x`) se resuelve
+contra la columna combinada. El esquema de todas las ramas debe alinear por
+nombre y tipo (unificado, como `coalesce`). `dedup` es `SELECT DISTINCT`
+sobre las columnas de salida; `dedup by k1, k2` conserva una fila por clave
+vía `ROW_NUMBER` determinista. En agregación, `count(distinct x)` emite
+`COUNT(DISTINCT x)`; `distinct` en otra función o en ventanas es E096
+(ver `docs/setops.md`).
 
 ## 4. Tipos
 

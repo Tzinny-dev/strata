@@ -563,7 +563,12 @@ class Parser:
                                                 all=all_, span=self.span(t)))
             elif self.at("KW", "dedup"):
                 t = self.advance()
-                decl.stmts.append(ast.DedupStmt(span=self.span(t)))
+                by = []
+                if self.match("KW", "by"):
+                    by.append(self.parse_expr())
+                    while self.match("SYM", ","):
+                        by.append(self.parse_expr())
+                decl.stmts.append(ast.DedupStmt(by=by, span=self.span(t)))
             elif self.at("KW", "select"):
                 t = self.advance()
                 decl.stmts.append(ast.SelectStmt(assigns=self.parse_assigns(), span=self.span(t)))
@@ -755,7 +760,11 @@ class Parser:
                 return ast.ColumnRef(name=col, qualifier=t.value, span=span)
             if self.at("SYM", "("):
                 args = []
+                distinct = False
                 self.advance()
+                if self.match("KW", "distinct"):
+                    # `count(distinct x)` — the single DISTINCT aggregate form.
+                    distinct = True
                 if not self.at("SYM", ")"):
                     while True:
                         # Keyword values remain ordinary expressions. Both
@@ -779,8 +788,14 @@ class Parser:
                             break
                 self.expect("SYM", ")")
                 if self.at("KW", "over"):
+                    if distinct:
+                        # count(distinct x) over (...): parse but the checker
+                        # rejects it (DISTINCT aggregation is plain-only).
+                        win = self.parse_window_call(t.value, args, span)
+                        win.distinct = True
+                        return win
                     return self.parse_window_call(t.value, args, span)
-                return ast.Call(name=t.value, args=args, span=span)
+                return ast.Call(name=t.value, args=args, distinct=distinct, span=span)
             return ast.ColumnRef(name=t.value, span=span)
 
         raise ParseError(

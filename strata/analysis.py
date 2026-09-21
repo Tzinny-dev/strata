@@ -145,18 +145,25 @@ class Plan:
     # One expand per model: (source_col, output_col, element_type_name) of the
     # lateral array unnest that runs in the base subquery.
     expand: Optional[Tuple[str, str, str]] = None
-    # Set operation combining the current rows with a same-shaped model:
-    # (op, all, right_node). Statements before it shape the left branch;
-    # setop_base_split/setop_pred_split record how many base_cols/preds
-    # belong to the left branch at union time.
-    set_op: Optional[Tuple[str, bool, str]] = None
+    # Set operations combining the current rows with same-shaped models, in
+    # statement order: each (op, all, right_node). They must be consecutive;
+    # statements before the first shape the left branch (base_cols/preds up
+    # to the split), statements after the last see the combined rows.
+    set_ops: List[Tuple[str, bool, str]] = field(default_factory=list)
     setop_base_split: int = 0
     setop_pred_split: int = 0
-    # Union branch column types, in positional order: (name, left_type,
-    # right_type, unified_type) for the casts in both branches.
-    setop_cols: List[Tuple[str, "StrataType", "StrataType", "StrataType"]] = field(default_factory=list)
+    # Union branch column types, in positional order: (name, [branch types in
+    # chain order: left branch first, then each right model in set_ops
+    # order], unified_type) for the casts in every branch.
+    setop_cols: List[Tuple[str, List["StrataType"], "StrataType"]] = field(default_factory=list)
+    # Set-op right model aliases (alias -> node), so qualified references to
+    # the combined columns (`b.x`) compile to the bare union column name.
+    setop_right: Dict[str, str] = field(default_factory=dict)
     # Full-row duplicate elimination (SELECT DISTINCT over the final rows).
     distinct: bool = False
+    # `dedup by k1, k2`: deterministic one-row-per-key over the final rows
+    # (keys must be output columns; the tiebreak orders by the rest).
+    dedup_keys: List[ast.Node] = field(default_factory=list)
 
 
 @dataclass
@@ -728,6 +735,16 @@ class _ModelState:
         self.outputs: List[PlanOut] = []
         self.group_keys: Set[str] = set()
         self.in_group = False
+        # Set-operation chain state: set-ops must be consecutive (no other
+        # statement between them); anything else closes the chain.
+        self._setop_chain_open = False
+        # Per-column branch types and running unified types while a model's
+        # set-op chain grows (chained branches extend the per-column lists).
+        self._setop_branches: "Dict[str, List[StrataType]]" = OrderedDict()
+        self._setop_unified: "Dict[str, StrataType]" = OrderedDict()
+        # Set-op right-model aliases, registered so qualified references like
+        # `b.x` resolve against the combined (union) columns.
+        self.setop_right: Dict[str, str] = {}
 
     def _err(self, code: str, msg: str,
              span: Optional[Tuple[int, int, int, int]] = None,
@@ -751,6 +768,13 @@ class _ModelState:
                     if col is None:
                         raise self._err("E040", f"no column {e.name!r} in input {e.qualifier!r}", e.span)
                     return col
+            if e.qualifier in self.setop_right:
+                # Qualified reference to a set-op right model: resolves against
+                # the combined (union) columns, which carry the left names.
+                col = self.cols.get(e.name)
+                if col is None:
+                    raise self._err("E040", f"no column {e.name!r} in set-op input {e.qualifier!r}", e.span)
+                return col
             raise self._err("E041", f"unknown input qualifier {e.qualifier!r}", e.span)
         col = self.cols.get(e.name)
         if col is None:
@@ -766,6 +790,8 @@ class _ModelState:
                     if i == 0:
                         return [Origin(inp.node, e.name, "passthrough")]
                     return [Origin(inp.node, e.name, "joined")]
+            if e.qualifier in self.setop_right:
+                return [Origin(self.setop_right[e.qualifier], e.name, "set")]
         return list(self.origins.get(e.name, [Origin(self.tm.name, e.name, "derived")]))
 
     # -- expressions ---------------------------------------------------
@@ -815,6 +841,9 @@ class _ModelState:
         fn = functions.get(e.name)
         if fn is None:
             raise self._err("E059", f"unknown function {e.name!r}", e.span)
+        if e.distinct:
+            raise self._err("E096", "count(distinct x) over (...) is not supported; "
+                              "the DISTINCT aggregate is plain-only", e.span)
         if not fn.window:
             raise self._err(functions.E_WINDOW_PLACEMENT,
                       f"{e.name}() is not a window function: it takes no over(...)", e.span)
@@ -882,6 +911,13 @@ class _ModelState:
         if star and not fn.accepts_star:
             raise self._err(functions.E_STRAY_STAR,
                       f"'*' is only valid as count(*), not in {name}()", e.span)
+        if e.distinct:
+            if name != "count":
+                raise self._err("E096", f"distinct is only supported as "
+                                  f"count(distinct x), not in {name}()", e.span)
+            if star:
+                raise self._err("E096", "'*' is not valid with distinct: "
+                                  "write count(distinct x)", e.span)
         if name in ("date_add", "date_sub", "date_trunc", "date_diff"):
             return self.infer_date_call(e, fn)
         args = [Inf(INT64, False)] if star else [self.infer(a) for a in e.args]
@@ -989,6 +1025,10 @@ class _ModelState:
     # -- statements -----------------------------------------------------
     def stmt(self, s: ast.Stmt) -> None:
         """Dispatch one model-body statement to its handler."""
+        if not isinstance(s, ast.SetOpStmt):
+            # Any non-set-op statement ends a set-op chain: a later set-op
+            # would no longer be consecutive with the previous one.
+            self._setop_chain_open = False
         if isinstance(s, ast.FromStmt):
             self.do_from(s)
         elif isinstance(s, ast.JoinStmt):
@@ -1023,7 +1063,7 @@ class _ModelState:
         elif isinstance(s, ast.SetOpStmt):
             self.do_setop(s)
         elif isinstance(s, ast.DedupStmt):
-            self.tm.plan.distinct = True
+            self.do_dedup(s)
         elif isinstance(s, ast.SelectStmt):
             for a in s.assigns:
                 self.do_output(a)
@@ -1032,9 +1072,9 @@ class _ModelState:
 
     def do_from(self, s: ast.FromStmt) -> None:
         """Register the from input: columns, ownership and passthrough lineage."""
-        if self.tm.plan.set_op is not None:
-            raise self._err("E076", "a set model combines exactly one from with one "
-                              "named model; chain further inputs downstream", s.span)
+        if self.tm.plan.set_ops:
+            raise self._err("E076", "a set model combines the from input with "
+                              "named models only; join further inputs downstream", s.span)
         cols, is_src, node = self.c.p.input_schema(s.table)
         inp = InputSpec(alias=s.table, node=node, is_source=is_src,
                         cols=OrderedDict((k, c.clone()) for k, c in cols.items()))
@@ -1047,10 +1087,12 @@ class _ModelState:
             self.base_cols.append(BaseCol(name=name, expr=None))
 
     def do_join(self, s: ast.JoinStmt) -> None:
-        """Register a join input and extract expect-cardinality keys when annotated."""
-        if self.tm.plan.set_op is not None:
-            raise self._err("E076", f"{s.kind} join after a set operation is not supported; "
-                              "join the combined rows in a downstream model", s.span)
+        """Register a join input and extract expect-cardinality keys when annotated.
+
+        Joins over a set model's combined rows are allowed after the set-op
+        chain (the union is wrapped in a subquery and joined there); a join
+        before the first set-op is still rejected at the set-op itself.
+        """
         idx = len(self.inputs)
         cols, is_src, node = self.c.p.input_schema(s.table)
         inp = InputSpec(alias=s.table, node=node, is_source=is_src,
@@ -1188,7 +1230,7 @@ class _ModelState:
         if self.tm.plan.expand is not None:
             raise self._err("E075", "only one expand per model (a second lateral "
                               "unnest would cross-multiply rows)", s.span)
-        if self.tm.plan.set_op is not None:
+        if self.tm.plan.set_ops:
             raise self._err("E076", "expand after a set operation is not supported; "
                               "expand a branch before combining, or the combined "
                               "rows in a downstream model", s.span)
@@ -1213,24 +1255,51 @@ class _ModelState:
         self.own[s.as_name] = self.tm.name
         self.origins[s.as_name] = [Origin(self.inputs[0].node, s.name, "expanded")]
 
+    def do_dedup(self, s: ast.DedupStmt) -> None:
+        """Full-row DISTINCT (no `by`) or deterministic one-row-per-key.
+
+        `dedup by k1, k2` keeps one row per key group deterministically
+        (ROW_NUMBER partitioned by the keys, ordered by the remaining output
+        columns, rn = 1), so it is portable across all four engines; the keys
+        must name output columns (validated at finish, when outputs are set).
+        """
+        plan = self.tm.plan
+        if not s.by:
+            plan.distinct = True
+            return
+        if plan.distinct:
+            raise self._err("E076", "dedup by keys and full-row dedup cannot "
+                              "both apply to the same model", s.span)
+        for k in s.by:
+            self._require_no_window(k, s.span, "dedup")
+            self.infer(k)
+            if not (isinstance(k, ast.ColumnRef) and k.qualifier is None):
+                raise self._err("E076", "dedup by keys must be plain output "
+                                  "columns (unqualified references)", s.span)
+            plan.dedup_keys.append(k)
+
     def do_setop(self, s: ast.SetOpStmt) -> None:
         """Combine the current rows with a same-shaped upstream model.
 
-        Pipeline semantics: statements before the set-op shape the left
-        branch (filters and lets apply there); statements after it see the
-        combined rows. The union schema keeps the left column names in order
-        with unified types and OR-ed nullability, so both SQL branch
-        spellings (by-name DuckDB, by-position everywhere else) agree.
+        Pipeline semantics: statements before the first set-op shape the left
+        branch (filters, lets and joins apply in the base query); set-ops are
+        a consecutive chain (`from a union b union c`); statements after the
+        last set-op see the combined rows and may join further inputs. The
+        union schema keeps the left column names in order with unified types
+        and OR-ed nullability, so both SQL branch spellings (by-name DuckDB,
+        by-position everywhere else) agree. Right models are registered as
+        qualified sources (`b.x` resolves against the combined columns).
         """
         plan = self.tm.plan
-        if plan.set_op is not None:
-            raise self._err("E076", "only one set operation per model (chain them "
-                              "through downstream models)", s.span)
         if not self.inputs:
             raise self._err("E076", f"{s.op} requires a from first", s.span)
         if plan.joins:
             raise self._err("E076", f"{s.op} combines single-table row sets; join "
-                              "in a downstream model instead", s.span)
+                              "the combined rows after the set operation", s.span)
+        if plan.set_ops and not self._setop_chain_open:
+            raise self._err("E076", "set operations must be consecutive; put "
+                              "lets/filters/joins before the first or after the "
+                              "last set operation", s.span)
         if self.outputs or plan.sorts or plan.limit is not None or self.group_keys:
             raise self._err("E076", f"{s.op} must come before select/derive/aggregate/"
                               "group/sort/take (those see the combined rows)", s.span)
@@ -1245,19 +1314,37 @@ class _ModelState:
                               f"right {list(cols)})", s.span)
         for n in names:
             lt, rt = self.cols[n].t, cols[n].t
-            u = lt if lt == rt else unify(lt, rt)
-            if u.name == "unknown" or (u.name == "money" and lt != rt):
-                raise self._err("E077", f"{s.op} column {n!r} cannot align {lt} "
-                                  f"with {rt}", s.span)
-            self.cols[n] = Col(name=n, t=u, nullable=self.cols[n].nullable or cols[n].nullable)
+            if n in self._setop_branches:
+                # chain continuation: unify the running combined type with this branch
+                u = self._setop_unified[n]
+                u2 = u if u == rt else unify(u, rt)
+                if u2.name == "unknown" or (u2.name == "money" and u != rt):
+                    raise self._err("E077", f"{s.op} column {n!r} cannot align {u} "
+                                      f"with {rt}", s.span)
+                self._setop_unified[n] = u2
+                self._setop_branches[n].append(rt)
+            else:
+                u = lt if lt == rt else unify(lt, rt)
+                if u.name == "unknown" or (u.name == "money" and lt != rt):
+                    raise self._err("E077", f"{s.op} column {n!r} cannot align {lt} "
+                                      f"with {rt}", s.span)
+                self._setop_branches[n] = [lt, rt]
+                self._setop_unified[n] = u
+            self.cols[n] = Col(name=n, t=self._setop_unified[n],
+                               nullable=self.cols[n].nullable or cols[n].nullable)
             self.own[n] = self.tm.name
             self.origins[n] = list(self.origins.get(n, [])) + [Origin(node, n, "set")]
             self.tm.reads.add((self.inputs[0].node, n))
             self.tm.reads.add((node, n))
-            plan.setop_cols.append((n, lt, rt, u))
-        plan.set_op = (s.op, s.all, node)
-        plan.setop_base_split = len(self.base_cols)
-        plan.setop_pred_split = len(plan.preds)
+        if not plan.set_ops:
+            plan.setop_base_split = len(self.base_cols)
+            plan.setop_pred_split = len(plan.preds)
+        plan.set_ops.append((s.op, s.all, node))
+        plan.setop_right[s.table] = node
+        self.setop_right[s.table] = node
+        plan.setop_cols = [(n, self._setop_branches[n], self._setop_unified[n])
+                           for n in names]
+        self._setop_chain_open = True
 
     def _require_no_window(self, e: ast.Node,
                            span: Optional[Tuple[int, int, int, int]],
@@ -1382,6 +1469,17 @@ class _ModelState:
             plan.outputs = list(self.outputs)
         else:
             plan.outputs = [PlanOut(name=n, expr=ast.ColumnRef(name=n)) for n in self.cols]
+        if plan.dedup_keys:
+            out_names = {o.name for o in plan.outputs}
+            for k in plan.dedup_keys:
+                if k.name not in out_names:
+                    raise self._err("E076", f"dedup key {k.name!r} must be an output "
+                                      "column of this model", k.span)
+            for e, _desc in plan.sorts:
+                if not (isinstance(e, ast.ColumnRef) and e.name in out_names):
+                    raise self._err("E076", "sort after dedup by keys must reference "
+                                      "output columns (the ROW_NUMBER wrapper only "
+                                      "sees the selected outputs)", e.span)
         for name, col in self.cols.items():
             if any(o.name == name for o in plan.outputs):
                 self.tm.schema[name] = col

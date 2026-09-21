@@ -90,6 +90,12 @@ class Translator:
     def col(self, name: str, qualifier: Optional[str] = None) -> str:
         """Qualified SQL column reference for an identifier."""
         if qualifier:
+            if qualifier in self.plan.setop_right:
+                # Qualified reference to a set-op right model collapses to the
+                # combined rows' column: bare name for the outer query (the
+                # `base` CTE projects it), t0-qualified inside the base body
+                # so a post-set-op join cannot make it ambiguous.
+                return name if self.mode == _OUTER else f"t0.{name}"
             i = self.lookup_input(qualifier)
             if i == 0:
                 return name if self.mode == _OUTER else f"t0.{name}"
@@ -111,6 +117,11 @@ class Translator:
         if isinstance(e, ast.Call):
             name = e.name
             fn = functions.get(name)
+            if e.distinct:
+                # count(distinct x): the only DISTINCT aggregate form; the
+                # typechecker guarantees name == count and a real arg.
+                return functions.emit_sql(name, "DISTINCT " + self.expr(e.args[0]),
+                                          self.dialect)
             if fn is not None and fn.collection:
                 return self._collection_call(e, fn)
             if fn is not None and fn.unit_names is not None:
@@ -634,9 +645,17 @@ class Translator:
 
 
 def _base_select(plan: Plan, dialect: Dialect, base_cols: List[BaseCol],
-                 preds: List[ast.Node], upstream_prefix: str = "v_") -> str:
+                 preds: List[ast.Node], upstream_prefix: str = "v_",
+                 joins: Optional[List[object]] = None) -> str:
     """SELECT...FROM...[WHERE] over the left table (the left branch when the
-    model combines rows with a set operation, the whole base otherwise)."""
+    model combines rows with a set operation, the whole base otherwise).
+
+    `joins` defaults to the plan's joins; a set-op left branch passes [] so
+    that post-set-op joins (which attach to the combined rows subquery, not
+    to the left branch's base table) are not projected into it.
+    """
+    if joins is None:
+        joins = plan.joins
     t = Translator(plan, _RAW, dialect=dialect)
     # explicit projection over the left table (avoids name clashes with computed columns)
     computed = {bc.name for bc in base_cols if bc.expr is not None}
@@ -649,7 +668,7 @@ def _base_select(plan: Plan, dialect: Dialect, base_cols: List[BaseCol],
         expand_shadow = expand[0] if expand[0] == expand[1] else None
     selects = [f"t0.{cname}" for cname in left_input.cols
                if cname not in computed and cname != expand_shadow]
-    for j in plan.joins:
+    for j in joins:
         inp = plan.inputs[j.index]
         for cname in inp.cols:
             selects.append(f"t{j.index}.{cname} AS __j{j.index}_{cname}")
@@ -663,7 +682,7 @@ def _base_select(plan: Plan, dialect: Dialect, base_cols: List[BaseCol],
             selects.append(f"{t.expr(p_expr)} AS __partition_col_{idx}")
 
     froms = [f"{left_table} t0"]
-    for j in plan.joins:
+    for j in joins:
         on_sql = t.expr(j.on)
         kind = JOIN_SQL[j.kind]
         if j.kind in ("anti", "semi") and not t.dialect.supports_anti_semi:
@@ -710,46 +729,64 @@ def _union_cast(dialect: Dialect, t: StrataType) -> str:
 
 def _setop_base(plan: Plan, dialect: Dialect,
                 upstream_prefix: str = "v_") -> Tuple[List[str], str]:
-    """(extra_ctes, base_body) for a model combining rows with a set operation.
+    """(extra_ctes, base_body) for a model combining rows with set operations.
 
-    The left branch is the model's own base query (filters and lets before
-    the set-op live there); the right branch projects the upstream model's
-    view with positional casts to the unified types. Both branches spell the
-    same column aliases in the same order, so by-name (DuckDB) and
-    by-position (everywhere else) matching agree. Lets and filters after the
-    set-op compile against the combined rows through a `t0`-aliased union
-    subquery, so _RAW qualified references keep resolving unchanged.
+    The left branch is the model's own base query (filters, lets and joins
+    before the chain live there); each right branch projects an upstream
+    model's view with positional casts to the unified types, and the chain
+    folds left so associations match every engine's set-op precedence. All
+    branches spell the same column aliases in the same order, so by-name
+    (DuckDB) and by-position (everywhere else) matching agree. Lets, filters
+    and joins after the chain compile against the combined rows through a
+    `t0`-aliased union subquery, so _RAW qualified references keep resolving
+    unchanged.
     """
-    op, all_, right_node = plan.set_op
     t = Translator(plan, _RAW, dialect=dialect)
+    op_sql = {"union": lambda all_: "UNION ALL" if all_ else "UNION",
+              "intersect": lambda _: "INTERSECT",
+              "except": lambda _: "EXCEPT"}
     left_q = _base_select(plan, dialect, plan.base_cols[:plan.setop_base_split],
-                          plan.preds[:plan.setop_pred_split], upstream_prefix)
+                          plan.preds[:plan.setop_pred_split], upstream_prefix, joins=[])
 
     def branch(alias: str, table: str, idx: int) -> str:
         parts = []
-        for name, left_t, right_t, unified in plan.setop_cols:
-            side_t = (left_t, right_t)[idx]
+        for name, types, unified in plan.setop_cols:
+            side_t = types[idx]
             ref = f"{alias}.{name}"
             parts.append(ref if side_t == unified
                          else f"CAST({ref} AS {_union_cast(dialect, unified)})")
         return "SELECT " + ", ".join(parts) + f" FROM {table}"
 
-    left_branch = branch("b_left", "b_left", 0)
-    right_table = f"{upstream_prefix}{right_node}"  # the right side is always a model
-    right_branch = branch(right_table, right_table, 1)
-    op_sql = {"union": "UNION ALL" if all_ else "UNION",
-              "intersect": "INTERSECT", "except": "EXCEPT"}[op]
-    union_q = f"{left_branch}\n{op_sql}\n{right_branch}"
+    chain = branch("b_left", "b_left", 0)
+    for i, (op, all_, right_node) in enumerate(plan.set_ops):
+        right_table = f"{upstream_prefix}{right_node}"  # right sides are always models
+        right_branch = branch(right_table, right_table, i + 1)
+        chain = f"(\n{chain}\n{op_sql[op](all_)}\n{right_branch}\n)"
 
     post_lets = [bc for bc in plan.base_cols[plan.setop_base_split:] if bc.expr is not None]
     post_preds = plan.preds[plan.setop_pred_split:]
-    if not post_lets and not post_preds:
-        return [f"b_left AS (\n{left_q}\n)"], union_q
+    post_joins = list(plan.joins)  # in a set model every join comes after the chain
+    if not post_lets and not post_preds and not post_joins:
+        return [f"b_left AS (\n{left_q}\n)"], chain
     shadowed = {bc.name for bc in post_lets}
-    inner = ", ".join(n for n, _, _, _ in plan.setop_cols if n not in shadowed)
+    sel = ", ".join(f"t0.{n} AS {n}" for n, _, _ in plan.setop_cols if n not in shadowed)
     lets = ", ".join(f"{t.expr(bc.expr)} AS {bc.name}" for bc in post_lets)
-    sel = inner + (", " + lets if lets else "")
-    base_body = f"SELECT {sel}\nFROM (\n{union_q}\n) t0"
+    if lets:
+        sel += ", " + lets
+    froms = [f"{chain} t0"]
+    for j in post_joins:
+        inp = plan.inputs[j.index]
+        kind = JOIN_SQL[j.kind]
+        if j.kind in ("anti", "semi") and not t.dialect.supports_anti_semi:
+            raise RuntimeError(f"dialect {t.dialect.name!r} cannot express "
+                               f"ANTI/{j.kind.upper()} JOIN "
+                               f"(emit NOT EXISTS/EXISTS instead via an "
+                               f"equivalent pipeline)")
+        jtable = f"{upstream_prefix}{inp.node}" if not inp.is_source else inp.node
+        froms.append(f"{kind} {jtable} t{j.index} ON {t.expr(j.on)}")
+        for cname in inp.cols:
+            sel += f", t{j.index}.{cname} AS __j{j.index}_{cname}"
+    base_body = "SELECT " + sel + "\nFROM " + "\n  ".join(froms)
     if post_preds:
         base_body += "\nWHERE " + " AND ".join(t.expr(p) for p in post_preds)
     return [f"b_left AS (\n{left_q}\n)"], base_body
@@ -759,7 +796,7 @@ def gen_base_subquery(plan: Plan, dialect: Dialect = DUCKDB,
                       upstream_prefix: str = "v_") -> Tuple[List[str], str]:
     """Content of the `base` CTE plus any sibling CTEs it needs (set models
     need `b_left` for their left branch): returns (extra_ctes, base_body)."""
-    if plan.set_op is None:
+    if not plan.set_ops:
         return [], _base_select(plan, dialect, plan.base_cols, plan.preds, upstream_prefix)
     return _setop_base(plan, dialect, upstream_prefix)
 
@@ -782,12 +819,34 @@ def gen_outer(plan: Plan, dialect: Dialect = DUCKDB) -> str:
     for out in plan.outputs:
         sql = t.expr(out.expr)
         parts.append(f"{sql} AS {out.name}")
-    sql = "SELECT " + ("DISTINCT " if plan.distinct else "") + ", ".join(parts) + "\nFROM base"
-    if plan.grouped:
-        if plan.group_exprs:
+    parts_text = ", ".join(parts)
+    if plan.dedup_keys:
+        # Deterministic keep-one-row-per-key: ROW_NUMBER partitioned by the
+        # keys and ordered by the remaining output columns, rn = 1. The inner
+        # query computes the outputs once; the outer one selects those alias
+        # columns (re-applying the expressions would reference columns that
+        # `t` does not expose). Validated at analysis, so keys and any sort
+        # columns are output columns.
+        key_names = {k.name for k in plan.dedup_keys}
+        others = [o.name for o in plan.outputs if o.name not in key_names]
+        over = "PARTITION BY " + ", ".join(k.name for k in plan.dedup_keys)
+        if others:
+            over += " ORDER BY " + ", ".join(others)
+        rn = f"ROW_NUMBER() OVER ({over}) AS __rn"
+        sql = "SELECT " + parts_text + ", " + rn + "\nFROM base"
+        if plan.grouped and plan.group_exprs:
             sql += "\nGROUP BY " + ", ".join(t.expr(k) for k in plan.group_exprs)
-    if plan.having:
-        sql += "\nHAVING " + " AND ".join(t.expr(p) for p in plan.having)
+        if plan.having:
+            sql += "\nHAVING " + " AND ".join(t.expr(p) for p in plan.having)
+        outer_names = ", ".join(o.name for o in plan.outputs)
+        sql = "SELECT " + outer_names + "\nFROM (\n" + sql + "\n) t\nWHERE __rn = 1"
+    else:
+        sql = "SELECT " + ("DISTINCT " if plan.distinct else "") + parts_text + "\nFROM base"
+        if plan.grouped:
+            if plan.group_exprs:
+                sql += "\nGROUP BY " + ", ".join(t.expr(k) for k in plan.group_exprs)
+        if plan.having:
+            sql += "\nHAVING " + " AND ".join(t.expr(p) for p in plan.having)
     if plan.sorts:
         order = []
         for e, desc in plan.sorts:
