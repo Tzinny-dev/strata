@@ -51,10 +51,20 @@ wh.materialize("snap_abc_m", sql)
 
 ## Adaptación dbt
 
-`strata/importdbt.py` ya provee `import_dbt_schema()` que traduce
-un esquema dbt a una declaración `source`. No reimplementa
-transformaciones dbt (eso es proyecto para una herramienta de
-migración dedicada).
+`strata/importdbt.py` provee `import_dbt_schema()` (traduce el esquema
+dbt — sources y contratos de columnas de los modelos — a un artefacto
+`.strata` determinista) y, con `strata import-dbt schema.yml --models
+models/`, `import_dbt_project()` traduce además cada modelo `.sql` a su
+cuerpo Strata. El subconjunto traducible en el paso 1 es de **una sola
+tabla**: `SELECT` de columnas/alias + `count/sum/avg/min/max`, `WHERE`
+de columna-vs-literal con `IS [NOT] NULL` y `AND`, y `GROUP BY` sobre
+esas agregaciones. Todo lo demás (joins, CTEs, macros, `select *`,
+`ORDER BY`, `LIMIT`, `DISTINCT`, expresiones calculadas) es **E042
+fail-loud** — la filosofía de no adivinar: un modelo que no traduce, no
+se importa con una versión aproximada. Contratos `not_null` solo se
+emiten si la nulabilidad es demostrable en Strata (un `filter` no
+refina nulabilidad todavía: el `nonnull` tiene que venir del upstream o
+de un `coalesce`).
 
 ## WASM/playground
 

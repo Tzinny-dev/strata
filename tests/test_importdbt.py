@@ -126,5 +126,201 @@ class TestImportDbt(unittest.TestCase):
             self.assertIn("gross_amount_usd = gross_amount_usd,", art)
 
 
+PROJECT_SCHEMA = """\
+version: 2
+sources:
+  - name: crm
+    schema: prod
+    tables:
+      - name: orders
+        columns:
+          - name: order_id
+            data_type: bigint
+            tests: [not_null]
+          - name: country
+            data_type: string
+            tests: [not_null]
+          - name: gross
+            data_type: numeric
+          - name: order_day
+            data_type: date
+            tests: [not_null]
+models:
+  - name: int_clean
+    depends_on: [orders]
+    columns:
+      - name: order_id
+        data_type: bigint
+        tests: [not_null]
+      - name: country
+        data_type: string
+        tests: [not_null]
+      - name: gross
+        data_type: numeric
+      - name: order_day
+        data_type: date
+        tests: [not_null]
+  - name: daily
+    depends_on: [int_clean]
+    columns:
+      - name: country
+        data_type: string
+        tests: [not_null]
+      - name: order_day
+        data_type: date
+        tests: [not_null]
+      - name: total
+        data_type: numeric
+      - name: n
+        data_type: bigint
+"""
+
+INT_CLEAN_SQL = """\
+{{
+  config(materialized='table')
+}}
+SELECT
+  order_id,
+  country,
+  gross,
+  order_day
+FROM {{ source('crm', 'orders') }}
+WHERE order_id > 0
+"""
+
+DAILY_SQL = """\
+SELECT
+  country,
+  order_day,
+  SUM(gross) AS total,
+  COUNT(*)    AS n
+FROM {{ ref('int_clean') }}
+WHERE country IS NOT NULL
+  AND order_day IS NOT NULL
+GROUP BY country, order_day
+"""
+
+
+def _run_project_import(tmp: Path, sql_map, schema=PROJECT_SCHEMA,
+                        output="imported.strata"):
+    """sql_map: name -> .sql text; a None value omits that model's .sql file."""
+    (tmp / "schema.yml").write_text(schema)
+    models = tmp / "models"
+    models.mkdir(exist_ok=True)
+    defaults = {"int_clean": INT_CLEAN_SQL, "daily": DAILY_SQL}
+    for model_dir in ("int_clean", "daily"):
+        text = sql_map.get(model_dir) if model_dir in sql_map else defaults[model_dir]
+        if text is not None:
+            (models / f"{model_dir}.sql").write_text(text)
+    err = io.StringIO()
+    with redirect_stderr(err):
+        code = cli.main(["import-dbt", str(tmp / "schema.yml"),
+                         "--models", str(models), "--output", str(tmp / output)])
+    return code, err.getvalue()
+
+
+class TestImportDbtTransform(unittest.TestCase):
+    def test_transform_imports_and_builds_green(self):
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {})
+            self.assertEqual(code, 0, err)
+            art = (Path(d) / "imported.strata").read_text()
+            self.assertIn("filter order_id > 0", art)
+            self.assertIn("filter not (country == null) and not (order_day == null)", art)
+            self.assertIn("group { country, order_day } (", art)
+            self.assertIn("aggregate { total = sum(gross), n = count(*) }", art)
+            tmp = Path(d) / "built.strata"
+            tmp.write_text(art)
+            herr = io.StringIO()
+            with redirect_stderr(herr):
+                bcode = cli.main(["build", str(tmp)])
+            self.assertEqual(bcode, 0, f"translated artifact must pass build: {herr.getvalue()}")
+
+    def test_transform_is_deterministic_byte_identical(self):
+        with __import__("tempfile").TemporaryDirectory() as d:
+            c1, _ = _run_project_import(Path(d), {}, output="a.strata")
+            c2, _ = _run_project_import(Path(d), {}, output="b.strata")
+            self.assertEqual((c1, c2), (0, 0))
+            self.assertEqual((Path(d) / "a.strata").read_text(),
+                             (Path(d) / "b.strata").read_text())
+
+    def test_transform_fail_loud_join(self):
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {
+                "daily": "SELECT a.country, SUM(b.gross) AS g\n"
+                         "FROM orders a JOIN orders b ON a.id = b.id\n"
+                         "GROUP BY a.country"})
+            self.assertEqual(code, 1)
+            self.assertIn("E042", err)
+            self.assertIn("JOIN", err)
+            self.assertFalse((Path(d) / "imported.strata").exists())
+
+    def test_transform_fail_loud_select_star(self):
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {"int_clean": "SELECT * FROM orders"})
+            self.assertEqual(code, 1)
+            self.assertIn("E042", err)
+            self.assertIn("SELECT *", err)
+
+    def test_transform_fail_loud_macro(self):
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {
+                "daily": '{{ dbt_utils.date_spine(datepart="day") }}'})
+            self.assertEqual(code, 1)
+            self.assertIn("E042", err)
+            self.assertIn("macro", err)
+
+    def test_transform_fail_loud_order_by(self):
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {
+                "daily": "SELECT country FROM orders ORDER BY country"})
+            self.assertEqual(code, 1)
+            self.assertIn("E042", err)
+            self.assertIn("ORDER", err)
+
+    def test_transform_fail_loud_unknown_ref(self):
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {
+                "daily": "SELECT order_id FROM {{ ref('no_such_model') }}"})
+            self.assertEqual(code, 1)
+            self.assertIn("E042", err)
+            self.assertIn("no_such_model", err)
+
+    def test_transform_fail_loud_aggregate_without_alias(self):
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {
+                "daily": "SELECT country, SUM(gross) FROM orders GROUP BY country"})
+            self.assertEqual(code, 1)
+            self.assertIn("E042", err)
+            self.assertIn("alias", err)
+
+    def test_transform_fail_loud_sql_without_schema_contract(self):
+        with __import__("tempfile").TemporaryDirectory() as d:
+            (Path(d) / "schema.yml").write_text(PROJECT_SCHEMA)
+            models = Path(d) / "models"
+            models.mkdir()
+            (models / "int_clean.sql").write_text(INT_CLEAN_SQL)
+            (models / "daily.sql").write_text(DAILY_SQL)
+            (models / "lonely.sql").write_text("SELECT country FROM orders")
+            err = io.StringIO()
+            with redirect_stderr(err):
+                code = cli.main(["import-dbt", str(Path(d) / "schema.yml"),
+                                 "--models", str(models),
+                                 "--output", str(Path(d) / "imported.strata")])
+            self.assertEqual(code, 1)
+            self.assertIn("E042", err.getvalue())
+            self.assertIn("lonely", err.getvalue())
+            self.assertFalse((Path(d) / "imported.strata").exists())
+
+    def test_transform_model_without_sql_needs_depends_on(self):
+        schema = PROJECT_SCHEMA.replace("    depends_on: [int_clean]\n", "")
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {"daily": None},
+                                            schema=schema)
+            self.assertEqual(code, 1)
+            self.assertIn("E041", err)
+            self.assertFalse((Path(d) / "imported.strata").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -570,14 +570,25 @@ def _run_seed(con: Any, path: str) -> None:
 def cmd_import_dbt(args: argparse.Namespace) -> int:
     """Import a dbt schema.yml (sources + models with column contracts) into a
     deterministic .strata artifact via strata/importdbt.py (E041 fail-loud §4
-    / §11: a dbt model doing  with no columns cannot be imported — the
-    warehouse owns the types)."""
-    from strata.importdbt import import_dbt_schema, ImportFailedFailLoud
+    / §11: a dbt model doing `select *` with no columns cannot be imported — the
+    warehouse owns the types). With `--models DIR`, each `models/*.sql` model is
+    translated into the Strata model body (single-table SELECT/WHERE/GROUP BY
+    subset; anything else is E042 fail-loud, nothing emitted)."""
+    from strata.importdbt import import_dbt_schema, import_dbt_project
+    from strata.importdbt import ImportFailedFailLoud, TransformFailLoud
     path = Path(args.file)
+    model_dir = getattr(args, "models", None)
     try:
-        artifact = import_dbt_schema(path)
+        if model_dir:
+            artifact = import_dbt_project(path, Path(model_dir))
+        else:
+            artifact = import_dbt_schema(path)
+    except TransformFailLoud as e:
+        print(str(e), file=sys.stderr)
+        return 1
     except ImportFailedFailLoud as e:
-        print(f"E041: {e}", file=sys.stderr)
+        msg = str(e)
+        print(msg if msg.startswith("E041:") else f"E041: {msg}", file=sys.stderr)
         return 1
     out = Path(getattr(args, 'output', None) or (path.parent / path.stem).with_suffix('.strata'))
     out.write_text(artifact)
@@ -1187,8 +1198,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("target", nargs="?", default=".")
     p.set_defaults(fn=cmd_init)
 
-    p = sub.add_parser("import-dbt", help="import a dbt schema.yml into a .strata artifact")
+    p = sub.add_parser("import-dbt", help="import a dbt schema.yml (and model .sql transforms with --models) into a .strata artifact")
     p.add_argument("file", metavar="schema.yml", help="dbt schema.yml (sources + models with columns)")
+    p.add_argument("--models", metavar="DIR", default=None,
+                   help="dbt models/ dir: translate each *.sql into the Strata model "
+                        "body (single-table select/where/group-by subset; "
+                        "out-of-subset SQL fails loud E042)")
     p.add_argument("--output", help="output .strata path (default: alongside the schema.yml)")
     p.set_defaults(fn=cmd_import_dbt)
     p = sub.add_parser("seed", help="load demo source fixtures into a warehouse (duckdb required)")
