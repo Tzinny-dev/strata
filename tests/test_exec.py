@@ -1,3 +1,5 @@
+import contextlib
+import io
 import os
 import tempfile
 import unittest
@@ -69,6 +71,43 @@ class TestExec(unittest.TestCase):
         self.assertEqual(rc, 0)
         rc_bad = cmd_check(SimpleNamespace(file=path, dialect="oracle"))
         self.assertEqual(rc_bad, 4)
+
+    def test_graph_subcommand(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "m.strata")
+        Path(path).write_text(
+            'source orders(ns:"n", dataset:"orders") { columns: { id: int64, v: int64 } }\n'
+            'model a { from orders  filter v > 0 }\n'
+            'model b { from a  select { id = id, v = v * 2 } }\n'
+        )
+        from strata.cli import cmd_graph
+        from types import SimpleNamespace
+        for fmt in ("dot", "mermaid", "text"):
+            import io, contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cmd_graph(SimpleNamespace(file=path, model=[], format=fmt, search_dir=None))
+            self.assertEqual(rc, 0, f"fmt={fmt}")
+            out = buf.getvalue()
+            self.assertIn("orders", out)
+            self.assertIn("a", out)
+            self.assertIn("b", out)
+
+    def test_init_subcommand(self):
+        from types import SimpleNamespace
+        from strata.cli import cmd_init
+        d = tempfile.mkdtemp()
+        first = io.StringIO()
+        with contextlib.redirect_stdout(first):
+            rc = cmd_init(SimpleNamespace(target=d, codex=False, claude=False))
+        self.assertEqual(rc, 0)
+        text = Path(d, "AGENTS.md").read_text()
+        self.assertIn("## Transform command contract (fails loud, see §7 E030)", text)
+        # Deterministic: a second run produces byte-identical output.
+        second = io.StringIO()
+        with contextlib.redirect_stdout(second):
+            cmd_init(SimpleNamespace(target=d, codex=False, claude=False))
+        self.assertEqual(Path(d, "AGENTS.md").read_text(), text)
 
     def test_seed_autonomous_subcommand(self):
         import duckdb

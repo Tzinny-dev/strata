@@ -261,7 +261,7 @@ def check(fn: Fn, args: List[Inf], has_star: bool = False) -> Optional[Tuple[str
         return _check_if(fn, args)
     if fn.name == "case":
         return _check_case(fn, args)
-    if fn.name in ("array_construct", "array_contains", "array_concat",
+    if fn.name in ("array_construct", "list", "array_contains", "array_concat",
                    "array_append", "array_prepend", "array_remove",
                    "array_index_of", "array_sort"):
         return _check_array_operation(fn, args)
@@ -360,9 +360,9 @@ def _check_array_operation(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]
         if needle.t not in (base.elem, UNKNOWN):
             return E_ARG_TYPE, f"{fn.name}() needle type {needle.t} does not match array element {base.elem}"
         return None
-    if fn.name in ("array_construct", "array_contains", "array_concat"):
+    if fn.name in ("array_construct", "list", "array_contains", "array_concat"):
         known = [a.t for a in args if a.t != UNKNOWN]
-        if fn.name == "array_construct":
+        if fn.name in ("array_construct", "list"):
             if not known or not _valid_elem(known[0]) or any(t != known[0] for t in known):
                 return E_ARG_TYPE, "array_construct() requires homogeneous elements of a supported type and at least one known type"
         else:
@@ -474,6 +474,14 @@ FUNCTIONS: List[Fn] = [
     Fn("startswith", 2, lambda a: Inf(BOOL, any(i.nullable for i in a)), max_args=2,
        kind="string", ret_label="bool",
        doc="true when arg 1 starts with arg 2 (nullable if any argument is)"),
+    Fn("like", 2, lambda a: Inf(BOOL, any(i.nullable for i in a)), max_args=2,
+       kind="string", ret_label="bool",
+       doc="SQL LIKE pattern match, case-sensitive, with % and _ wildcards; "
+           "a NULL value or pattern returns NULL"),
+    Fn("rlike", 2, lambda a: Inf(BOOL, any(i.nullable for i in a)), max_args=2,
+       kind="string", ret_label="bool",
+       doc="regular-expression match (the engine's documented regexp subset); "
+           "a NULL value or pattern returns NULL"),
     Fn("split_part", 3, lambda a: Inf(STRING, a[0].nullable), max_args=3, kind="string",
        arg_kinds=("string", "string", "int"),
        doc="arg 1 split by arg 2, part arg 3 (1-based; 0/out-of-range = empty string)"),
@@ -487,6 +495,9 @@ FUNCTIONS: List[Fn] = [
        doc="last arg 2 characters of arg 1"),
     Fn("array_construct", 1, lambda a: Inf(_constructed_type(a), False),
        collection=True, doc="homogeneous scalar array; NULL elements preserved, at least one typed element"),
+    Fn("list", 1, lambda a: Inf(_constructed_type(a), False),
+       collection=True, doc="alias of array_construct: homogeneous scalar array; "
+                            "at least one typed element"),
     Fn("array_contains", 2, lambda a: Inf(BOOL, any(i.nullable for i in a)),
        max_args=2, collection=True,
        doc="membership by scalar equality; NULL array or needle returns NULL; NULL elements do not match"),

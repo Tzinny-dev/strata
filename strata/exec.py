@@ -1163,6 +1163,7 @@ def _frozen_materialize(con: Any, project: Project, tms: Dict[str, TypedModel],
                         entry: dict,
                         source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
                         expected_sources: Optional[Dict[str, str]] = None,
+                        dialect: Dialect = DUCKDB,
                         module_path: Optional[str] = None) -> None:
     """Capture inputs and publish outputs in the same DuckDB transaction.
 
@@ -1197,7 +1198,7 @@ def _frozen_materialize(con: Any, project: Project, tms: Dict[str, TypedModel],
         order = _dep_order(tms, entry["names"])
         used = {inp.node for n in order for inp in tms[n].plan.inputs if inp.is_source}
         applied, pins = materialize(
-            con, project, tms, entry["names"],
+            con, project, tms, entry["names"], dialect=dialect,
             source_overrides={n: v for n, v in frozen.items() if n in used},
             branch=entry["branch"], run_id=rid, manage_transaction=False)
         entry["input_snapshots"] = inputs
@@ -1434,6 +1435,7 @@ def _run_locked(con: Any, project: Project, tms: Dict[str, TypedModel], module_p
     else:
         applied, pins, rid = _frozen_materialize(con, project, tms, entry,
                                                  source_overrides,
+                                                 dialect=dialect,
                                                  module_path=module_path)
     entry["applied"] = applied
     entry["pins"] = pins
@@ -1520,7 +1522,8 @@ def _execute_run_locked(con: Any, project: Project, tms: Dict[str, TypedModel],
     }
     applied, pins, rid = _frozen_materialize(
         con, project, tms, entry, frozen,
-        expected_sources=e.get("source_fingerprints"), module_path=module_path)
+        expected_sources=e.get("source_fingerprints"),
+        dialect=get_dialect(entry["dialect"]), module_path=module_path)
     recover_metadata(con, module_path)
     return applied, pins, e
 

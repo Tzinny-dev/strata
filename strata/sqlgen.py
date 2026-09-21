@@ -151,6 +151,17 @@ class Translator:
                 part = self.expr(e.args[2])
                 return (f"SPLIT({self.expr(e.args[0])}, {self.expr(e.args[1])})"
                         f"[SAFE_OFFSET({part} - 1)]")
+            if name == "like":
+                return f"({self.expr(e.args[0])} LIKE {self.expr(e.args[1])})"
+            if name == "rlike":
+                s, pat = self.expr(e.args[0]), self.expr(e.args[1])
+                if self.dialect.name == "duckdb":
+                    return f"REGEXP_MATCHES({s}, {pat})"
+                if self.dialect.name == "postgres":
+                    return f"({s} ~ {pat})"
+                if self.dialect.name == "bigquery":
+                    return f"REGEXP_CONTAINS({s}, {pat})"
+                return f"REGEXP_LIKE({s}, {pat})"
             if functions.get(name) is None:
                 raise RuntimeError(
                     f"dialect {self.dialect.name!r} cannot express function {name}()"
@@ -224,7 +235,7 @@ class Translator:
             return f"ARRAY_AGG({arg}) FILTER (WHERE {arg} IS NOT NULL)"
 
         # --- array_construct: homogeneous typed array literal ---
-        if name == "array_construct":
+        if name == "array_construct" or name == "list":
             target = _elem_target(self.dialect, base_t.elem)
             # Cast each element, including NULL, so warehouse inference cannot
             # disagree with the homogeneous Strata element type.

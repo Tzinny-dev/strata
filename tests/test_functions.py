@@ -202,7 +202,7 @@ class TestStringFunctions(unittest.TestCase):
         self.assertLessEqual(
             {"length", "substring", "trim", "ltrim", "rtrim", "replace",
              "lpad", "rpad", "startswith", "split_part", "regexp_replace",
-             "left", "right"}, names)
+             "left", "right", "like", "rlike"}, names)
 
     def test_string_arity_is_checked(self):
         for call in ("length()", "length(a, b)", "trim(a, b)", "ltrim(a, b)",
@@ -211,7 +211,8 @@ class TestStringFunctions(unittest.TestCase):
                      "split_part(a, b)", "split_part(a, \"-\", 2, 4)",
                      "regexp_replace(a, b)", "left(a)", "left()",
                      "right(a)", "right()", "substring(a)",
-                     "substring(a, 1, 2, 3)"):
+                     "substring(a, 1, 2, 3)", "like(a)", "like()",
+                     "rlike(a)", "rlike()"):
             with self.subTest(call=call):
                 self.assertEqual(
                     error("model m { from s\n  select { x = "
@@ -224,7 +225,9 @@ class TestStringFunctions(unittest.TestCase):
                      "startswith(n, \"x\")", "startswith(a, n)",
                      "split_part(a, n, 2)", "split_part(a, \"-\", b)",
                      "regexp_replace(a, n, \"x\")", "left(n, 2)",
-                     "left(a, b)", "right(n, 2)", "right(a, b)"):
+                     "left(a, b)", "right(n, 2)", "right(a, b)",
+                     "like(n, \"x\")", "like(a, n)", "rlike(n, \"x\")",
+                     "rlike(a, n)"):
             with self.subTest(call=call):
                 self.assertEqual(
                     error("model m { from s\n  select { x = "
@@ -246,10 +249,13 @@ class TestStringFunctions(unittest.TestCase):
                    "    lf = left(a, 3),\n"
                    "    rg = right(a, 3),\n"
                    "    tr = trim(a),\n"
+                   "    lk = like(a, \"or%\"),\n"
+                   "    rl = rlike(a, \"^o\"),\n"
                    "  }")
         for name, want in (("l", "int64"), ("s2", "string"), ("sw", "bool"),
                            ("sp", "string"), ("lf", "string"),
-                           ("rg", "string"), ("tr", "string")):
+                           ("rg", "string"), ("tr", "string"),
+                           ("lk", "bool"), ("rl", "bool")):
             with self.subTest(col=name):
                 self.assertEqual(str(tm.schema[name].t), want)
                 self.assertTrue(tm.schema[name].nullable)
@@ -290,6 +296,20 @@ class TestStringFunctions(unittest.TestCase):
         self.assertIn("LPAD(a, 2, 'x')",
                       sql_of("  select { p = lpad(a, 2, \"x\") }", dialect=DUCKDB))
 
+    def test_like_rlike_spelling_by_dialect(self):
+        for d in (DUCKDB, POSTGRES, BIGQUERY, SNOWFLAKE):
+            with self.subTest(dialect=d.name):
+                text = "  select {\n    a1 = like(a, \"or%\"),\n    r1 = rlike(a, \"^o\"),\n  }"
+                sql = sql_of(text, dialect=d)
+                self.assertIn("(a LIKE 'or%')", sql)
+        self.assertIn("REGEXP_MATCHES(a, '^o')",
+                      sql_of("  select { r1 = rlike(a, \"^o\") }", DUCKDB))
+        self.assertIn("(a ~ '^o')", sql_of("  select { r1 = rlike(a, \"^o\") }", POSTGRES))
+        self.assertIn("REGEXP_CONTAINS(a, '^o')",
+                      sql_of("  select { r1 = rlike(a, \"^o\") }", BIGQUERY))
+        self.assertIn("REGEXP_LIKE(a, '^o')",
+                      sql_of("  select { r1 = rlike(a, \"^o\") }", SNOWFLAKE))
+
     def test_direct_emit_sql_paths(self):
         # No-dialect path: SPLIT_PART is the catalog default.
         self.assertEqual(functions.emit_sql("split_part", "x, d, 2", None),
@@ -329,6 +349,8 @@ class TestStringExecutionDuckDB(unittest.TestCase):
             '    trimmed = trim("  " || country || "  "),\n'
             '    es      = startswith(country, "ES"),\n'
             '    missing = split_part(country, "|", 3),\n'
+            '    lk      = like(country, "E%"),\n'
+            '    rl      = rlike(country, "^E"),\n'
             '  }\n'
             '}\n')
         Path(path).write_text(text)
@@ -340,7 +362,7 @@ class TestStringExecutionDuckDB(unittest.TestCase):
         tms = Checker(proj).check_all()
         ex.materialize(con, proj, tms, names=["w"])
         rows = con.execute(
-            "SELECT tag, code, head, tail, trimmed, es, missing "
+            "SELECT tag, code, head, tail, trimmed, es, missing, lk, rl "
             "FROM v_w ORDER BY code").fetchall()
         self.assertEqual(len(rows), 4)  # CO test row filtered
         first = rows[0]                 # order 1: ES, 120.00
@@ -352,7 +374,11 @@ class TestStringExecutionDuckDB(unittest.TestCase):
         self.assertTrue(first[5])
         # part 3 of a 1-part split: empty string (SPLIT_PART semantics)
         self.assertEqual(first[6], "")
+        self.assertTrue(first[7])       # ES matches LIKE 'E%'
+        self.assertTrue(first[8])       # ES matches regexp ^E
         self.assertFalse(rows[3][5])    # BR row
+        self.assertFalse(rows[3][7])
+        self.assertFalse(rows[3][8])
 
 
 if __name__ == "__main__":

@@ -88,6 +88,24 @@ class TestExecPostgres(unittest.TestCase):
         applied2, pins2, note2 = self._run(path, proj, tms, only_stale=True)
         self.assertEqual(applied2, [])
 
+    def test_like_rlike_run_on_postgres(self):
+        text = ('source s(ns: "n", dataset: "s") {\n'
+                '  columns: { id: int64 nonnull, country: string nonnull }\n'
+                '}\n'
+                'model m {\n'
+                '  from s\n'
+                '  select { id = id, lk = like(country, "E%"), '
+                'rl = rlike(country, "^E") }\n'
+                '}\n')
+        path = write_module(self.d, text)
+        proj, tms = build(text, path)
+        self.con.execute("CREATE TABLE s (id BIGINT, country TEXT)")
+        self.con.execute("INSERT INTO s VALUES (1, 'ES'), (2, 'BR')")
+        self._run(path, proj, tms)
+        rows = self.con.execute(
+            "SELECT id, lk, rl FROM v_m ORDER BY id").fetchall()
+        self.assertEqual(rows, [(1, True, True), (2, False, False)])
+
     def test_physical_schema_pin_fails_without_publishing(self):
         path = write_module(self.d, MODEL_TEXT)
         proj, tms = build(MODEL_TEXT, path)

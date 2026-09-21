@@ -22,6 +22,8 @@ class TestArrayOperations(unittest.TestCase):
             ('array_contains(ys, "x")', 'bool', False),
             ('array_contains(ys, null)', 'bool', True),
             ('array_get(array_construct(1, 2), 0)', 'int64', True),
+            ('list(1, n, null)', 'array<int64>', False),
+            ('list("x", key)', 'array<string>', False),
         ]
         for expr, typ, nullable in cases:
             with self.subTest(expr=expr):
@@ -40,6 +42,8 @@ class TestArrayOperations(unittest.TestCase):
             'array_contains(js, doc)': 'E063', 'array_contains(null, 1)': 'E063',
             'array_contains(xs, 1.0)': 'E063',
             'array_construct(1) over ()': 'E065',
+            'list()': 'E062', 'list(null)': 'E063',
+            'list(1, "x")': 'E063', 'list(1, 1.0)': 'E063',
         }
         for expr, code in cases.items():
             with self.subTest(expr=expr), self.assertRaises(analysis.StrataError) as cm:
@@ -68,6 +72,7 @@ model m -> contract c { from s
                 (SNOWFLAKE, 'ARRAY_CONSTRUCT(', 'ARRAY_CONTAINS(TO_VARIANT(', 'ARRAY_CAT')]:
             with self.subTest(dialect=d.name):
                 self.assertIn(construct, sqlgen.model_sql(model('array_construct(1, n, null)'), d))
+                self.assertIn(construct, sqlgen.model_sql(model('list(1, n, null)'), d))
                 sql = sqlgen.model_sql(model('array_contains(xs, n)'), d)
                 self.assertIn(contains, sql)
                 self.assertIn('IS NULL OR (n) IS NULL THEN NULL', sql)

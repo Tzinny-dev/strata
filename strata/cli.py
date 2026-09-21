@@ -1,6 +1,6 @@
 """strata -- command line interface.
 
-One binary: build / plan / compile / run / lineage-diff / bench / grammar / dashboard / init / seed.
+One binary: build / plan / graph / compile / run / lineage-diff / bench / grammar / dashboard / init / seed.
 """
 from __future__ import annotations
 
@@ -585,6 +585,78 @@ def cmd_import_dbt(args: argparse.Namespace) -> int:
     return 0
 
 
+def render_graph(tms: Dict[str, TypedModel], names: List[str],
+                 fmt: str = "dot") -> str:
+    """DAG of the typed module: inputs (sources) plus models, with edges for
+    reads and model dependencies. Deterministic (sorted), machine-parsable
+    DOT by default; `mermaid` emits a Mermaid flowchart; `text` prints edges.
+    When a model subset is selected, upstream models and their sources are
+    pulled in so the slice is still a connected DAG."""
+    selected = set(names)
+    if selected != set(tms):
+        frontier = list(selected)
+        while frontier:
+            n = frontier.pop()
+            for d in tms[n].deps:
+                if d in tms and d not in selected:
+                    selected.add(d)
+                    frontier.append(d)
+    models = sorted(selected)
+    sources = sorted({inp.node for n in models
+                      for inp in tms[n].plan.inputs if inp.is_source})
+    deps = sorted({(d, n) for n in models for d in tms[n].deps
+                   if d in tms and d in selected})
+    reads = sorted({(s, n) for n in models for (s, _c) in tms[n].reads
+                    if s not in tms})
+
+    def q(name: str) -> str:
+        return '"' + name.replace('"', '\\"') + '"'
+
+    if fmt == "mermaid":
+        out = ["flowchart LR"]
+        for s in sources:
+            out.append(f'  {q(s)}[{q(s)}]')
+        for n in models:
+            out.append(f'  {q(n)}(( {n} ))')
+        for s, n in reads:
+            out.append(f"  {q(s)} --> {q(n)}")
+        for d, n in deps:
+            out.append(f"  {q(d)} --> {q(n)}")
+        return "\n".join(out)
+    if fmt == "text":
+        out = ["model graph (sources + models):"]
+        if sources:
+            out.append("  sources  " + ", ".join(sources))
+        for d, n in deps:
+            out.append(f"  {d} -> {n}")
+        for s, n in reads:
+            out.append(f"  source {s} -> {n}")
+        return "\n".join(out)
+    out = ["digraph strata {"]
+    for s in sources:
+        out.append(f'  {q(s)} [shape=box];')
+    for n in models:
+        out.append(f'  {q(n)} [shape=ellipse];')
+    for s, n in reads:
+        out.append(f"  {q(s)} -> {q(n)};")
+    for d, n in deps:
+        out.append(f"  {q(d)} -> {q(n)};")
+    out.append("}")
+    return "\n".join(out)
+
+
+def cmd_graph(args: argparse.Namespace) -> int:
+    """`strata graph <file> [--format dot|mermaid|text]`: DAG of the typed
+    module — sources plus models, edges for reads and model dependencies.
+    DOT by default (visualize with graphviz); `--format mermaid` emits a
+    Mermaid flowchart; `--format text` prints the edges. Fail-loud on module
+    errors, same gate as `strata build`."""
+    proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, "search_dir", None) else None))
+    tms = check(proj)
+    print(render_graph(tms, args.model or list(tms), fmt=args.format))
+    return 0
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     """`strata init <dir>`: scaffold a project — writing a deterministic AGENTS.md for Strata."""
     target = Path(args.target)
@@ -928,6 +1000,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "(self-pinning: identical re-runs see nothing stale)")
     p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
     p.set_defaults(fn=cmd_plan)
+
+    p = sub.add_parser("graph", help="emit the module DAG (DOT default)")
+    p.add_argument("file")
+    p.add_argument("model", nargs="*")
+    p.add_argument("--format", choices=["dot", "mermaid", "text"], default="dot",
+                   help="dot (graphviz) | mermaid flowchart | text edges")
+    p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
+    p.set_defaults(fn=cmd_graph)
 
     p = sub.add_parser("bench", help="golden-file artifacts: supervision + regression")
     p.add_argument("--update", action="store_true",

@@ -267,7 +267,12 @@ anidar ventanas.
 
 `upper`, `lower`, `concat`, `length`, `substring`, `trim`/`ltrim`/`rtrim`,
 `replace`, `lpad`/`rpad`, `startswith`, `split_part`, `regexp_replace`,
-`left`, `right`.
+`left`, `right`, `like`/`rlike`.
+
+`like(s, pattern)` es el `LIKE` de SQL (sensible a mayúsculas; `%` y `_`
+como comodines). `rlike(s, pattern)` es coincidencia con expresión
+regular (el subconjunto que documenta cada almacén). Ambas devuelven
+`bool` y devuelven `NULL` si alguno de los dos argumentos es `NULL`.
 
 ```strata
 source orders(ns: "crm", dataset: "orders") {
@@ -310,7 +315,8 @@ model m {
 `json_get`/`json_value` (clave literal simple o dinámica; búsqueda exacta
 de miembro, nunca ruta), `json_path` (JSONPath acotado a raíz `$` + pasos
 de miembro/índice), `json_build`, `array_length`, `array_get` (índice
-desde cero), `array_construct`, `array_concat`/`array_contains`/
+desde cero), `array_construct`, `list` (alias de `array_construct`),
+`array_concat`/`array_contains`/
 `array_append`/`array_prepend`/`array_remove`/`array_sort`/
 `array_index_of`, `array_agg`. Límites medidos por dialecto (BigQuery sin
 clave dinámica, Snowflake con sintaxis propia) en `docs/json-arrays.md`.
@@ -440,11 +446,13 @@ model m {
 
 Verificado que fallan (no es una omisión, es el estado real):
 
-- `like`/`rlike`: `filter country like "E%"` → `ERROR: unexpected token
-  'like' in model body` (ni siquiera es un error de tipos: el parser no
-  reconoce la palabra).
-- Constructores de colección `list`/`dict`/`map`: `list(1, 2, 3)` →
-  `E059: unknown function 'list'`.
+- Operadores `like`/`rlike` en condiciones: `filter country like "E%"`
+  → `ERROR: unexpected token 'like' in model body` (el parser no
+  reconoce la palabra). Sí existen en forma de **función**:
+  `like(country, "E%")` y `rlike(country, "^E")` (ambas devuelven bool).
+- Constructores tipados `dict`/`map`: `map(1, 2)`, `dict(...)`
+  → `E059: unknown function 'map'` (un `map(K, V)` tipado no existe aún).
+  Para listas homogéneas usa `list(...)`, alias de `array_construct(...)`.
 - Tipo `struct`: `meta: struct` en una columna → `E078: unknown type
   'struct'`.
 

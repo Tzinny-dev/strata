@@ -929,7 +929,7 @@ class _ModelState:
             # array_prepend's array is the second argument; json_build has no
             # array base (its type is the return type).  Everything else uses
             # args[0] as the collection base.
-            if name == "array_construct":
+            if name in ("array_construct", "list"):
                 base_t = fn.ret(args).t
             elif name == "json_build":
                 base_t = fn.ret(args).t
