@@ -22,6 +22,7 @@ Philosophy (§4 fail-loud, matches every other Strata gate):
 from __future__ import annotations
 
 import sys
+from argparse import Namespace
 from pathlib import Path
 
 import yaml
@@ -134,7 +135,7 @@ def import_dbt_schema(schema: Path) -> str:
     return "\n".join(out)
 
 
-def cmd(args) -> int:
+def cmd(args: Namespace) -> int:
     """CLI entry: `strata import-dbt schema.yml [--output artifact.strata]`.
     Returns 0 (artifact written) or 1 (E041 fail-loud, nothing emitted)."""
     path = Path(args.file)

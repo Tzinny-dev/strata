@@ -20,7 +20,7 @@ cluster), not guessed from documentation.
 """
 from __future__ import annotations
 
-from typing import Dict
+from typing import Any, Dict, List, Optional, Set
 
 from .types import StrataType
 
@@ -33,30 +33,30 @@ class PGConn:
     bind-marker in code this project controls, never user data reaching a
     query as text."""
 
-    def __init__(self, raw):
+    def __init__(self, raw: Any) -> None:
         raw.autocommit = False
         self.raw = raw
         self._cur = raw.cursor()
 
-    def execute(self, sql: str, params=None) -> "PGConn":
+    def execute(self, sql: str, params: Optional[Any] = None) -> "PGConn":
         """Run SQL (with `?` bind markers) and return self for chaining."""
         self._cur.execute(sql.replace("?", "%s"), params or None)
         return self
 
-    def fetchone(self):
+    def fetchone(self) -> Optional[tuple]:
         """Return the next result row, or None."""
         return self._cur.fetchone()
 
-    def fetchall(self):
+    def fetchall(self) -> List[tuple]:
         """Return all remaining result rows as a list."""
         return self._cur.fetchall()
 
-    def fetchmany(self, n: int):
+    def fetchmany(self, n: int) -> List[tuple]:
         """Return up to n remaining result rows."""
         return self._cur.fetchmany(n)
 
     @property
-    def description(self):
+    def description(self) -> Optional[Any]:
         """DB-API description of the most recent result set."""
         return self._cur.description
 
@@ -66,17 +66,17 @@ class PGConn:
         self.raw.close()
 
 
-def is_postgres(con) -> bool:
+def is_postgres(con: Any) -> bool:
     """True when `con` is a PGConn wrapper (Postgres), not a DuckDB connection."""
     return isinstance(con, PGConn)
 
 
-def db_schema(con) -> str:
+def db_schema(con: Any) -> str:
     """Default schema Strata's engine tables/views live in."""
     return "public" if is_postgres(con) else "main"
 
 
-def live_view_defs(con) -> Dict[str, str]:
+def live_view_defs(con: Any) -> Dict[str, str]:
     """{view_name: definition_text}, used only for substring/regex search
     for a snapshot table name (see exec._current_snapshot_table,
     recover_metadata, protected_runs, gc_plan, gc_snapshots, run()).
@@ -111,7 +111,7 @@ _PG_ARRAY_ELEM = {
 }
 
 
-def physical_schema(con, view: str) -> Dict[str, str]:
+def physical_schema(con: Any, view: str) -> Dict[str, str]:
     """Actual physical column types of a live table/view, normalized into
     the same convention `physical_types()` below compares against.
 
@@ -153,7 +153,7 @@ _DUCKDB_INT64_PHYSICAL = {"BIGINT", "INTEGER", "HUGEINT"}
 _PG_INT64_PHYSICAL = {"BIGINT", "INTEGER"}
 
 
-def physical_types(con, t: StrataType) -> set:
+def physical_types(con: Any, t: StrataType) -> Set[str]:
     """Acceptable warehouse storage types for a declared Strata type,
     dialect-aware via the connection actually in use. Narrowing (e.g. a
     BIGINT column promised, VARCHAR/TEXT found) is never accepted

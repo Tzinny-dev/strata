@@ -19,7 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Tuple
 
-from .analysis import TypedModel, blast_radius, source_decl_cols
+from . import ast
+from .analysis import Project, TypedModel, blast_radius, source_decl_cols
 
 BREAKING_KINDS = ("removed", "retyped", "narrowed")
 
@@ -42,7 +43,7 @@ class ModelChange:
     columns: List[ColChange] = field(default_factory=list)
 
 
-def _contract_flags(c) -> str:
+def _contract_flags(c: ast.ContractField) -> str:
     bits = []
     if c.protected:
         bits.append("protected")
@@ -104,7 +105,7 @@ def diff_tms(base: Dict[str, TypedModel],
     return out
 
 
-def diff_projects(base_proj, head_proj) -> List[ModelChange]:
+def diff_projects(base_proj: Project, head_proj: Project) -> List[ModelChange]:
     """Full semantic diff: model outputs AND source (upstream catalog) schemas.
     Source schema changes are exactly the E030-32 story (types-and-contracts
     §5 phase B): a column that moved/narrowed upstream breaks every consumer.
@@ -189,7 +190,9 @@ def render(changes: List[ModelChange],
     return lines
 
 
-def to_json_dict(base_path: str, head_path: str, changes, radius) -> dict:
+def to_json_dict(base_path: str, head_path: str,
+                 changes: List[ModelChange],
+                 radius: List[Tuple[str, str]]) -> dict:
     """Machine-readable diff summary as a JSON-friendly dict."""
     brk = [c for mc in changes for c in mc.columns if c.breaking]
     return {

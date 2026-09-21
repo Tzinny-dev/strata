@@ -24,16 +24,16 @@ class Metric:
 class MetricsCollector:
     """Collects and exports metrics for Strata pipelines."""
 
-    def __init__(self, namespace: str = "strata"):
+    def __init__(self, namespace: str = "strata") -> None:
         self.namespace = namespace
         self.metrics: List[Metric] = []
         self._start_time: Optional[float] = None
 
-    def start_timer(self):
+    def start_timer(self) -> None:
         """Start a timer for duration metrics."""
         self._start_time = time.time()
 
-    def record_staleness_check(self, model: str, is_stale: bool, duration_ms: float):
+    def record_staleness_check(self, model: str, is_stale: bool, duration_ms: float) -> None:
         """Record a staleness check metric."""
         self.metrics.append(Metric(
             name=f"{self.namespace}_staleness_check_duration_ms",
@@ -48,7 +48,7 @@ class MetricsCollector:
             metric_type="counter",
         ))
 
-    def record_materialization(self, model: str, duration_ms: float, rows: int):
+    def record_materialization(self, model: str, duration_ms: float, rows: int) -> None:
         """Record a materialization metric."""
         self.metrics.append(Metric(
             name=f"{self.namespace}_materialization_duration_ms",
@@ -63,7 +63,7 @@ class MetricsCollector:
             metric_type="gauge",
         ))
 
-    def record_freshness_threshold(self, model: str, threshold_hours: float):
+    def record_freshness_threshold(self, model: str, threshold_hours: float) -> None:
         """Record a freshness threshold metric."""
         self.metrics.append(Metric(
             name=f"{self.namespace}_freshness_threshold_hours",
@@ -72,7 +72,7 @@ class MetricsCollector:
             metric_type="gauge",
         ))
 
-    def record_partition_count(self, model: str, count: int):
+    def record_partition_count(self, model: str, count: int) -> None:
         """Record a partition count metric."""
         self.metrics.append(Metric(
             name=f"{self.namespace}_partition_count",
@@ -81,7 +81,7 @@ class MetricsCollector:
             metric_type="gauge",
         ))
 
-    def record_error(self, model: str, error_type: str):
+    def record_error(self, model: str, error_type: str) -> None:
         """Record an error metric."""
         self.metrics.append(Metric(
             name=f"{self.namespace}_errors_total",
@@ -94,7 +94,7 @@ class MetricsCollector:
         """Get all collected metrics."""
         return self.metrics
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset all collected metrics."""
         self.metrics = []
 
@@ -102,7 +102,7 @@ class MetricsCollector:
 class PrometheusExporter:
     """Export metrics in Prometheus format."""
 
-    def __init__(self, collector: MetricsCollector):
+    def __init__(self, collector: MetricsCollector) -> None:
         self.collector = collector
 
     def export(self) -> str:
@@ -118,7 +118,7 @@ class PrometheusExporter:
 class StatsDExporter:
     """Export metrics in StatsD format."""
 
-    def __init__(self, collector: MetricsCollector, prefix: str = "strata"):
+    def __init__(self, collector: MetricsCollector, prefix: str = "strata") -> None:
         self.collector = collector
         self.prefix = prefix
 
@@ -134,7 +134,7 @@ class StatsDExporter:
 class JsonExporter:
     """Export metrics in JSON format."""
 
-    def __init__(self, collector: MetricsCollector):
+    def __init__(self, collector: MetricsCollector) -> None:
         self.collector = collector
 
     def export(self) -> str:

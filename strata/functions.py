@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import re
 from typing import Callable, Dict, List, Optional, Tuple
 
+from .dialects import Dialect
 from .types import (
     Inf, StrataType, INT64, FLOAT64, STRING, BOOL, JSON, UNKNOWN, array, unify,
 )
@@ -34,7 +35,7 @@ E_JSON_KEY = "E074"
 E_COND_TYPE = "E090"
 
 
-def valid_json_key(value) -> bool:
+def valid_json_key(value: object) -> bool:
     """Portable first slice: literal ASCII object keys, not path expressions."""
     return isinstance(value, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value) is not None
 
@@ -50,7 +51,7 @@ _JSONPATH_FILTER = re.compile(r"\?\s*\(")
 _JSONPATH_STEP = re.compile(r"(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\])")
 
 
-def json_path_problem(path) -> Optional[str]:
+def json_path_problem(path: object) -> Optional[str]:
     """Why a literal ``json_path()`` path cannot be emitted, or None if it can.
 
     Lives next to the catalog so the checker and the code generator reject the
@@ -604,7 +605,7 @@ def is_aggregate(name: str) -> bool:
     return name in AGGREGATES
 
 
-def emit_sql(name: str, args_sql: str, dialect=None) -> str:
+def emit_sql(name: str, args_sql: str, dialect: Optional[Dialect] = None) -> str:
     """SQL for a declared function: dialect spelling wins over the default.
 
     A no-argument call to a star-accepting function (``count()``) emits

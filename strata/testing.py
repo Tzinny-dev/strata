@@ -118,13 +118,13 @@ def create_test_module(
 
 
 def create_stale_data(
-    con,
+    con: Any,
     table_name: str,
     rows: List[Tuple],
     columns: List[str],
     hours_old: int = 0,
     timestamp_column: Optional[str] = None,
-):
+) -> None:
     """Create test data that appears stale.
 
     Args:
@@ -146,11 +146,11 @@ def create_stale_data(
 
 
 def create_fresh_data(
-    con,
+    con: Any,
     table_name: str,
     rows: List[Tuple],
     columns: List[str],
-):
+) -> None:
     """Create test data that appears fresh (current timestamp).
 
     Args:
@@ -163,11 +163,11 @@ def create_fresh_data(
 
 
 def simulate_source_change(
-    con,
+    con: Any,
     table_name: str,
     new_rows: List[Tuple],
     columns: List[str],
-):
+) -> None:
     """Simulate a source data change by inserting new rows.
 
     Args:
@@ -184,15 +184,15 @@ def simulate_source_change(
 class FreshnessTestHelper:
     """Helper class for testing freshness and staleness detection."""
 
-    def __init__(self, con):
+    def __init__(self, con: Any) -> None:
         self.con = con
-        self.tables_created = []
+        self.tables_created: List[str] = []
 
-    def setup(self):
+    def setup(self) -> None:
         """Set up test tables."""
         pass
 
-    def teardown(self):
+    def teardown(self) -> None:
         """Clean up test tables."""
         for table in self.tables_created:
             try:
@@ -206,7 +206,7 @@ class FreshnessTestHelper:
         name: str,
         columns: Dict[str, str],
         rows: Optional[List[Tuple]] = None,
-    ):
+    ) -> None:
         """Create a source table for testing."""
         cols = ", ".join(f"{col} {typ}" for col, typ in columns.items())
         self.con.execute(f"CREATE TABLE IF NOT EXISTS {name} ({cols})")
@@ -217,12 +217,12 @@ class FreshnessTestHelper:
                 placeholders = ", ".join(["?" for _ in row])
                 self.con.execute(f"INSERT INTO {name} VALUES ({placeholders})", row)
 
-    def assert_model_is_stale(self, model_name: str, expected_stale: bool = True):
+    def assert_model_is_stale(self, model_name: str, expected_stale: bool = True) -> None:
         """Assert that a model is stale or fresh."""
         # This would need to be implemented with actual staleness checking
         pass
 
-    def assert_freshness_threshold(self, model_name: str, expected_hours: float):
+    def assert_freshness_threshold(self, model_name: str, expected_hours: float) -> None:
         """Assert that a model has the expected freshness threshold."""
         # This would need to be implemented with actual threshold checking
         pass
@@ -238,7 +238,7 @@ class FreshnessTestHelper:
         return [row[0] for row in result]
 
 
-def create_test_fixtures():
+def create_test_fixtures() -> Dict[str, Any]:
     """Create common test fixtures for freshness testing."""
     return {
         "sources": {

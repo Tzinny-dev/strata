@@ -6,7 +6,8 @@ from typing import List, Optional
 
 
 class LexError(Exception):
-    def __init__(self, msg, file="<strata>", line=1, col=1, end_line=1, end_col=1):
+    def __init__(self, msg: str, file: str = "<strata>", line: int = 1,
+                 col: int = 1, end_line: int = 1, end_col: int = 1) -> None:
         super().__init__(msg)
         self.file = file
         self.line = line
@@ -24,7 +25,7 @@ class Token:
     end_line: int = 0
     end_col: int = 0
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (f"Token({self.kind}, {self.value!r}, "
                 f"{self.line}:{self.col})")
 
@@ -55,7 +56,7 @@ SYMBOLS = ["->", "==", "!=", "<=", ">=", "${", "=>", "||"]
 
 
 class Lexer:
-    def __init__(self, text: str, path: str = "<strata>"):
+    def __init__(self, text: str, path: str = "<strata>") -> None:
         self.text = text
         self.path = path
         self.pos = 0
@@ -63,11 +64,11 @@ class Lexer:
         self.col = 1
         self.tokens: List[Token] = []
 
-    def _peek(self, off=0):
+    def _peek(self, off: int = 0) -> str:
         i = self.pos + off
         return self.text[i] if i < len(self.text) else ""
 
-    def _advance(self):
+    def _advance(self) -> str:
         ch = self.text[self.pos]
         self.pos += 1
         if ch == "\n":
@@ -77,7 +78,7 @@ class Lexer:
             self.col += 1
         return ch
 
-    def _skip_ws_and_comments(self):
+    def _skip_ws_and_comments(self) -> None:
         while self.pos < len(self.text):
             ch = self._peek()
             if ch in " \t\r\n":
@@ -99,12 +100,12 @@ class Lexer:
             else:
                 break
 
-    def _token(self, kind, value=None):
+    def _token(self, kind: str, value: Optional[object] = None) -> None:
         end_line, end_col = self.line, self.col
         self.tokens.append(Token(kind, value, self.line, self.col,
                                  end_line=end_line, end_col=end_col))
 
-    def _advance_to(self):
+    def _advance_to(self) -> None:
         pass
 
     def tokenize(self) -> List[Token]:
@@ -149,7 +150,7 @@ class Lexer:
                                   end_line=self.line, end_col=self.col))
         return self.tokens
 
-    def _number(self):
+    def _number(self) -> None:
         line, col = self.line, self.col
         start = self.pos
         is_float = False
@@ -165,7 +166,7 @@ class Lexer:
                                   line, col, end_line=self.line,
                                   end_col=self.col))
 
-    def _string(self):
+    def _string(self) -> None:
         line, col = self.line, self.col
         self._advance()  # opening quote
         parts = []
@@ -214,7 +215,7 @@ class Lexer:
         self.tokens.append(Token("STR", parts, line, col,
                                   end_line=self.line, end_col=self.col))
 
-    def _ident(self):
+    def _ident(self) -> None:
         line, col = self.line, self.col
         start = self.pos
         while self.pos < len(self.text) and (self._peek().isalnum() or self._peek() == "_"):

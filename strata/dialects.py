@@ -8,7 +8,7 @@ instead of emitting a silently-wrong query.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 
 from .types import StrataType
@@ -18,11 +18,13 @@ class Dialect:
     """Render rules for one warehouse dialect (identifier quoting, physical
     types, function overrides, optional partitioning support)."""
 
-    def __init__(self, name: str, quote_ident, type_map: Dict[str, str],
-                 decimal, money: str, array, supports_anti_semi: bool,
+    def __init__(self, name: str, quote_ident: Callable[[str], str],
+                 type_map: Dict[str, str],
+                 decimal: Callable[[int, int], str], money: str,
+                 array: Callable[[str], str], supports_anti_semi: bool,
                  function_map: Optional[Dict[str, str]] = None,
                  supports_partitioning: bool = False,
-                 partition_clause: Optional[str] = None):
+                 partition_clause: Optional[Callable[[List[str]], str]] = None) -> None:
         self.name = name
         self._quote = quote_ident
         self.type_map = type_map

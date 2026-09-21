@@ -13,6 +13,7 @@ formats.
 from __future__ import annotations
 
 import os
+from typing import Any
 
 
 def _rel(file: str) -> str:
@@ -27,7 +28,7 @@ def _rel(file: str) -> str:
     return os.path.basename(file) or file
 
 
-def format_diagnostic(e) -> str:
+def format_diagnostic(e: Any) -> str:
     """Render a ParseError, LexError or StrataError as a canonical line."""
     file = getattr(e, "file", None) or "<strata>"
     line = getattr(e, "line", 1)

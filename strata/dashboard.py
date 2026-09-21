@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from .analysis import TypedModel, build_down_edges
+from .analysis import Project, TypedModel, build_down_edges
 
 
-def build_dashboard(proj, tms: Dict[str, TypedModel], path: str,
+def build_dashboard(proj: Project, tms: Dict[str, TypedModel], path: str,
                     history: List[dict] | None = None,
                     manifest: Dict[str, str] | None = None) -> dict:
     """Collect the dashboard facts. `history` is the content-addressed run

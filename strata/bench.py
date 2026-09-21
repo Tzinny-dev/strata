@@ -16,8 +16,9 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Optional, Tuple
 
-from .analysis import Checker, StrataError
+from .analysis import Checker, Project, StrataError
 from .dialects import get_dialect
 from .sqlgen import full_sql
 from .diff import diff_projects, impact_radius, to_json_dict
@@ -43,7 +44,7 @@ def _run_module(root: Path, case: dict) -> list[str]:
 
 def _run_diff(root: Path, case: dict) -> list[str]:
     from .cli import load, check  # lazy: cli imports this module
-    def _load(p):
+    def _load(p: str) -> Tuple[Project, Optional[str]]:
         proj = load(str(root / p))
         diag = None
         try:

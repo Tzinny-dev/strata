@@ -5,6 +5,7 @@ from math import isfinite
 
 from . import ast
 from .lexer import KEYWORDS, TYPE_KEYWORDS
+from typing import List
 
 def _q(s: str) -> str:
     # Escape literal interpolation markers; TemplateStr emits its variables separately.
@@ -19,7 +20,7 @@ def _model_name(name: str) -> str:
         return name
     return _q(name)
 
-def _type_param(p) -> str:
+def _type_param(p: object) -> str:
     # Array element params: bare names stay bare; parameterized or nested
     # elements are (spec, subparams) tuples rendered recursively.
     if not isinstance(p, tuple):
@@ -33,7 +34,7 @@ def _type_param(p) -> str:
         return f"money({sub[0]})" if sub else "money"
     return spec
 
-def _type_str(spec: str, params) -> str:
+def _type_str(spec: str, params: List[object]) -> str:
     if spec == "decimal":
         return f"decimal({params[0]}, {params[1]})"
     if spec == "array":
@@ -127,7 +128,7 @@ def _expr(e: ast.Node) -> str:
         return "\n".join(lines)
     raise ValueError(f"unsupported expression: {type(e).__name__}")
 
-def _stmts(stmts, ind: str):
+def _stmts(stmts: List[ast.Stmt], ind: str) -> List[str]:
     out = []
     for s in stmts:
         if isinstance(s, ast.FromStmt):

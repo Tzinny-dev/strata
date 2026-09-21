@@ -86,7 +86,7 @@ def _uri(text: str) -> str:
 
 class LSPContext:
     """Holds the current document state for LSP operations."""
-    def __init__(self):
+    def __init__(self) -> None:
         self.uri: Optional[str] = None
         self.text: str = ""
         self.path: str = "<strata>"
@@ -97,7 +97,7 @@ class LSPContext:
         self.sources: List[str] = []
         self.parsed: Optional[Any] = None
 
-    def reload(self, text: str, uri: str):
+    def reload(self, text: str, uri: str) -> None:
         """Re-parse `text` for `uri` and refresh the cached project state."""
         self.text = text
         self.uri = uri
@@ -129,7 +129,7 @@ class LSPContext:
 
 
 class LSPServer:
-    def __init__(self, ctx: LSPContext):
+    def __init__(self, ctx: LSPContext) -> None:
         self.ctx = ctx
         self.capabilities: Dict[str, Any] = {
             "textDocumentSync": {"openClose": True, "change": 2},
@@ -139,7 +139,7 @@ class LSPServer:
             "definitionProvider": True,
         }
 
-    def _find_model_at(self, line: int, col: int):
+    def _find_model_at(self, line: int, col: int) -> Optional[Tuple[str, int, int]]:
         """Return (model_name, col_start, col_end) or None."""
         text = self.ctx.text
         lines = text.split("\n")
@@ -240,21 +240,21 @@ class LSPServer:
         return None
 
 
-def run():
+def run() -> None:
     """Run the LSP server loop on stdin/stdout."""
     ctx = LSPContext()
     server = LSPServer(ctx)
     req_id = 0
     initialized = False
 
-    def send(method: str, params: Dict[str, Any] = {}, id: Optional[int] = None):
+    def send(method: str, params: Dict[str, Any] = {}, id: Optional[int] = None) -> None:
         msg = {"jsonrpc": "2.0", "method": method, "params": params}
         if id is not None:
             msg["id"] = id
         sys.stdout.write(json.dumps(msg) + "\n")
         sys.stdout.flush()
 
-    def reply(id, result):
+    def reply(id: Any, result: Any) -> None:
         send("result", result, id=id)
 
     for raw in sys.stdin:

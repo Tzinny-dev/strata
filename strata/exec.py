@@ -16,13 +16,13 @@ import re
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, NoReturn, Optional, Set, Tuple
 
 from . import ast
 from . import sqlgen
 from . import dbcompat
-from .dialects import DUCKDB, get_dialect, physical_type
-from .analysis import Project, TypedModel, StrataError, contract_field_col
+from .dialects import DUCKDB, Dialect, get_dialect, physical_type
+from .analysis import Plan, Project, TypedModel, StrataError, contract_field_col
 from .types import StrataType, STRING
 from .observability import MetricsCollector, PrometheusExporter
 
@@ -134,7 +134,7 @@ def _module_id(module_path: str) -> str:
 
 
 @contextlib.contextmanager
-def _module_lock(module_path: str):
+def _module_lock(module_path: str) -> Iterator[None]:
     """Mutual exclusion across PROCESSES for anything that reads or writes
     this module's history/manifest: without it, `record_run`'s read-modify-
     write (read the whole history, append a line, overwrite) loses another
@@ -177,7 +177,7 @@ def _run_id(entry: dict) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 
-def _atomic_write(path: Path, text: str):
+def _atomic_write(path: Path, text: str) -> None:
     """Replace a metadata file only after its complete contents are durable.
 
     Single-writer prototype; concurrent filesystem writers are not supported.
@@ -266,7 +266,7 @@ def load_manifest(path: str) -> Dict[str, str]:
     return {}
 
 
-def save_manifest(path: str, fingerprints: Dict[str, str]):
+def save_manifest(path: str, fingerprints: Dict[str, str]) -> None:
     """Atomically persist the module's {model_name: fingerprint} manifest."""
     _atomic_write(manifest_path(path), json.dumps(fingerprints, indent=2, sort_keys=True))
 
@@ -277,7 +277,7 @@ def stale_models(tms: Dict[str, TypedModel], path: str) -> List[str]:
     return [n for n, tm in tms.items() if manifest.get(n) != tm.fingerprint]
 
 
-def _contract_decl(project: Project, tm: TypedModel):
+def _contract_decl(project: Project, tm: TypedModel) -> Optional[ast.ContractDecl]:
     """Resolve a model's contract declaration, or None; raises PinError if missing."""
     if not tm.contract:
         return None
@@ -287,7 +287,7 @@ def _contract_decl(project: Project, tm: TypedModel):
     return cd
 
 
-def physical_schema(con, view: str) -> dict:
+def physical_schema(con: Any, view: str) -> dict:
     """Actual physical schema of a staged view/table: {column: storage type}.
 
     Phase-C input: the compiled plan is trusted, the warehouse is not. An
@@ -304,14 +304,16 @@ def physical_schema(con, view: str) -> dict:
     return out
 
 
-def _physical_types(con, t: StrataType) -> set:
+def _physical_types(con: Any, t: StrataType) -> Set[str]:
     """Acceptable warehouse storage types for a declared Strata type,
     dialect-aware via the connection in use. See dbcompat.physical_types."""
     return dbcompat.physical_types(con, t)
 
 
-def check_join_cardinality(con, project: Project, tm: TypedModel, order,
-                           branch: str, source_overrides, pins: List[str]):
+def check_join_cardinality(con: Any, project: Project, tm: TypedModel,
+                           order: List[str], branch: str,
+                           source_overrides: Optional[Dict[str, str]],
+                           pins: List[str]) -> None:
     """Enforce `expect many_to_one|one_to_one` join annotations at
     materialize time: count duplicate equi-join key groups on the upstream
     tables (right side always; left side too for one_to_one). A violation
@@ -345,7 +347,8 @@ def check_join_cardinality(con, project: Project, tm: TypedModel, order,
                         f"({table} unique on {', '.join(keys)})")
 
 
-def runtime_pins(con, project: Project, tm: TypedModel, view: str, report: List[str]):
+def runtime_pins(con: Any, project: Project, tm: TypedModel, view: str,
+                 report: List[str]) -> None:
     """Phase-C runtime pins: verify the materialized view's physical schema
     against the model's declared contract. Raises PinError on any mismatch
     and appends one `ok` line per field to `report`."""
@@ -356,7 +359,7 @@ def runtime_pins(con, project: Project, tm: TypedModel, view: str, report: List[
     for f in cd.fields:
         exp = contract_field_col(f, project.domain_types)
 
-        def bad(why):
+        def bad(why: str) -> NoReturn:
             raise PinError(f"phase-C pin FAILED [{tm.name}.{f.name}] {why}")
 
         if f.name not in physical:
@@ -445,7 +448,7 @@ def promoted_name(name: str) -> str:
     return f"{PROMOTED_PREFIX}{name}"
 
 
-def list_branches(con) -> List[str]:
+def list_branches(con: Any) -> List[str]:
     """Branches present in the warehouse (staged view prefixes), or `["main"]`."""
     try:
         rows = con.execute(
@@ -461,11 +464,13 @@ def list_branches(con) -> List[str]:
     return sorted(branches) or ["main"]
 
 
-def materialize(con, project: Project, tms: Dict[str, TypedModel],
-                names: Optional[List[str]] = None, sort_by_deps=True,
-                dialect=DUCKDB, source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+def materialize(con: Any, project: Project, tms: Dict[str, TypedModel],
+                names: Optional[List[str]] = None, sort_by_deps: bool = True,
+                dialect: Dialect = DUCKDB,
+                source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
                 branch: str = "main", stage_only: bool = False,
-                run_id: Optional[str] = None, manage_transaction: bool = True):
+                run_id: Optional[str] = None,
+                manage_transaction: bool = True) -> Tuple[List[str], List[str]]:
     """Create/recreate views v_<name> in topological order; return pin report.
 
     `source_overrides` ({source: {ns, dataset, ...}}) rewrites the compiled
@@ -559,7 +564,7 @@ def materialize(con, project: Project, tms: Dict[str, TypedModel],
         # run's moment) when the run identity is known; legacy staged-view
         # swap otherwise (standalone `strata test` path).
         if run_id is not None:
-            def validate_snapshots():
+            def validate_snapshots() -> None:
                 """Validate every published snapshot's pins and declarative tests."""
                 for name in order:
                     runtime_pins(con, project, tms[name], snapshot_name(run_id, name), [])
@@ -572,7 +577,8 @@ def materialize(con, project: Project, tms: Dict[str, TypedModel],
     return applied, pins
 
 
-def swap_branch(con, names: List[str], branch: str = "main", validate=None) -> List[str]:
+def swap_branch(con: Any, names: List[str], branch: str = "main",
+                validate: Optional[Callable[[], None]] = None) -> List[str]:
     """Atomic promote: staged stg_<branch>__<m> -> live v_<m>.
 
     Last-known-good stays queryable until every staged view exists; the swap
@@ -613,7 +619,7 @@ def snapshot_name(run_id: str, name: str) -> str:
     return f"{SNAP_PREFIX}{run_id}_{safe}"
 
 
-def _current_snapshot_table(con, name: str) -> Optional[str]:
+def _current_snapshot_table(con: Any, name: str) -> Optional[str]:
     """The snap_<run_id>_<model> table the live view v_<model> currently
     reads from, or None if the model was never published (first/bootstrap
     run). `publish_snapshots` only ever writes `CREATE OR REPLACE VIEW
@@ -628,7 +634,7 @@ def _current_snapshot_table(con, name: str) -> Optional[str]:
     return m.group(0) if m else None
 
 
-def _apply_incremental_merge(con, tm: TypedModel, staged: str, select_sql: str,
+def _apply_incremental_merge(con: Any, tm: TypedModel, staged: str, select_sql: str,
                              delta_is_prefiltered: bool = False) -> None:
     """Rewrite the just-recomputed staged view for an incremental
     append/upsert model so it publishes prev_snapshot merged with only the
@@ -676,7 +682,7 @@ def _apply_incremental_merge(con, tm: TypedModel, staged: str, select_sql: str,
     con.execute(f"CREATE OR REPLACE VIEW {staged} AS\n{delta_cte}{merge_body}\n")
 
 
-def _pushdown_base_expr(plan, name: str) -> Optional[ast.Node]:
+def _pushdown_base_expr(plan: Plan, name: str) -> Optional[ast.Node]:
     """The expression `name` already has in the base subquery's own scope
     (`sqlgen._base_select`) — a plain passthrough of the source's own
     column, or a `let` already computed there — or None if `name` is not
@@ -693,8 +699,9 @@ def _pushdown_base_expr(plan, name: str) -> Optional[ast.Node]:
     return None
 
 
-def publish_snapshots(con, names: List[str], run_id: str,
-                      branch: str = "main", validate=None,
+def publish_snapshots(con: Any, names: List[str], run_id: str,
+                      branch: str = "main",
+                      validate: Optional[Callable[[], None]] = None,
                       manage_transaction: bool = True) -> List[str]:
     """Freeze a run's staged results into run-addressed TABLES and repoint the
     live views at them, in ONE transaction: either the whole run publishes or
@@ -741,7 +748,8 @@ def publish_snapshots(con, names: List[str], run_id: str,
     return done
 
 
-def rollback_to_run(con, e: dict, module_path: Optional[str] = None) -> List[str]:
+def rollback_to_run(con: Any, e: dict,
+                    module_path: Optional[str] = None) -> List[str]:
     """Public entry point: holds the module lock for the whole operation
     (see _module_lock) when `module_path` is given — no history file to
     protect without one."""
@@ -750,7 +758,8 @@ def rollback_to_run(con, e: dict, module_path: Optional[str] = None) -> List[str
         return _rollback_to_run_locked(con, e, module_path)
 
 
-def _rollback_to_run_locked(con, e: dict, module_path: Optional[str] = None) -> List[str]:
+def _rollback_to_run_locked(con: Any, e: dict,
+                            module_path: Optional[str] = None) -> List[str]:
     """Repoint live views to the snapshot tables recorded by a past run.
 
     Snapshots are materialized tables, so rollback never re-executes and is
@@ -791,7 +800,8 @@ def _rollback_to_run_locked(con, e: dict, module_path: Optional[str] = None) -> 
     return done
 
 
-def source_fingerprints(con, project: Project, source_overrides=None) -> Dict[str, str]:
+def source_fingerprints(con: Any, project: Project,
+                        source_overrides: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, str]:
     """Hash schemas and sorted JSON rows of the effective source relations.
 
     Prototype implementation: a full scan/sort, including duplicate rows.
@@ -831,8 +841,8 @@ _ROW_COUNT_OPS = {
 }
 
 
-def run_tests(con, project: Project, tms: Dict[str, TypedModel],
-              names: Optional[List[str]] = None, dialect=DUCKDB,
+def run_tests(con: Any, project: Project, tms: Dict[str, TypedModel],
+              names: Optional[List[str]] = None, dialect: Dialect = DUCKDB,
               branch: str = "main") -> List[str]:
     """Run declarative tests against promoted live views, after the swap.
 
@@ -901,7 +911,7 @@ class StrataTestError(StrataError):
 
 
 def _apply_source_overrides(sql: str, project: Project,
-                            overrides: Dict[str, Dict[str, str]]) -> tuple:
+                            overrides: Dict[str, Dict[str, str]]) -> Tuple[str, int]:
     """Rewrite compiled table names per pipeline env; return (sql, n_rewrites).
 
     Only sources actually read by THIS model's SQL count: `full_sql(tms,
@@ -930,7 +940,7 @@ def _dep_order(tms: Dict[str, TypedModel], names: List[str]) -> List[str]:
     done: set = set()
     out: List[str] = []
 
-    def visit(n):
+    def visit(n: str) -> None:
         """Depth-first helper: append n after its (in-set) dependencies."""
         if n in done:
             return
@@ -949,7 +959,7 @@ def _dep_order(tms: Dict[str, TypedModel], names: List[str]) -> List[str]:
 COMMIT_REGISTRY = "strata_commits"
 
 
-def _record_commit(con, module_path, entry, rid):
+def _record_commit(con: Any, module_path: str, entry: dict, rid: str) -> None:
     """Transactional outbox: one event per publication, not per content id."""
     con.execute(f"CREATE TABLE IF NOT EXISTS {COMMIT_REGISTRY} ("
                 "event_id VARCHAR PRIMARY KEY, module_path VARCHAR, "
@@ -966,7 +976,7 @@ def _record_commit(con, module_path, entry, rid):
                 [event, _module_id(module_path), json.dumps(payload)])
 
 
-def recover_metadata(con, module_path: str) -> list:
+def recover_metadata(con: Any, module_path: str) -> List[str]:
     """Export committed but unacknowledged events. Single writer required.
 
     A file replacement can succeed before acknowledgement fails: commit_id
@@ -1007,7 +1017,7 @@ INPUT_PREFIX = "input_"
 _RUN_TABLE_RE = re.compile(r"^(?:snap|input)_([0-9a-f]{12})_")
 
 
-def run_tables(con) -> Dict[str, str]:
+def run_tables(con: Any) -> Dict[str, str]:
     """{snapshot table -> run id} over the engine's default-schema base tables."""
     rows = con.execute(
         "SELECT table_name FROM information_schema.tables "
@@ -1021,7 +1031,7 @@ def run_tables(con) -> Dict[str, str]:
     return out
 
 
-def pending_commit_runs(con, module_path: str) -> set:
+def pending_commit_runs(con: Any, module_path: str) -> Set[str]:
     """Runs whose metadata export is still outstanding (never collectable)."""
     exists = con.execute("SELECT count(*) FROM information_schema.tables "
                          "WHERE table_schema = ? AND table_name=?",
@@ -1040,7 +1050,7 @@ def pending_commit_runs(con, module_path: str) -> set:
     return out
 
 
-def _recent_by_age(history: list, keep_days: Optional[float]) -> set:
+def _recent_by_age(history: List[dict], keep_days: Optional[float]) -> Set[str]:
     """Run ids with snapshots recorded within the last `keep_days` days.
 
     `entry["at"]` is the UTC ISO timestamp `record_run` stamps every history
@@ -1064,8 +1074,8 @@ def _recent_by_age(history: list, keep_days: Optional[float]) -> set:
     return out
 
 
-def protected_runs(con, module_path: str, keep: int,
-                   keep_days: Optional[float] = None) -> set:
+def protected_runs(con: Any, module_path: str, keep: int,
+                   keep_days: Optional[float] = None) -> Set[str]:
     """Run ids a GC must preserve: recent (by count and/or by age), live, or
     metadata-pending. `keep` and `keep_days` are independent floors — a run
     needs to satisfy only one to be protected, never both."""
@@ -1080,7 +1090,7 @@ def protected_runs(con, module_path: str, keep: int,
     return protected | pending_commit_runs(con, module_path)
 
 
-def gc_plan(con, module_path: str, keep: int = 2,
+def gc_plan(con: Any, module_path: str, keep: int = 2,
            keep_days: Optional[float] = None) -> dict:
     """Compute snapshot garbage WITHOUT changing the warehouse.
 
@@ -1112,7 +1122,7 @@ def gc_plan(con, module_path: str, keep: int = 2,
             "keep_days": keep_days, "applied": False}
 
 
-def gc_snapshots(con, module_path: str, keep: int = 2,
+def gc_snapshots(con: Any, module_path: str, keep: int = 2,
                  keep_days: Optional[float] = None,
                  apply: bool = False) -> dict:
     """Public entry point: holds the module lock for the whole operation
@@ -1124,7 +1134,7 @@ def gc_snapshots(con, module_path: str, keep: int = 2,
         return _gc_snapshots_locked(con, module_path, keep, keep_days, apply)
 
 
-def _gc_snapshots_locked(con, module_path: str, keep: int = 2,
+def _gc_snapshots_locked(con: Any, module_path: str, keep: int = 2,
                          keep_days: Optional[float] = None,
                          apply: bool = False) -> dict:
     """Report (default) or drop unreferenced snapshot tables, all-or-nothing."""
@@ -1149,8 +1159,11 @@ def _gc_snapshots_locked(con, module_path: str, keep: int = 2,
     return plan
 
 
-def _frozen_materialize(con, project, tms, entry, source_overrides=None,
-                        expected_sources=None, module_path=None):
+def _frozen_materialize(con: Any, project: Project, tms: Dict[str, TypedModel],
+                        entry: dict,
+                        source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+                        expected_sources: Optional[Dict[str, str]] = None,
+                        module_path: Optional[str] = None) -> None:
     """Capture inputs and publish outputs in the same DuckDB transaction.
 
     A complete publication event is committed with the snapshots. The caller
@@ -1202,7 +1215,7 @@ def _frozen_materialize(con, project, tms, entry, source_overrides=None,
     return applied, pins, rid
 
 
-def _downstream_models(tms, seeds):
+def _downstream_models(tms: Dict[str, TypedModel], seeds: Set[str]) -> Set[str]:
     """Models transitively downstream of the seed nodes (sources or models),
     following plan inputs and lineage origins (covers from/join/set-op
     uniformly, even for models with empty lineage)."""
@@ -1226,12 +1239,13 @@ def _downstream_models(tms, seeds):
     return out
 
 
-def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
+def run(con: Any, project: Project, tms: Dict[str, TypedModel], module_path: str,
         only_stale: bool = False, names: Optional[List[str]] = None,
-        dialect=DUCKDB, source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+        dialect: Dialect = DUCKDB,
+        source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
         branch: str = "main", stage_only: bool = False,
         reason: Optional[str] = None, backfill_of: Optional[str] = None,
-        freshness_override: Optional[str] = None):
+        freshness_override: Optional[str] = None) -> Tuple[List[str], List[str], Optional[str]]:
     """Public entry point: holds the module lock for the whole operation
     (see _module_lock) around the actual implementation below."""
     with _module_lock(module_path):
@@ -1241,12 +1255,13 @@ def run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
                            backfill_of=backfill_of, freshness_override=freshness_override)
 
 
-def _run_locked(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
+def _run_locked(con: Any, project: Project, tms: Dict[str, TypedModel], module_path: str,
                 only_stale: bool = False, names: Optional[List[str]] = None,
-                dialect=DUCKDB, source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+                dialect: Dialect = DUCKDB,
+                source_overrides: Optional[Dict[str, Dict[str, str]]] = None,
                 branch: str = "main", stage_only: bool = False,
                 reason: Optional[str] = None, backfill_of: Optional[str] = None,
-                freshness_override: Optional[str] = None):
+                freshness_override: Optional[str] = None) -> Tuple[List[str], List[str], Optional[str]]:
     """Body of `run()` while holding the module writer lock: computes staleness,
     materializes the selected models, records the run, and collects metrics."""
     global _metrics_collector
@@ -1460,16 +1475,18 @@ def verify_run(module_path: str, run_id: str) -> dict:
     return e
 
 
-def execute_run(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
-                run_id: str, dialect=DUCKDB):
+def execute_run(con: Any, project: Project, tms: Dict[str, TypedModel], module_path: str,
+                run_id: str,
+                dialect: Dialect = DUCKDB) -> Tuple[List[str], List[str], Optional[dict]]:
     """Public entry point: holds the module lock for the whole operation
     (see _module_lock) around the actual implementation below."""
     with _module_lock(module_path):
         return _execute_run_locked(con, project, tms, module_path, run_id, dialect=dialect)
 
 
-def _execute_run_locked(con, project: Project, tms: Dict[str, TypedModel], module_path: str,
-                        run_id: str, dialect=DUCKDB):
+def _execute_run_locked(con: Any, project: Project, tms: Dict[str, TypedModel],
+                        module_path: str, run_id: str,
+                        dialect: Dialect = DUCKDB) -> Tuple[List[str], List[str], Optional[dict]]:
     """Replay WITH re-execution (spec §5): re-materialize a recorded run from
     its content-addressed record. The record must verify first (same gate as
     `verify_run`) — a drifted module never re-executes (fail-loud). Branch,
@@ -1508,7 +1525,7 @@ def _execute_run_locked(con, project: Project, tms: Dict[str, TypedModel], modul
     return applied, pins, e
 
 
-def warehouse_branches(con) -> dict:
+def warehouse_branches(con: Any) -> Dict[str, Dict[str, List[str]]]:
     """Branch inventory of a warehouse: {branch: {staged: [views], live: [views]}}."""
     rows = con.execute(
         "SELECT table_name FROM information_schema.tables "

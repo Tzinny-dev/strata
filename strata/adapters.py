@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional
 
 
 class AdapterNotAvailable(Exception):
-    def __init__(self, dialect: str, package: str, msg: str):
+    def __init__(self, dialect: str, package: str, msg: str) -> None:
         super().__init__(msg)
         self.dialect = dialect
         self.package = package
@@ -107,7 +107,7 @@ def get_adapter(dialect: str, **kw) -> Warehouse:
 class DuckDBWarehouse(Warehouse):
     """Thin wrapper around a duckdb.Connection."""
 
-    def __init__(self, con):
+    def __init__(self, con: Any) -> None:
         self.con = con
 
     def connect(self) -> None:

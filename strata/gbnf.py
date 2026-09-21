@@ -268,7 +268,7 @@ def _expand_class(raw: str) -> Tuple[FrozenSet[str], bool]:
 
 
 class _Parser:
-    def __init__(self, toks: Sequence[Tuple[str, str]]):
+    def __init__(self, toks: Sequence[Tuple[str, str]]) -> None:
         self.toks = toks
         self.i = 0
 

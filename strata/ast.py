@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Dict
+from typing import Callable, List, Optional, Tuple, Dict
 
 from .types import Col
 
@@ -323,13 +323,13 @@ class Module:
     path: str = ""
     decls: List[Node] = field(default_factory=list)
 
-    def find(self, kind, name=None):
+    def find(self, kind: Callable[[Node], bool], name: Optional[str] = None) -> Optional[Node]:
         """First declaration whose kind matches and, if given, whose name matches; None otherwise."""
         for d in self.decls:
             if kind(d) and (name is None or d.name == name):
                 return d
         return None
 
-    def all(self, kind):
+    def all(self, kind: Callable[[Node], bool]) -> List[Node]:
         """Every declaration whose kind matches."""
         return [d for d in self.decls if kind(d)]

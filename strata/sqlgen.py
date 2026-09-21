@@ -13,7 +13,7 @@ from typing import List
 
 from . import ast
 from . import functions
-from .analysis import TypedModel
+from .analysis import BaseCol, Plan, TypedModel
 from .types import StrataType, INT64, FLOAT64, STRING, BOOL, DATE, TIMESTAMP, UUID, JSON
 from .dialects import Dialect, DUCKDB
 
@@ -30,7 +30,7 @@ BINOP_SQL = {"==": "=", "!=": "!=", "<": "<", "<=": "<=", ">": ">", ">=": ">=",
              "%": "%", "||": "||", "in": "IN"}
 
 
-def _lit(value) -> str:
+def _lit(value: object) -> str:
     if isinstance(value, bool):
         return "TRUE" if value else "FALSE"
     if value is None:
@@ -57,7 +57,7 @@ def _sql_type_stub(t: StrataType) -> str:
     return SQL_TYPE.get(t.name, "VARCHAR")
 
 
-def _elem_target(dialect, t: StrataType) -> str:
+def _elem_target(dialect: Dialect, t: StrataType) -> str:
     """CAST target for an array element type, recursing through nested
     arrays (BIGINT[][], ARRAY<ARRAY<...>>, ...), decimals and money."""
     target = dialect.sql_type(t.name)
@@ -75,19 +75,19 @@ def _elem_target(dialect, t: StrataType) -> str:
 class Translator:
     """Compile a TypedModel's plan into dialect-specific SQL expressions."""
 
-    def __init__(self, plan, mode: str, dialect=DUCKDB):
+    def __init__(self, plan: Plan, mode: str, dialect: Dialect = DUCKDB) -> None:
         self.dialect = dialect
         self.plan = plan
         self.mode = mode
 
-    def lookup_input(self, qualifier):
+    def lookup_input(self, qualifier: str) -> int:
         """Index of the plan input with the given alias; raises KeyError."""
         for i, inp in enumerate(self.plan.inputs):
             if inp.alias == qualifier:
                 return i
         raise KeyError(qualifier)
 
-    def col(self, name: str, qualifier=None) -> str:
+    def col(self, name: str, qualifier: Optional[str] = None) -> str:
         """Qualified SQL column reference for an identifier."""
         if qualifier:
             i = self.lookup_input(qualifier)
@@ -542,7 +542,7 @@ class Translator:
             if unit == "day":
                 sql = f"(CAST({end} AS DATE) - CAST({start} AS DATE))"
             else:
-                def index(s):
+                def index(s: str) -> str:
                     year = f"EXTRACT(YEAR FROM {s})"
                     if unit == "year":
                         return year
@@ -553,7 +553,8 @@ class Translator:
             raise RuntimeError(f"dialect {d.name!r} cannot express date_diff()")
         return f"CAST({sql} AS {d.cast_target('int64')})"
 
-    def _shift(self, name: str, base: ast.Node, unit: str, amount: str, base_t) -> str:
+    def _shift(self, name: str, base: ast.Node, unit: str, amount: str,
+               base_t: StrataType) -> str:
         """Shift by a calendar interval, preserving the analyzed base type."""
         d = self.dialect
         u = unit[:-1].upper()  # plural kwarg -> singular interval unit
@@ -577,7 +578,7 @@ class Translator:
             raise RuntimeError(f"dialect {d.name!r} cannot express {name}()")
         return self._as_date_if_base(sql, base_t)
 
-    def _as_date_if_base(self, sql: str, base_t) -> str:
+    def _as_date_if_base(self, sql: str, base_t: StrataType) -> str:
         """DuckDB/Postgres interval arithmetic promotes DATE; restore its type."""
         if base_t.name == "date" and self.dialect.name in ("duckdb", "postgres"):
             return f"CAST({sql} AS DATE)"
@@ -599,7 +600,7 @@ class Translator:
                 self.expr(k) + (" DESC" if desc else "") for k, desc in e.over.sort))
         return f"{head} OVER ({' '.join(frame)})" if frame else f"{head} OVER ()"
 
-    def _in(self, e: ast.Call):
+    def _in(self, e: ast.Call) -> str:
         # IN is represented as Call('in', [x, [a,b,c]])
         lhs = self.expr(e.args[0])
         items = e.args[1].items if isinstance(e.args[1], ast.ListExpr) else e.args[1:]
@@ -632,7 +633,8 @@ class Translator:
         return " ".join(parts)
 
 
-def _base_select(plan, dialect, base_cols, preds, upstream_prefix: str = "v_") -> str:
+def _base_select(plan: Plan, dialect: Dialect, base_cols: List[BaseCol],
+                 preds: List[ast.Node], upstream_prefix: str = "v_") -> str:
     """SELECT...FROM...[WHERE] over the left table (the left branch when the
     model combines rows with a set operation, the whole base otherwise)."""
     t = Translator(plan, _RAW, dialect=dialect)
@@ -698,7 +700,7 @@ def _base_select(plan, dialect, base_cols, preds, upstream_prefix: str = "v_") -
     return base
 
 
-def _union_cast(dialect, t: StrataType) -> str:
+def _union_cast(dialect: Dialect, t: StrataType) -> str:
     """CAST target aligning a set-operation branch column to its unified type."""
     try:
         return _elem_target(dialect, t)
@@ -706,7 +708,8 @@ def _union_cast(dialect, t: StrataType) -> str:
         raise RuntimeError(f"dialect {dialect.name!r} cannot align set column of type {t}")
 
 
-def _setop_base(plan, dialect, upstream_prefix: str = "v_"):
+def _setop_base(plan: Plan, dialect: Dialect,
+                upstream_prefix: str = "v_") -> Tuple[List[str], str]:
     """(extra_ctes, base_body) for a model combining rows with a set operation.
 
     The left branch is the model's own base query (filters and lets before
@@ -722,7 +725,7 @@ def _setop_base(plan, dialect, upstream_prefix: str = "v_"):
     left_q = _base_select(plan, dialect, plan.base_cols[:plan.setop_base_split],
                           plan.preds[:plan.setop_pred_split], upstream_prefix)
 
-    def branch(alias, table, idx):
+    def branch(alias: str, table: str, idx: int) -> str:
         parts = []
         for name, left_t, right_t, unified in plan.setop_cols:
             side_t = (left_t, right_t)[idx]
@@ -752,7 +755,8 @@ def _setop_base(plan, dialect, upstream_prefix: str = "v_"):
     return [f"b_left AS (\n{left_q}\n)"], base_body
 
 
-def gen_base_subquery(plan, dialect=DUCKDB, upstream_prefix: str = "v_"):
+def gen_base_subquery(plan: Plan, dialect: Dialect = DUCKDB,
+                      upstream_prefix: str = "v_") -> Tuple[List[str], str]:
     """Content of the `base` CTE plus any sibling CTEs it needs (set models
     need `b_left` for their left branch): returns (extra_ctes, base_body)."""
     if plan.set_op is None:
@@ -760,7 +764,7 @@ def gen_base_subquery(plan, dialect=DUCKDB, upstream_prefix: str = "v_"):
     return _setop_base(plan, dialect, upstream_prefix)
 
 
-def join_check_sql(table: str, keys) -> str:
+def join_check_sql(table: str, keys: List[str]) -> str:
     """Duplicate-key probe backing a join cardinality expectation: counts key
     groups occurring more than once, ignoring all-NULL keys (they never match
     in an equi-join, so they cannot fan out). Zero means the side is unique
@@ -771,7 +775,7 @@ def join_check_sql(table: str, keys) -> str:
             f"GROUP BY {group} HAVING COUNT(*) > 1) t")
 
 
-def gen_outer(plan, dialect=DUCKDB) -> str:
+def gen_outer(plan: Plan, dialect: Dialect = DUCKDB) -> str:
     """Compile a plan's outer projection (SELECT/HAVING/ORDER BY/LIMIT) to SQL."""
     t = Translator(plan, _OUTER, dialect=dialect)
     parts = []
@@ -798,7 +802,8 @@ def gen_outer(plan, dialect=DUCKDB) -> str:
     return sql
 
 
-def model_sql(tm: TypedModel, dialect=DUCKDB, upstream_prefix: str = "v_") -> str:
+def model_sql(tm: TypedModel, dialect: Dialect = DUCKDB,
+              upstream_prefix: str = "v_") -> str:
     """Full SQL text for one typed model (CTEs + outer SELECT).
 
     Upstream inputs are referenced as ``<upstream_prefix><name>``; returns
@@ -812,8 +817,8 @@ def model_sql(tm: TypedModel, dialect=DUCKDB, upstream_prefix: str = "v_") -> st
     return f"-- model {tm.name}" + (f" -> contract {tm.contract}" if tm.contract else "") + "\nWITH " + ctes + "\n" + outer + "\n"
 
 
-def full_sql(tms: List[TypedModel], names: List[str], dialect=DUCKDB,
-           view_prefix: str = "v_", upstream_prefix: str = "v_") -> str:
+def full_sql(tms: List[TypedModel], names: List[str], dialect: Dialect = DUCKDB,
+             view_prefix: str = "v_", upstream_prefix: str = "v_") -> str:
     """One CREATE-statement string per model in `names`, in given order."""
     # One statement per view: `materialize` executes them sequentially in
     # topological order, so upstream views (v_base) already exist when the
