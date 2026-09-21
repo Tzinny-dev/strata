@@ -151,9 +151,10 @@ RULES["contract-field"] = ("name : type annotations", [
     r'ident ":" type-spec type-annot*',
 ])
 
-RULES["type-spec"] = ("builtin type with optional parameters (array recurses; a bare ident is a domain alias)", [
+RULES["type-spec"] = ("builtin type with optional parameters (array/map recurse; a bare ident is a domain alias)", [
     r'"decimal" "(" int-lit "," int-lit ")"',
     r'"array" "(" type-spec ")"',
+    r'"map" "(" type-spec "," type-spec ")"',
     r'"money" ("(" ident ")")?',
     "type-kw-scalar",
     "ident",
@@ -299,8 +300,9 @@ RULES["param-list"] = ("fn parameters (no trailing comma)", [
     'ident ":" type-str (\",\" ident ":" type-str)*',
 ])
 
-RULES["type-str"] = ("List<...> | TYPE_KW | ident", [
+RULES["type-str"] = ("List<...> | Map<K,V> | TYPE_KW | ident", [
     r'"List" "<" type-str ">"',
+    r'"Map" "<" type-str "," type-str ">"',
     "type-kw", "ident",
 ])
 

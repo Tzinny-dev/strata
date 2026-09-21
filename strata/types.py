@@ -10,6 +10,8 @@ class StrataType:
     name: str = "unknown"
     currency: Optional[str] = None
     elem: Optional["StrataType"] = None
+    key: Optional["StrataType"] = None     # map key type
+    value: Optional["StrataType"] = None   # map value type
     precision: int = 38
     scale: int = 2
 
@@ -20,6 +22,8 @@ class StrataType:
             return f"decimal({self.precision},{self.scale})"
         if self.name == "array":
             return f"array<{self.elem}>"
+        if self.name == "map":
+            return f"map<{self.key},{self.value}>"
         return self.name
 
     def is_numeric(self) -> bool:
@@ -56,6 +60,11 @@ def money(cur: str = "USD") -> StrataType:
 def array(elem: StrataType) -> StrataType:
     """Construct an array type over the given element type."""
     return StrataType("array", elem=elem)
+
+
+def map_type(key: StrataType, value: StrataType) -> StrataType:
+    """Construct a map<K, V> type over the given key/value types."""
+    return StrataType("map", key=key, value=value)
 
 
 # ---------------------------------------------------------------- types ops

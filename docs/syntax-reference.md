@@ -464,11 +464,14 @@ Verificado que fallan (no es una omisión, es el estado real):
   contextuales, no palabras reservadas: una columna llamada `like` sigue
   siendo una columna (`filter like == "b"`), y `like(like, "x")` sigue
   llamando a la función.
-- Constructores tipados `dict`/`map`: `map(1, 2)`, `dict(...)`
-  → `E059: unknown function 'map'` (un `map(K, V)` tipado no existe aún).
-  Para listas homogéneas usa `list(...)`, alias de `array_construct(...)`.
+- Constructores tipados `dict`/`map`: → **implementados** desde **2026-09-21**:
+  `map("k", v, ...)` / `dict("k", v, ...)` construyen `map<string, V>`;
+  `map_get(m, "k")` accede por clave exacta. Claves **solo string**,
+  valores homogéneos en el subconjunto JSON-representable
+  (string/int64/float64/bool/decimal/money/json). DuckDB nativo `MAP`,
+  Postgres/BigQuery/Snowflake respaldados por JSONB/JSON/VARIANT.
 - Tipo `struct`: `meta: struct` en una columna → `E078: unknown type
   'struct'`.
 
-Si necesitas alguna de estas, `spec/grammar.md` las deja documentadas
-como fuera del subconjunto soportado, no como un error de esta versión.
+Si necesitas `struct`, `spec/grammar.md` lo deja documentado como fuera
+del subconjunto soportado, no como un error de esta versión.

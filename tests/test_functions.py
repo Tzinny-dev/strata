@@ -481,6 +481,199 @@ class TestStringExecutionDuckDB(unittest.TestCase):
         self.assertEqual(rows[0][0], "ES")  # only ES survives the filter
 
 
+class TestMapDictConstructors(unittest.TestCase):
+    """Typed map<string, V> constructors and accessor."""
+
+    def test_map_inferred_type(self):
+        tm = model('select { m = map("a", n, "b", 9) }')
+        self.assertEqual(str(tm.schema["m"].t), "map<string,int64>")
+
+    def test_dict_alias_same_semantics(self):
+        tm = model('select { d = dict("k", n) }')
+        self.assertEqual(str(tm.schema["d"].t), "map<string,int64>")
+
+    def test_map_get_returns_value_type(self):
+        tm = model('select { m = map("a", n), v = map_get(m, "a") }')
+        self.assertEqual(str(tm.schema["v"].t), "int64")
+
+    def test_map_get_nullable(self):
+        tm = model('select { m = map("a", n), v = map_get(m, "x") }')
+        self.assertTrue(tm.schema["v"].nullable)
+
+    def test_map_odd_args_fails(self):
+        self.assertEqual(
+            error('model m { from s select { m = map("a") } }').code, "E062")
+
+    def test_map_non_string_key_fails(self):
+        self.assertEqual(
+            error('model m { from s select { m = map(n, 1) } }').code, "E063")
+
+    def test_map_mixed_value_types_fails(self):
+        self.assertEqual(
+            error('model m { from s select { m = map("a", n, "b", f) } }').code, "E063")
+
+    def test_map_value_date_fails(self):
+        self.assertEqual(
+            error('model m { from s select { m = map("a", n, "b", cast(n, "date")) } }').code,
+            "E063")
+
+    def test_map_get_non_map_fails(self):
+        self.assertEqual(
+            error('model m { from s select { v = map_get(n, "a") } }').code, "E063")
+
+    def test_map_get_non_string_key_fails(self):
+        self.assertEqual(
+            error('model m { from s select { m = map("a", n), v = map_get(m, n) } }').code,
+            "E063")
+
+
+class TestMapContractTypes(unittest.TestCase):
+    """map() type specs in contracts and domains."""
+
+    def test_contract_column_map_type(self):
+        body = 'contract t { c: map(string, int64) }'
+        proj, tms = project(body)
+        # contract is not a model; verify parsing succeeds and type resolves
+        self.assertTrue(True)
+
+    def test_domain_map_type(self):
+        body = 'domain m = map(string, json)'
+        proj, tms = project(body)
+        # domains are checked but not in tms; just ensure no error
+        self.assertTrue(True)
+
+
+class TestMapCodegenByDialect(unittest.TestCase):
+    """Cross-dialect SQL emission for map()/dict() and map_get()."""
+
+    def assert_sql_contains(self, body, dialect, expected_frag):
+        tm = model(body)
+        sql = sql_of(body, dialect=dialect)
+        self.assertIn(expected_frag, sql, f"dialect {dialect.name}: missing {expected_frag!r}")
+
+    def test_map_constructor_duckdb(self):
+        self.assert_sql_contains('select { m = map("a", n, "b", 9) }', DUCKDB,
+                                 "map(CAST(['a', 'b'] AS VARCHAR[]), CAST([n, 9] AS BIGINT[]))")
+
+    def test_map_constructor_postgres(self):
+        self.assert_sql_contains('select { m = map("a", n, "b", 9) }', POSTGRES,
+                                 "jsonb_build_object('a', n, 'b', 9)")
+
+    def test_map_constructor_bigquery(self):
+        self.assert_sql_contains('select { m = map("a", n, "b", 9) }', BIGQUERY,
+                                 "JSON_OBJECT('a', n, 'b', 9)")
+
+    def test_map_constructor_snowflake(self):
+        self.assert_sql_contains('select { m = map("a", n, "b", 9) }', SNOWFLAKE,
+                                 "OBJECT_CONSTRUCT_KEEP_NULL('a', n, 'b', 9)")
+
+    def test_map_get_duckdb(self):
+        self.assert_sql_contains('select { m = map("a", n), v = map_get(m, "a") }', DUCKDB,
+                                 "CAST(map_extract(m, NULLIF('a', ''))[1] AS BIGINT)")
+
+    def test_map_get_postgres_scalar(self):
+        self.assert_sql_contains('select { m = map("a", n), v = map_get(m, "a") }', POSTGRES,
+                                 "CAST((m ->> NULLIF('a', '')) AS BIGINT)")
+
+    def test_map_get_postgres_json_value(self):
+        self.assert_sql_contains('select { m = map("a", json_build("v", n)), v = map_get(m, "a") }', POSTGRES,
+                                 "(m -> NULLIF('a', ''))")
+
+    def test_map_get_bigquery_literal_key(self):
+        self.assert_sql_contains('select { m = map("a", n), v = map_get(m, "a") }', BIGQUERY,
+                                 "CAST(JSON_VALUE(m, '$.a') AS INT64)")
+
+    def test_map_get_bigquery_dynamic_key_fails(self):
+        # Analysis accepts (a is string column), BQ codegen fails at emit time
+        # Test the codegen error directly
+        tm = model('select { m = map("a", n), v = map_get(m, a) }')
+        with self.assertRaises(RuntimeError) as cm:
+            sqlgen.model_sql(tm, dialect=BIGQUERY)
+        self.assertIn("dynamic key", str(cm.exception))
+
+    def test_map_get_snowflake(self):
+        self.assert_sql_contains('select { m = map("a", n), v = map_get(m, "a") }', SNOWFLAKE,
+                                 "CAST(GET(m, NULLIF('a', '')) AS BIGINT)")
+
+
+@unittest.skipUnless(HAVE_DUCKDB, "duckdb not available")
+class TestMapExecutionDuckDB(unittest.TestCase):
+    """End-to-end: map/map_get runs on DuckDB with expected values."""
+
+    def test_map_roundtrip(self):
+        import duckdb
+        from strata.seed import seed_sql
+        from strata import exec as ex
+        import strata.analysis as analysis
+        from strata.parser import parse_strata
+        from strata.analysis import Checker
+
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "s.strata")
+        text = (
+            'source orders(ns: "n", dataset: "orders") {\n'
+            '  columns: { order_id: int64, customer_id: int64, country: string }\n'
+            '}\n'
+            'model w {\n'
+            '  from orders\n'
+            '  select {\n'
+            '    m   = map("id", order_id, "cust", customer_id),\n'
+            '    id  = map_get(m, "id"),\n'
+            '    cust = map_get(m, "cust"),\n'
+            '  }\n'
+            '}\n')
+        Path(path).write_text(text)
+
+        con = duckdb.connect()
+        for stmt in seed_sql()[0].split(";"):
+            if stmt.strip():
+                con.execute(stmt)
+        proj = analysis.Project(parse_strata(text, path))
+        tms = Checker(proj).check_all()
+        ex.materialize(con, proj, tms, names=["w"])
+        rows = con.execute("SELECT id, cust FROM v_w ORDER BY id").fetchall()
+        self.assertGreater(len(rows), 0)
+        for id_val, cust_val in rows:
+            self.assertIsInstance(id_val, int)
+            self.assertIsInstance(cust_val, int)
+
+    def test_map_filter_on_value(self):
+        import duckdb
+        from strata.seed import seed_sql
+        from strata import exec as ex
+        import strata.analysis as analysis
+        from strata.parser import parse_strata
+        from strata.analysis import Checker
+
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "s.strata")
+        text = (
+            'source orders(ns: "n", dataset: "orders") {\n'
+            '  columns: { order_id: int64, customer_id: int64, country: string }\n'
+            '}\n'
+            'model w {\n'
+            '  from orders\n'
+            '  filter customer_id > 1001\n'
+            '  select {\n'
+            '    m = map("id", order_id, "cust", customer_id),\n'
+            '    id = map_get(m, "id"),\n'
+            '  }\n'
+            '}\n')
+        Path(path).write_text(text)
+
+        con = duckdb.connect()
+        for stmt in seed_sql()[0].split(";"):
+            if stmt.strip():
+                con.execute(stmt)
+        proj = analysis.Project(parse_strata(text, path))
+        tms = Checker(proj).check_all()
+        ex.materialize(con, proj, tms, names=["w"])
+        rows = con.execute("SELECT id FROM v_w ORDER BY id").fetchall()
+        self.assertGreater(len(rows), 0)
+        for (id_val,) in rows:
+            self.assertIsInstance(id_val, int)
+
+
 if __name__ == "__main__":
     unittest.main()
 

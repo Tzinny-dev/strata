@@ -17,7 +17,7 @@ from . import ast
 from . import functions
 from .types import (
     StrataType, Inf, INT64, FLOAT64, STRING, BOOL, DATE, TIMESTAMP, UUID, JSON,
-    UNKNOWN, decimal, money, array, binary_type, unify, Col,
+    UNKNOWN, decimal, money, array, map_type, binary_type, unify, Col,
 )
 
 
@@ -203,9 +203,31 @@ def type_from_spec(spec: str, params: List[object],
         if len(params) != 1:
             raise err("E063", "array() takes exactly one element type")
         return array(_elem_type(params[0], domains))
+    if spec == "map":
+        if len(params) != 2:
+            raise err("E063", "map() takes a key and a value type")
+        key = _elem_type(params[0], domains)
+        value = _elem_type(params[1], domains)
+        if key != STRING:
+            raise err("E063",
+                      f"map keys must be string (got {key}); non-string keys are "
+                      f"only expressible on DuckDB and would be silently lost on "
+                      f"every other warehouse")
+        if not _valid_map_value(value):
+            raise err("E063",
+                      f"map values must be a JSON-representable scalar "
+                      f"(string/int64/float64/bool/decimal/money/json, got {value})")
+        return map_type(key, value)
     if domains is not None and spec in domains:
         return domains[spec]
     return UNKNOWN
+
+
+def _valid_map_value(t: StrataType) -> bool:
+    """Value types a map<string, V> may carry: the JSON-representable scalars.
+    date/timestamp/uuid stay out (each warehouse would need a different
+    JSON round-trip cast); fail-loud keeps the type portable by construction."""
+    return t.name in ("string", "int64", "float64", "bool", "decimal", "money", "json")
 
 
 def _elem_type(p: object, domains: Optional[Dict[str, StrataType]]) -> StrataType:
@@ -458,6 +480,22 @@ class Project:
                 if p == "money":
                     return array(money("USD"))
                 return array(rec(p))
+            if spec == "map":
+                if len(params) != 2:
+                    raise err("E063", "map() takes a key and a value type")
+                key = _elem_type(params[0], self.domain_types)
+                value = _elem_type(params[1], self.domain_types)
+                if key != STRING:
+                    raise err("E063",
+                              f"map keys must be string (got {key}); non-string "
+                              f"keys are only expressible on DuckDB and would be "
+                              f"silently lost on every other warehouse")
+                if not _valid_map_value(value):
+                    raise err("E063",
+                              f"map values must be a JSON-representable scalar "
+                              f"(string/int64/float64/bool/decimal/money/json, "
+                              f"got {value})")
+                return map_type(key, value)
             return rec(spec)
 
         def rec(name: str) -> StrataType:
@@ -939,6 +977,8 @@ class _ModelState:
             # array base (its type is the return type).  Everything else uses
             # args[0] as the collection base.
             if name in ("array_construct", "list"):
+                base_t = fn.ret(args).t
+            elif name in ("map", "dict"):
                 base_t = fn.ret(args).t
             elif name == "json_build":
                 base_t = fn.ret(args).t

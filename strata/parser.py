@@ -241,6 +241,18 @@ class Parser:
         """
         tok = self.cur()
         if tok.kind == "ID":
+            if tok.value == "map" and self.peek().kind == "SYM" and self.peek().value == "(":
+                # map(k, v) is a typed key/value pair: map is not a keyword so
+                # the same word stays free as an identifier everywhere else.
+                self.advance()
+                self.expect("SYM", "(")
+                kspec, kparams = self.parse_type_spec()
+                self.expect("SYM", ",")
+                vspec, vparams = self.parse_type_spec()
+                self.expect("SYM", ")")
+                k = kspec if kparams == [] else (kspec, kparams)
+                v = vspec if vparams == [] else (vspec, vparams)
+                return "map", [k, v]
             return self.advance().value, []
         if tok.kind != "TYPE_KW":
             raise ParseError(
@@ -661,13 +673,21 @@ class Parser:
         return decl
 
     def parse_type_str(self) -> List[str]:
-        """Parse a type expression (`List<...>`, primitive, or model reference)."""
+        """Parse a type expression (`List<...>`, `Map<K,V>`, primitive, or model reference)."""
         if self.at("ID") and self.cur().value == "List":
             self.advance()
             self.expect("SYM", "<")
             inner = self.parse_type_str()
             self.expect("SYM", ">")
             return ["List<"] + inner + [">"]
+        if self.at("ID") and self.cur().value == "Map":
+            self.advance()
+            self.expect("SYM", "<")
+            key = self.parse_type_str()
+            self.expect("SYM", ",")
+            value = self.parse_type_str()
+            self.expect("SYM", ">")
+            return ["Map<"] + key + [","] + value + [">"]
         if self.at("TYPE_KW") or self.at("ID"):
             self.advance()
             return [self.ts[self.i - 1].value]

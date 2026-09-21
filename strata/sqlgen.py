@@ -251,6 +251,60 @@ class Translator:
                 return f"ARRAY_CONSTRUCT({args})"
             return f"{'ARRAY' if d == 'postgres' else ''}[{args}]"
 
+        # --- map / dict: typed map<string, V> from key/value pairs ---
+        # Only DuckDB has a native MAP type; the other three warehouses back
+        # the value as their JSON type (JSONB / JSON / VARIANT, see
+        # ``physical_type``). The constructor therefore emits the native object
+        # function and map_get reads it back with symmetric casts, so a pair
+        # round-trips identically on all four engines.
+        if name in ("map", "dict"):
+            parts = [self.expr(a) for a in e.args]
+            keys, vals = ", ".join(parts[0::2]), ", ".join(parts[1::2])
+            if d == "duckdb":
+                vtarget = _elem_target(self.dialect, base_t.value)
+                return (f"map(CAST([{keys}] AS VARCHAR[]), "
+                        f"CAST([{vals}] AS {vtarget}[]))")
+            if d == "postgres":
+                return f"jsonb_build_object({', '.join(parts)})"
+            if d == "bigquery":
+                return f"JSON_OBJECT({', '.join(parts)})"
+            return f"OBJECT_CONSTRUCT_KEEP_NULL({', '.join(parts)})"
+
+        # --- map_get: value for the exact key ---
+        # The map is always read through its JSON-backed or native shape, so
+        # the key degrades to NULL when empty (as in json_get) rather than
+        # reading a different member than the same expression on another
+        # warehouse.
+        if name == "map_get":
+            base = self.expr(e.args[0])
+            key_expr = e.args[1]
+            vtarget = _elem_target(self.dialect, base_t.value)
+            is_json_v = base_t.value.name == "json"
+            if d == "duckdb":
+                key = f"NULLIF({self.expr(key_expr)}, '')"
+                return f"CAST(map_extract({base}, {key})[1] AS {vtarget})"
+            if d == "postgres":
+                key = f"NULLIF({self.expr(key_expr)}, '')"
+                if is_json_v:
+                    return f"({base} -> {key})"
+                return f"CAST(({base} ->> {key}) AS {vtarget})"
+            if d == "bigquery":
+                if not isinstance(key_expr, ast.Literal) or not isinstance(key_expr.value, str):
+                    raise RuntimeError(
+                        f"dialect 'bigquery' cannot take a dynamic key in map_get(): the "
+                        "engine requires the JSONPath to be a string literal or query "
+                        "parameter; use a literal key")
+                path = _lit("$." + key_expr.value)
+                if is_json_v:
+                    return f"JSON_QUERY({base}, {path})"
+                return f"CAST(JSON_VALUE({base}, {path}) AS {vtarget})"
+            # Snowflake GET on a VARIANT is an exact-key lookup for any key
+            # expression; a map built by map() is always a VARIANT.
+            key = f"NULLIF({self.expr(key_expr)}, '')"
+            if is_json_v:
+                return f"GET({base}, {key})"
+            return f"CAST(GET({base}, {key}) AS {vtarget})"
+
         # --- json_get / json_value: object member by literal key, or by an
         # expression that the checker has already proven to be a string ---
         # A literal key becomes a compile-time path/member. A dynamic key is a

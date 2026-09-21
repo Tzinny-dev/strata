@@ -217,6 +217,21 @@ def physical_type(dialect: Dialect, t: StrataType) -> str:
         if t.elem is None:
             raise ValueError(f"dialect {dialect.name}: array without element type")
         return dialect.array_sql(physical_type(dialect, t.elem))
+    if t.name == "map":
+        if t.key is None or t.value is None:
+            raise ValueError(f"dialect {dialect.name}: map without key/value types")
+        if dialect.name == "duckdb":
+            # A typed map<string, V>: native DuckDB MAP with VARCHAR keys. The
+            # value type is already a JSON-representable scalar (analysis), so
+            # it always has a physical spelling.
+            return f"MAP(VARCHAR, {physical_type(dialect, t.value)})"
+        # The other warehouses have no MAP type: the map is backed by their
+        # JSON type (JSONB / JSON / VARIANT), which is exactly the shape both
+        # the constructor and map_get emit for it.
+        json_sql = dialect.sql_type("json")
+        if json_sql is None:
+            raise ValueError(f"dialect {dialect.name}: no physical type for map<{t.key},{t.value}>")
+        return json_sql
     sql = dialect.sql_type(t.name)
     if sql is None:
         raise ValueError(f"dialect {dialect.name}: no physical type for {t.name}")

@@ -20,7 +20,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from .dialects import Dialect
 from .types import (
-    Inf, StrataType, INT64, FLOAT64, STRING, BOOL, JSON, UNKNOWN, array, unify,
+    Inf, StrataType, INT64, FLOAT64, STRING, BOOL, JSON, UNKNOWN, array,
+    map_type, unify,
 )
 
 # error codes owned by this module
@@ -107,6 +108,7 @@ _KINDS: Dict[str, Callable[[Inf], bool]] = {
     "temporal": lambda a: a.t.name in ("date", "timestamp"),
     "json": lambda a: a.t == JSON,
     "array": lambda a: a.t.name == "array" and a.t.elem is not None,
+    "map": lambda a: a.t.name == "map" and a.t.key is not None and a.t.value is not None,
 }
 
 
@@ -265,6 +267,8 @@ def check(fn: Fn, args: List[Inf], has_star: bool = False) -> Optional[Tuple[str
                    "array_append", "array_prepend", "array_remove",
                    "array_index_of", "array_sort"):
         return _check_array_operation(fn, args)
+    if fn.name in ("map", "dict", "map_get"):
+        return _check_map_operation(fn, args)
     if fn.name == "json_build":
         return _check_json_build(fn, args)
     if fn.name == "array_agg":
@@ -322,6 +326,57 @@ def _constructed_type(args: List[Inf]) -> StrataType:
     in an ARRAY if appropriate. Used internally when building function
     return types from component types."""
     return array(next(a.t for a in args if a.t != UNKNOWN))
+
+
+def _map_constructed_type(args: List[Inf]) -> StrataType:
+    """Map/dict constructor return type: the (unified) key and value types.
+    Keys are proven string by ``_check_map_operation``; values unify over
+    the JSON-representable scalar set."""
+    keys = args[0::2]
+    vals = args[1::2]
+    kt = next((a.t for a in keys if a.t != UNKNOWN), STRING)
+    vt = next((a.t for a in vals if a.t != UNKNOWN), STRING) if any(
+        a.t != UNKNOWN for a in vals) else UNKNOWN
+    return map_type(kt, vt)
+
+
+def _valid_map_value(t: StrataType) -> bool:
+    """Value types a map<string, V> may carry (mirror of analysis): the
+    JSON-representable scalars, so every warehouse represents the object the
+    same way."""
+    return t.name in ("string", "int64", "float64", "bool", "decimal", "money", "json")
+
+
+def _check_map_operation(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
+    """Validate map/dict constructors and map_get:
+    - map/dict need key/value pairs (even count), string keys, homogeneous
+      JSON-representable value types;
+    - map_get needs a typed map and a string key."""
+    if fn.name == "map_get":
+        base = args[0].t
+        key = args[1]
+        if base.name != "map" or base.key is None or base.value is None:
+            return E_ARG_TYPE, "map_get() requires a typed map first argument"
+        if key.t not in (STRING, UNKNOWN):
+            return E_ARG_TYPE, f"map_get() key must be a string, got {key.t}"
+        return None
+    if len(args) % 2 != 0:
+        return (E_ARITY, f"{fn.name}() requires key/value pairs (even argument count)")
+    keys, vals = args[0::2], args[1::2]
+    for k in keys:
+        if k.t not in (STRING, UNKNOWN):
+            return E_ARG_TYPE, f"{fn.name}() keys must be strings, got {k.t}"
+    known = [a.t for a in vals if a.t != UNKNOWN]
+    if not known:
+        return (E_ARITY, f"{fn.name}() needs at least one typed value")
+    vt = known[0]
+    for t in known[1:]:
+        if t != vt:
+            return E_ARG_TYPE, f"{fn.name}() values must be homogeneous, got {vt} and {t}"
+    if not _valid_map_value(vt):
+        return E_ARG_TYPE, (f"{fn.name}() values must be a JSON-representable scalar "
+                            f"(string/int64/float64/bool/decimal/money/json, got {vt})")
+    return None
 
 
 def _check_json_build(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
@@ -498,6 +553,15 @@ FUNCTIONS: List[Fn] = [
     Fn("list", 1, lambda a: Inf(_constructed_type(a), False),
        collection=True, doc="alias of array_construct: homogeneous scalar array; "
                             "at least one typed element"),
+    Fn("map", 2, lambda a: Inf(_map_constructed_type(a), False),
+       collection=True, doc="typed map<string, V> from key/value pairs; keys are "
+                            "strings, values homogeneous and JSON-representable"),
+    Fn("dict", 2, lambda a: Inf(_map_constructed_type(a), False),
+       collection=True, doc="alias of map(): typed map<string, V> from key/value pairs"),
+    Fn("map_get", 2, lambda a: Inf(a[0].t.value, True),
+       max_args=2, collection=True, arg_kinds=("map", "string"),
+       doc="value for the exact-key lookup; NULL when the key is absent or the "
+           "map/key is NULL"),
     Fn("array_contains", 2, lambda a: Inf(BOOL, any(i.nullable for i in a)),
        max_args=2, collection=True,
        doc="membership by scalar equality; NULL array or needle returns NULL; NULL elements do not match"),
