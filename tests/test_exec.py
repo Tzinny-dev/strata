@@ -109,6 +109,70 @@ class TestExec(unittest.TestCase):
             cmd_init(SimpleNamespace(target=d, codex=False, claude=False))
         self.assertEqual(Path(d, "AGENTS.md").read_text(), text)
 
+    def test_profile_subcommand(self):
+        from types import SimpleNamespace
+        from strata.cli import cmd_profile
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "m.strata")
+        Path(path).write_text(
+            'source orders(ns:"n", dataset:"orders") { columns: { id: int64, v: int64 } }\n'
+            'model a { from orders  filter v > 0 }\n'
+            'model b { from a  select { id = id, v = v * 2 } }\n'
+        )
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_profile(SimpleNamespace(
+                file=path, model=[], run=False, seed=False, output=None,
+                dialect="duckdb", search_dir=None))
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("parse", out)
+        self.assertIn("check", out)
+        self.assertIn("emit", out)
+        self.assertIn("total comp.", out)
+
+    def test_profile_subcommand_run(self):
+        from types import SimpleNamespace
+        from strata.cli import cmd_profile
+        import duckdb
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "m.strata")
+        wsnap = os.path.join(d, "w.duckdb")
+        Path(path).write_text(
+            'source orders(ns:"n", dataset:"orders") { columns: { id: int64, v: int64 } }\n'
+            'model a { from orders  filter v > 0 }\n'
+            'model b { from a  select { id = id, v = v * 2 } }\n'
+        )
+        con = duckdb.connect(wsnap)
+        con.execute("CREATE TABLE orders (id BIGINT, v BIGINT)")
+        con.execute("INSERT INTO orders VALUES (1, 10), (2, 20), (3, -1)")
+        con.close()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_profile(SimpleNamespace(
+                file=path, model=[], run=True, seed=False, output=wsnap,
+                dialect="duckdb", search_dir=None))
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("run (materialize + pin + promote)", out)
+        self.assertIn("rows", out)
+
+    def test_profile_subcommand_bad_dialect(self):
+        from types import SimpleNamespace
+        from strata.cli import cmd_profile
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "m.strata")
+        Path(path).write_text(
+            'source orders(ns:"n", dataset:"orders") { columns: { id: int64, v: int64 } }\n'
+            'model a { from orders  filter v > 0 }\n'
+        )
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cmd_profile(SimpleNamespace(
+                file=path, model=[], run=False, seed=False, output=None,
+                dialect="mssql", search_dir=None))
+        self.assertEqual(rc, 4)
+
     def test_seed_autonomous_subcommand(self):
         import duckdb
         d = tempfile.mkdtemp()

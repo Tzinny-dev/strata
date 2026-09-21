@@ -1,6 +1,6 @@
 """strata -- command line interface.
 
-One binary: build / plan / graph / compile / run / lineage-diff / bench / grammar / dashboard / init / seed.
+One binary: build / plan / graph / profile / compile / run / lineage-diff / bench / grammar / dashboard / init / seed.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from . import analysis
 from . import sqlgen
 from . import exec as exec_mod
 from . import bench as bench_mod
-from .dialects import get_dialect
+from .dialects import Dialect, get_dialect
 from .lexer import LexError
 from .parser import ParseError, parse_strata
 from .analysis import Project, TypedModel, StrataError, Checker, build_down_edges, blast_radius
@@ -657,6 +657,104 @@ def cmd_graph(args: argparse.Namespace) -> int:
     return 0
 
 
+def _topo_order(tms: Dict[str, TypedModel],
+                names: List[str]) -> List[str]:
+    """Deterministic topological order of a model subset (Kahn). Used by
+    `strata profile --run` to materialize one model at a time while its
+    upstreams are already live (v_*)."""
+    wanted = set(names)
+    remaining = set(wanted)
+    order: List[str] = []
+    while remaining:
+        ready = sorted(n for n in remaining
+                       if all(d not in wanted or d in order for d in tms[n].deps))
+        if not ready:
+            break  # cycle: let materialize fail loud later
+        order.extend(ready)
+        remaining -= set(ready)
+    for n in sorted(names):
+        if n not in order:
+            order.append(n)
+    return order
+
+
+def render_profile(proj: Project, tms: Dict[str, TypedModel], path: str,
+                   dialect: Dialect, parse_ms: float, check_ms: float,
+                   emit_ms: Dict[str, float],
+                   runs: Optional[List[Tuple[str, float, int]]] = None) -> str:
+    """Deterministic (sorted) profile report: compile phases plus, when a run
+    happened, per-model materialization time and row counts."""
+    out = [f"profile: {path}   dialect {dialect.name}   "
+           f"models {len(tms)}   sources {len(proj.sources)}",
+           f"  parse       {parse_ms:7.2f} ms",
+           f"  check       {check_ms:7.2f} ms"]
+    for name in sorted(emit_ms):
+        out.append(f"  emit        {emit_ms[name]:7.2f} ms   {name}")
+    total = parse_ms + check_ms + sum(emit_ms.values())
+    out.append(f"  total comp. {total:7.2f} ms")
+    if runs:
+        out.append("  run (materialize + pin + promote):")
+        for name, ms, rows in runs:
+            out.append(f"    {name:20s} {ms:7.2f} ms   {rows:6d} rows")
+        out.append(f"    {'total':20s} {sum(ms for _, ms, _ in runs):7.2f} ms")
+    return "\n".join(out)
+
+
+def cmd_profile(args: argparse.Namespace) -> int:
+    """`strata profile <file> [--dialect D] [--run] [--model M ...]`:
+    performance breakdown of the Strata side — parse, typecheck and per-model
+    SQL emission — plus, with `--run`, real materialization timings per model
+    (in-memory by default, `-o` to persist, `--seed` to load the demo
+    fixtures first). Timings are wall-clock; the model ordering is always
+    deterministic."""
+    import time
+
+    path = args.file
+    src = Path(path).read_text()
+    t0 = time.time()
+    module = parse_strata(src, path)
+    parse_ms = (time.time() - t0) * 1000.0
+    proj = analysis.Project(module,
+                            search_dirs=([args.search_dir] if getattr(args, "search_dir", None) else None))
+    t0 = time.time()
+    tms = check(proj)
+    check_ms = (time.time() - t0) * 1000.0
+    try:
+        dialect = get_dialect(getattr(args, "dialect", "duckdb"))
+    except ValueError as ve:
+        print(str(ve), file=sys.stderr)
+        return 4
+    names = args.model or list(tms)
+    emit_ms: Dict[str, float] = {}
+    for name in _topo_order(tms, names):
+        t0 = time.time()
+        sqlgen.model_sql(tms[name], dialect=dialect)
+        emit_ms[name] = (time.time() - t0) * 1000.0
+    runs = None
+    if args.run:
+        try:
+            con = open_warehouse(getattr(args, "output", None))
+        except RuntimeError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        if getattr(args, "seed", False):
+            _run_seed(con, args.file)
+        runs = []
+        for name in _topo_order(tms, names):
+            t0 = time.time()
+            exec_mod.materialize(con, proj, tms, names=[name], dialect=dialect,
+                                 branch="main", manage_transaction=True)
+            ms = (time.time() - t0) * 1000.0
+            rows = con.execute(
+                f"SELECT count(*) FROM {exec_mod.promoted_name(name)}").fetchone()[0]
+            runs.append((name, ms, rows))
+        if getattr(args, "output", None):
+            con.close()
+    print(render_profile(proj, tms, path, dialect, parse_ms, check_ms, emit_ms,
+                         runs=runs))
+    return 0
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     """`strata init <dir>`: scaffold a project — writing a deterministic AGENTS.md for Strata."""
     target = Path(args.target)
@@ -1008,6 +1106,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="dot (graphviz) | mermaid flowchart | text edges")
     p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
     p.set_defaults(fn=cmd_graph)
+
+    p = sub.add_parser("profile", help="performance breakdown (parse, check, emit; --run adds materialization)")
+    p.add_argument("file")
+    p.add_argument("model", nargs="*")
+    p.add_argument("--run", action="store_true",
+                   help="also materialize each model against a warehouse and report "
+                        "per-model timing + rows")
+    p.add_argument("--seed", action="store_true", help="load the built-in demo source fixtures first")
+    p.add_argument("-o", "--output", default=None,
+                   help="persist the warehouse at this path (default: in-memory)")
+    p.add_argument("--dialect", default="duckdb",
+                   help="target warehouse: duckdb | postgres | bigquery | snowflake")
+    p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
+    p.set_defaults(fn=cmd_profile)
 
     p = sub.add_parser("bench", help="golden-file artifacts: supervision + regression")
     p.add_argument("--update", action="store_true",
