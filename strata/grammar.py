@@ -382,13 +382,14 @@ RULES["model-value"] = ("inline model expression (fn bodies)", [
 RULES["binop"] = ("binary operators (documentation; ops are inlined in the ladder)", [
     r'"or"', r'"and"', r'"=="', r'"!="', r'"<"', r'"<="', r'">"', r'">="',
     r'"+"', r'"-"', r'"*"', r'"/"', r'"%"', r'"||"', r'"in"',
+    r'"like"', r'"rlike"',
 ])
 
 # operator ladder for expr (low -> high), emitted as chained rules
 PRECEDENCE: List[List[str]] = [
     ["or"],
     ["and"],
-    ["==", "!=", "<", "<=", ">", ">=", "in"],
+    ["==", "!=", "<", "<=", ">", ">=", "in", "like", "rlike"],
     ["+", "-", "||"],
     ["*", "/", "%"],
 ]

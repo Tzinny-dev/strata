@@ -323,6 +323,70 @@ class TestStringFunctions(unittest.TestCase):
                          "STARTS_WITH(x, 'p')")
 
 
+class TestLikeRlikeInfixOperators(unittest.TestCase):
+    """`like`/`rlike` are also infix operators (contextual: in primary
+    position they remain identifiers/calls). Same semantics as the calls."""
+
+    def test_spelling_by_dialect_matches_call_form(self):
+        text = "  select {\n    o = a like \"or%\",\n    p = a rlike \"^o\",\n  }"
+        for d in (DUCKDB, POSTGRES, BIGQUERY, SNOWFLAKE):
+            with self.subTest(dialect=d.name):
+                sql = sql_of(text, dialect=d)
+                self.assertIn("(a LIKE 'or%')", sql)
+                if d.name == "duckdb":
+                    self.assertIn("REGEXP_MATCHES(a, '^o')", sql)
+                elif d.name == "postgres":
+                    self.assertIn("(a ~ '^o')", sql)
+                elif d.name == "bigquery":
+                    self.assertIn("REGEXP_CONTAINS(a, '^o')", sql)
+                else:
+                    self.assertIn("REGEXP_LIKE(a, '^o')", sql)
+
+    def test_infix_binds_with_and_or(self):
+        sql = sql_of('select { o = a like "or%" and b like "x" or a == b }')
+        self.assertIn("((a LIKE 'or%') AND (b LIKE 'x')) OR (a = b)", sql)
+
+    def test_nullable_null_adapts(self):
+        inf = model('select { o = a like null }').schema["o"]
+        self.assertTrue(inf.nullable)
+
+    def test_type_errors_like_rlike(self):
+        err = error('model m { from s select { o = n like "or%" } }')
+        self.assertEqual(err.code, "E051")
+        self.assertIn("string", str(err))
+        err = error('model m { from s select { o = a rlike 5 } }')
+        self.assertEqual(err.code, "E051")
+        err = error('model m { from s select { o = n rlike n } }')
+        self.assertEqual(err.code, "E051")
+
+    @staticmethod
+    def _project_like_cols(body):
+        root = 'source s2(ns: "n", dataset: "s") { columns: { like: string, rlike: string } }\n'
+        proj = analysis.Project(parse_strata(root + body, "<t>"))
+        return proj, Checker(proj).check_all()
+
+    def test_like_rlike_stay_identifiers_in_primary_position(self):
+        # a column named like, and like()/rlike() as calls: contextual, not reserved.
+        proj, tms = self._project_like_cols(
+            'model m { from s2 filter like == "b"\n'
+            '  select { o = like(like, "x"), p = rlike(like, "^x") }\n}\n')
+        self.assertEqual(tms["m"].schema["o"].t.name, "bool")
+        self.assertEqual(tms["m"].schema["p"].t.name, "bool")
+
+    def test_column_named_like_roundtrips_fmt(self):
+        proj, tms = self._project_like_cols(
+            'model m { from s2 select { o = like like "or%" } }\n')
+        sql = sqlgen.model_sql(tms["m"], dialect=DUCKDB)
+        self.assertIn("(like LIKE 'or%')", sql)
+
+    def test_filter_with_infix_operator_parses(self):
+        # the motivating form from the backlog: a filter/where condition.
+        m = model('filter a like "or%"\nselect { o = a }')
+        self.assertEqual(m.schema["o"].t.name, "string")
+        proj, tms = project('model m { from s filter a rlike "^o" select { o = a } }')
+        self.assertEqual(tms["m"].schema["o"].t.name, "string")
+
+
 @unittest.skipUnless(HAVE_DUCKDB, "duckdb not available (use the venv interpreter)")
 class TestStringExecutionDuckDB(unittest.TestCase):
     """End-to-end: string SQL runs on DuckDB with the expected values."""
@@ -379,6 +443,42 @@ class TestStringExecutionDuckDB(unittest.TestCase):
         self.assertFalse(rows[3][5])    # BR row
         self.assertFalse(rows[3][7])
         self.assertFalse(rows[3][8])
+
+    def test_infix_like_rlike_in_filter_runs_on_duckdb(self):
+        import duckdb
+        from strata import exec as ex
+        from strata.seed import seed_sql
+
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "infix.strata")
+        text = (
+            'source orders(ns: "n", dataset: "orders") {\n'
+            '  columns: { country: string }\n'
+            '}\n'
+            'model w {\n'
+            '  from orders\n'
+            '  filter country like "E%" and country rlike "^E"\n'
+            '  select {\n'
+            '    country = country,\n'
+            '    e_like  = country like "E%",\n'
+            '    e_rx    = country rlike "^E",\n'
+            '  }\n'
+            '}\n')
+        Path(path).write_text(text)
+        con = duckdb.connect()
+        for stmt in seed_sql()[0].split(";"):
+            if stmt.strip():
+                con.execute(stmt)
+        proj = analysis.Project(parse_strata(text, path))
+        tms = Checker(proj).check_all()
+        ex.materialize(con, proj, tms, names=["w"])
+        rows = con.execute(
+            "SELECT country, e_like, e_rx FROM v_w").fetchall()
+        self.assertGreater(len(rows), 0)
+        for country, e_like, e_rx in rows:
+            self.assertTrue(e_like)
+            self.assertTrue(e_rx)
+        self.assertEqual(rows[0][0], "ES")  # only ES survives the filter
 
 
 if __name__ == "__main__":

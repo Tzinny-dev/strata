@@ -273,6 +273,17 @@ anidar ventanas.
 como comodines). `rlike(s, pattern)` es coincidencia con expresión
 regular (el subconjunto que documenta cada almacén). Ambas devuelven
 `bool` y devuelven `NULL` si alguno de los dos argumentos es `NULL`.
+Las dos existen también como **operadores infix** de la misma semántica
+(empatan con `==` en precedencia; son contextuales, no reservadas):
+
+```strata
+    select {
+      eur      = country,                    # columna normal
+      names_es = country like "E%",          # operador
+      rx_es    = country rlike "^E",         # operador
+      fn_es    = like(country, "E%"),        # misma semántica como función
+    }
+```
 
 ```strata
 source orders(ns: "crm", dataset: "orders") {
@@ -446,10 +457,13 @@ model m {
 
 Verificado que fallan (no es una omisión, es el estado real):
 
-- Operadores `like`/`rlike` en condiciones: `filter country like "E%"`
-  → `ERROR: unexpected token 'like' in model body` (el parser no
-  reconoce la palabra). Sí existen en forma de **función**:
-  `like(country, "E%")` y `rlike(country, "^E")` (ambas devuelven bool).
+- Operadores `like`/`rlike` en condiciones: → desde **2026-09-21** son
+  **operadores infix** de precedencia de comparación:
+  `filter country like "E%" and country rlike "^E"`. Siguen vigentes como
+  **funciones** `like(s, p)`, `rlike(s, p)` (misma semántica). Son
+  contextuales, no palabras reservadas: una columna llamada `like` sigue
+  siendo una columna (`filter like == "b"`), y `like(like, "x")` sigue
+  llamando a la función.
 - Constructores tipados `dict`/`map`: `map(1, 2)`, `dict(...)`
   → `E059: unknown function 'map'` (un `map(K, V)` tipado no existe aún).
   Para listas homogéneas usa `list(...)`, alias de `array_construct(...)`.

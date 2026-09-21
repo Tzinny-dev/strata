@@ -681,7 +681,15 @@ class Parser:
         """Parse an infix expression down to the given minimum precedence."""
         left = self.parse_unary()
         while True:
-            op = self.cur().value if self.cur().kind in ("KW", "SYM") else None
+            cur = self.cur()
+            op = None
+            if cur.kind in ("KW", "SYM"):
+                op = cur.value
+            elif cur.kind == "ID" and cur.value in ("like", "rlike"):
+                # `like`/`rlike` are contextual infix operators: in primary
+                # position (`like(a, "x")`, a column named like) they stay
+                # identifiers, but between two expressions they compare.
+                op = cur.value
             prec = self._prec(op)
             if op is None or prec < min_prec:
                 break
@@ -692,7 +700,7 @@ class Parser:
         return left
 
     def _prec(self, op: Optional[object]) -> int:
-        if op in ("==", "!=", "<", "<=", ">", ">=", "in"):
+        if op in ("==", "!=", "<", "<=", ">", ">=", "in", "like", "rlike"):
             return PREC["cmp"]
         if op in ("+", "-", "||"):
             return PREC["add"]

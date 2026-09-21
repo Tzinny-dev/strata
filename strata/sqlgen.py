@@ -27,7 +27,18 @@ SQL_TYPE = {
 JOIN_SQL = {"left": "LEFT JOIN", "inner": "JOIN", "anti": "ANTI JOIN", "semi": "SEMI JOIN"}
 BINOP_SQL = {"==": "=", "!=": "!=", "<": "<", "<=": "<=", ">": ">", ">=": ">=",
              "and": "AND", "or": "OR", "+": "+", "-": "-", "*": "*", "/": "/",
-             "%": "%", "||": "||", "in": "IN"}
+             "%": "%", "||": "||", "in": "IN", "like": "LIKE"}
+
+
+def _rlike_sql(dialect: "Dialect", expr: str, pattern: str) -> str:
+    """Regexp-match SQL for a dialect: same mapping as the rlike() call."""
+    if dialect.name == "duckdb":
+        return f"REGEXP_MATCHES({expr}, {pattern})"
+    if dialect.name == "postgres":
+        return f"({expr} ~ {pattern})"
+    if dialect.name == "bigquery":
+        return f"REGEXP_CONTAINS({expr}, {pattern})"
+    return f"REGEXP_LIKE({expr}, {pattern})"
 
 
 def _lit(value: object) -> str:
@@ -112,6 +123,8 @@ class Translator:
             inner = self.expr(e.operand)
             return f"NOT ({inner})" if e.op == "not" else f"-({inner})"
         if isinstance(e, ast.BinOp):
+            if e.op == "rlike":
+                return _rlike_sql(self.dialect, self.expr(e.left), self.expr(e.right))
             op = BINOP_SQL[e.op]
             return f"({self.expr(e.left)} {op} {self.expr(e.right)})"
         if isinstance(e, ast.Call):
@@ -155,13 +168,7 @@ class Translator:
                 return f"({self.expr(e.args[0])} LIKE {self.expr(e.args[1])})"
             if name == "rlike":
                 s, pat = self.expr(e.args[0]), self.expr(e.args[1])
-                if self.dialect.name == "duckdb":
-                    return f"REGEXP_MATCHES({s}, {pat})"
-                if self.dialect.name == "postgres":
-                    return f"({s} ~ {pat})"
-                if self.dialect.name == "bigquery":
-                    return f"REGEXP_CONTAINS({s}, {pat})"
-                return f"REGEXP_LIKE({s}, {pat})"
+                return _rlike_sql(self.dialect, s, pat)
             if functions.get(name) is None:
                 raise RuntimeError(
                     f"dialect {self.dialect.name!r} cannot express function {name}()"

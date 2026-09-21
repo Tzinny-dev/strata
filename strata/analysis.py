@@ -593,6 +593,15 @@ def types_compat(exp: StrataType, got: StrataType) -> bool:
 def infer_binary(op: str, lt: Inf, rt: Inf,
                  span: Optional[Tuple[int, int, int, int]] = None) -> Inf:
     """Infer the result type of a binary operator, raising E05x on invalid combinations."""
+    if op in ("like", "rlike"):
+        # Same contract as the like()/rlike() calls: both sides strings; a
+        # NULL operand (untyped literal) adapts and keeps the result nullable.
+        if lt.t == STRING and rt.t == STRING:
+            return Inf(BOOL, lt.nullable or rt.nullable)
+        if lt.t == UNKNOWN or rt.t == UNKNOWN:
+            return Inf(BOOL, True)
+        raise err("E051",
+                  f"'{op}' requires string operands, got {lt.t} and {rt.t}", span)
     if op in ("==", "!=", "<", "<=", ">", ">=", "in"):
         if lt.t.is_numeric() and rt.t.is_numeric():
             return Inf(BOOL, lt.nullable or rt.nullable)
