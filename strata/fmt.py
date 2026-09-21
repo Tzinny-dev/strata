@@ -169,6 +169,11 @@ def _stmts(stmts, ind: str):
     return out
 
 def format_module(mod: ast.Module) -> str:
+    """Render a Strata module AST into canonical formatted text.
+
+    Deterministic across runs; re-parsing the output must produce a
+    semantically identical AST (the round-trip invariant the formatter tests).
+    """
     out = []
     for d in mod.decls:
         if isinstance(d, ast.ImportDecl):

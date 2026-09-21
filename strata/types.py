@@ -23,9 +23,12 @@ class StrataType:
         return self.name
 
     def is_numeric(self) -> bool:
+        """True for int64, float64 and decimal (money is *not* numeric here —
+        comparisons against money require an explicit cast)."""
         return self.name in ("int64", "float64", "decimal")
 
     def is_money(self) -> bool:
+        """True for the money type (currency-tagged)."""
         return self.name == "money"
 
 
@@ -41,20 +44,28 @@ UNKNOWN = StrataType("unknown")
 
 
 def decimal(p: int = 38, s: int = 2) -> StrataType:
+    """Construct a DECIMAL type with the given precision and scale."""
     return StrataType("decimal", precision=p, scale=s)
 
 
 def money(cur: str = "USD") -> StrataType:
+    """Construct a MONEY type tagged with a currency."""
     return StrataType("money", currency=cur)
 
 
 def array(elem: StrataType) -> StrataType:
+    """Construct an array type over the given element type."""
     return StrataType("array", elem=elem)
 
 
 # ---------------------------------------------------------------- types ops
 
 def binary_type(op: str, lt: StrataType, rt: StrataType) -> StrataType:
+    """Result type of a binary operator `op` between two operand types.
+
+    Encodes the language's numeric/string/money coercion rules (mixed
+    currencies are a compile error, division promotes to float, etc.).
+    Returns UNKNOWN when the combination is not expressible."""
     if op == "||":
         return STRING if (lt.name == rt.name == "string") else UNKNOWN
 
@@ -144,6 +155,7 @@ class Col:
     classification: Optional[str] = None
 
     def clone(self, **kw) -> "Col":
+        """Copy of the Col with the given keyword overrides applied."""
         base = {
             "name": self.name,
             "t": self.t,
@@ -158,6 +170,7 @@ class Col:
         return Col(**base)
 
     def describe(self) -> str:
+        """Human-readable 'name: type [attribs...]' summary."""
         bits = [str(self.t)]
         if not self.nullable:
             bits.append("nonnull")
@@ -180,6 +193,7 @@ class Schema:
     cols: "OrderedDict[str, Col]" = field(default_factory=lambda: OrderedDict())
 
     def get(self, name: str) -> Optional[Col]:
+        """Column schema for `name`, or None when absent."""
         return self.cols.get(name)
 
 

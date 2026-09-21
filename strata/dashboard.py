@@ -95,6 +95,7 @@ def build_dashboard(proj, tms: Dict[str, TypedModel], path: str,
 
 
 def render(d: dict) -> str:
+    """Render a module health dict as a plain-text dashboard block."""
     h = d["health"]
     out = [f"DASHBOARD {d['module']}",
            f"models {h['n_models']}  sources {h['n_sources']}  edges {h['n_edges']}"

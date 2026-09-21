@@ -136,6 +136,7 @@ def diff_projects(base_proj, head_proj) -> List[ModelChange]:
 
 
 def breaking_cols(changes: List[ModelChange]) -> List[Tuple[str, str]]:
+    """Flat list of (model, column) pairs carrying breaking changes."""
     return [(c.model, c.col) for mc in changes for c in mc.columns if c.breaking]
 
 
@@ -161,6 +162,7 @@ def impact_radius(base: Dict[str, TypedModel],
 
 def render(changes: List[ModelChange],
            radius: List[Tuple[str, str]]) -> List[str]:
+    """Render a human-readable text report over the changes and their blast radius."""
     lines: List[str] = []
     for mc in changes:
         if mc.kind == "added":
@@ -188,6 +190,7 @@ def render(changes: List[ModelChange],
 
 
 def to_json_dict(base_path: str, head_path: str, changes, radius) -> dict:
+    """Machine-readable diff summary as a JSON-friendly dict."""
     brk = [c for mc in changes for c in mc.columns if c.breaking]
     return {
         "base": base_path,

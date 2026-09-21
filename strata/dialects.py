@@ -15,6 +15,9 @@ from .types import StrataType
 
 
 class Dialect:
+    """Render rules for one warehouse dialect (identifier quoting, physical
+    types, function overrides, optional partitioning support)."""
+
     def __init__(self, name: str, quote_ident, type_map: Dict[str, str],
                  decimal, money: str, array, supports_anti_semi: bool,
                  function_map: Optional[Dict[str, str]] = None,
@@ -33,22 +36,28 @@ class Dialect:
 
     # -- identifiers --------------------------------------------------
     def ident(self, name: str) -> str:
+        """Quote a bare identifier for this dialect (e.g. ``"name"`` / `` `name` ``)."""
         return self._quote(name)
 
     def qualified(self, alias: str, name: str) -> str:
+        """Emit ``alias.<quoted identifier>``."""
         return f"{alias}.{self.ident(name)}"
 
     # -- types ----------------------------------------------------------
     def sql_type(self, name: str) -> Optional[str]:
+        """Physical SQL type for a logical type name, or None if unknown."""
         return self.type_map.get(name)
 
     def decimal_sql(self, p: int, s: int) -> str:
+        """Physical SQL for a DECIMAL(p, s)."""
         return self._decimal(p, s)
 
     def array_sql(self, elem_sql: str) -> str:
+        """Physical SQL for an array over the given element SQL."""
         return self._array(elem_sql)
 
     def cast_target(self, spec: str) -> str:
+        """Physical SQL type for a cast() target spec string (logical name, money, decimal(p,s), array)."""
         if spec in self.type_map:
             return self.type_map[spec]
         if spec == "money":
@@ -184,6 +193,7 @@ _DIALECTS = {d.name: d for d in (DUCKDB, POSTGRES, BIGQUERY, SNOWFLAKE)}
 
 
 def get_dialect(name: str) -> Dialect:
+    """Look up a Dialect by name, raising ValueError with the known set if absent."""
     try:
         return _DIALECTS[name]
     except KeyError:

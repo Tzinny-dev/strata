@@ -108,6 +108,10 @@ class Lexer:
         pass
 
     def tokenize(self) -> List[Token]:
+        """Run the lexer over the whole input, returning the token stream.
+
+        Raises StrataError on any lexing problem (unexpected character,
+        unterminated string, etc.)."""
         while self.pos < len(self.text):
             self._skip_ws_and_comments()
             if self.pos >= len(self.text):
@@ -169,7 +173,7 @@ class Lexer:
         while True:
             if self.pos >= len(self.text):
                 raise LexError(f"unterminated string",
-                               path=self.path, line=line, col=col,
+                               file=self.path, line=line, col=col,
                                end_line=self.line, end_col=self.col)
             ch = self._peek()
             if ch == '"':
@@ -185,18 +189,22 @@ class Lexer:
                     ident.append(self._advance())
                 if not ident:
                     raise LexError(f"empty interpolation",
-                                   path=self.path, line=self.line,
+                                   file=self.path, line=self.line,
                                    col=self.col, end_line=self.line,
                                    end_col=self.col)
                 if self._peek() != "}":
                     raise LexError(f"expected '}}'",
-                                   path=self.path, line=self.line,
+                                   file=self.path, line=self.line,
                                    col=self.col, end_line=self.line,
                                    end_col=self.col)
                 self._advance()
                 parts.append(("var", "".join(ident)))
             elif ch == "\\":
                 self._advance()
+                if self.pos >= len(self.text):
+                    raise LexError(f"unterminated string",
+                                   file=self.path, line=line, col=col,
+                                   end_line=self.line, end_col=self.col)
                 e = self._advance()
                 cur.append({"n": "\n", "t": "\t", '"': '"', "\\": "\\"}.get(e, e))
             else:

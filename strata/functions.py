@@ -80,10 +80,21 @@ def json_path_problem(path) -> Optional[str]:
 
 
 def _numeric(a: Inf) -> bool:
+    """Check if the type is numeric (int, float, decimal) or money.
+
+    Returns True for INT64, FLOAT64, and DECIMAL types, plus the special
+    ``money`` type. Used by the type checker and code generator to validate
+    numeric arguments and results.
+    """
     return a.t.is_numeric() or a.t.is_money()
 
 
 def _kind_label(fn: Fn, i: int) -> str:
+    """Return the kind label for function argument at position i.
+
+    Looks up the kind from the function's ``arg_kinds`` list (1-indexed).
+    If ``i`` exceeds the declared arity, returns the function's default kind.
+    """
     return fn.arg_kinds[i - 1] if i <= len(fn.arg_kinds) else fn.kind
 
 
@@ -125,6 +136,10 @@ class Fn:
 
     @property
     def sql_name(self) -> str:
+        """Return the SQL name for this function.
+
+        Dialects may override this via the catalog's ``sql`` field; the
+        default is the uppercase function name."""
         return self.sql or self.name.upper()
 
 
@@ -172,6 +187,9 @@ def _case_ret(args: List[Inf]) -> Inf:
 
 
 def _check_if(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
+    """Validate an if() call: condition must be bool; return type is LUB of
+    then/else branches. Returns (error_code, message) if validation fails,
+    or None if OK."""
     cond = args[0]
     if cond.t.name not in ("unknown", "bool"):
         return (E_COND_TYPE, f"if() condition must be bool, got {cond.t}")
@@ -183,6 +201,9 @@ def _check_if(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
 
 
 def _check_case(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
+    """Validate a case() call: each condition must be bool; return type is
+    LUB of all value branches. No ELSE means result is NULL for unmatched rows.
+    Returns (error_code, message) if validation fails, or None if OK."""
     pairs = len(args) // 2
     for i in range(pairs):
         cond = args[2 * i]
@@ -197,6 +218,10 @@ def _check_case(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
 
 
 def _arity_msg(fn: Fn) -> str:
+    """Return an arity error message for function fn.
+
+    Describes the declared min/max args so the checker can surface a clear
+    error when a call passes the wrong number of arguments."""
     if fn.max_args < 0:
         want = f"at least {fn.min_args}"
     elif fn.min_args == fn.max_args:
@@ -276,16 +301,33 @@ ARRAY_ELEMENTS = frozenset({"int64", "float64", "string", "bool", "date",
 # append/prepend/remove/index_of) still require simple scalar elements and
 # reject the rest loudly at check time.
 def _valid_elem(t: StrataType) -> bool:
+    """Check if a type represents a valid array element.
+
+    Returns True for types in ``ARRAY_ELEMENTS`` (``_int8``, ``_int16``,
+    ``_int32``, ``_int64``, ``_float32``, ``_float64``,
+    ``text``, ``_bool``, ``_decimal``, ``_money``) or for
+    arrays whose element type is itself valid (recursively). Used by the
+    checker and codegen to validate array types when constructing
+    ``ARRAY`` nodes."""
     if t.name in ARRAY_ELEMENTS or t.name in ("decimal", "money"):
         return True
     return t.name == "array" and t.elem is not None and _valid_elem(t.elem)
 
 
 def _constructed_type(args: List[Inf]) -> StrataType:
+    """Construct a STRATA type from a list of ``Inf`` value types.
+
+    Returns the first non-UNKNOWN type found among the arguments, wrapped
+    in an ARRAY if appropriate. Used internally when building function
+    return types from component types."""
     return array(next(a.t for a in args if a.t != UNKNOWN))
 
 
 def _check_json_build(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
+    """Validate a json_build() call: requires an even number of arguments
+    (key/value pairs). Non-NULL keys must be string-typed.
+
+    Returns (error_code, message) if validation fails, or None if OK."""
     if len(args) % 2 != 0:
         return (E_ARITY,
                 "json_build() requires key/value pairs (even argument count)")
@@ -300,6 +342,13 @@ def _check_json_build(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
 
 
 def _check_array_operation(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
+    """Validate array operation calls (array_append, array_prepend, array_remove,
+    array_index_of, array_construct, array_contains, array_concat).
+
+    Checks that: array arguments are one-dimensional and have supported element
+    types; needles match the array element type; array_construct has homogeneous
+    supported elements. Returns (error_code, message) if validation fails,
+    or None if OK."""
     if fn.name in ("array_append", "array_prepend", "array_remove", "array_index_of"):
         base = args[0].t if fn.name != "array_prepend" else args[1].t
         needle = args[1] if fn.name != "array_prepend" else args[0]
@@ -350,10 +399,19 @@ def check_date_call(fn: Fn, unit: str) -> Optional[Tuple[str, str]]:
 # ---------------------------------------------------------------- the catalog
 
 def _same(a: List[Inf]) -> Inf:
+    """Return the type and nullability of the single argument.
+
+    Used by max() and min() as the identity function: the result
+    type is the same as the argument type, and nullability is preserved."""
     return Inf(a[0].t, a[0].nullable)
 
 
 def _unified(a: List[Inf]) -> Inf:
+    """Return the unified type and nullability of multiple arguments.
+
+    The result type is the least upper bound (LUB) of all argument types
+    via _unify_all(). Nullability is True if any argument is nullable.
+    Used by coalesce() and case() to determine the result type."""
     return Inf(_unify_all(a), all(i.nullable for i in a))
 
 
@@ -542,6 +600,7 @@ def get(name: str) -> Optional[Fn]:
 
 
 def is_aggregate(name: str) -> bool:
+    """Check if a function name is a declared aggregate (GROUP BY semantics)."""
     return name in AGGREGATES
 
 

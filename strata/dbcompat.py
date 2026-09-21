@@ -39,28 +39,35 @@ class PGConn:
         self._cur = raw.cursor()
 
     def execute(self, sql: str, params=None) -> "PGConn":
+        """Run SQL (with `?` bind markers) and return self for chaining."""
         self._cur.execute(sql.replace("?", "%s"), params or None)
         return self
 
     def fetchone(self):
+        """Return the next result row, or None."""
         return self._cur.fetchone()
 
     def fetchall(self):
+        """Return all remaining result rows as a list."""
         return self._cur.fetchall()
 
     def fetchmany(self, n: int):
+        """Return up to n remaining result rows."""
         return self._cur.fetchmany(n)
 
     @property
     def description(self):
+        """DB-API description of the most recent result set."""
         return self._cur.description
 
     def close(self) -> None:
+        """Close the cursor and the underlying raw connection."""
         self._cur.close()
         self.raw.close()
 
 
 def is_postgres(con) -> bool:
+    """True when `con` is a PGConn wrapper (Postgres), not a DuckDB connection."""
     return isinstance(con, PGConn)
 
 

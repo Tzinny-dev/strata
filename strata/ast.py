@@ -324,10 +324,12 @@ class Module:
     decls: List[Node] = field(default_factory=list)
 
     def find(self, kind, name=None):
+        """First declaration whose kind matches and, if given, whose name matches; None otherwise."""
         for d in self.decls:
             if kind(d) and (name is None or d.name == name):
                 return d
         return None
 
     def all(self, kind):
+        """Every declaration whose kind matches."""
         return [d for d in self.decls if kind(d)]

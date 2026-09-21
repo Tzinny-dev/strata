@@ -6,6 +6,7 @@ declaration (the ns/dataset keys are metadata for the catalog/planning phase).
 
 
 def seed_sql() -> tuple:
+    """DDL statements for the demo seed tables."""
     ddl = """
 CREATE OR REPLACE TABLE orders (
   order_id BIGINT,

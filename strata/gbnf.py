@@ -273,14 +273,17 @@ class _Parser:
         self.i = 0
 
     def peek(self) -> Optional[Tuple[str, str]]:
+        """Next (kind, value) token without consuming, or None at end of input."""
         return self.toks[self.i] if self.i < len(self.toks) else None
 
     def next(self) -> Tuple[str, str]:
+        """Consume and return the next (kind, value) token."""
         t = self.toks[self.i]
         self.i += 1
         return t
 
     def at(self, kind: str) -> bool:
+        """True when the next unconsumed token has the given kind."""
         t = self.peek()
         return t is not None and t[0] == kind
 
@@ -346,6 +349,7 @@ class _Parser:
         return branches[0] if len(branches) == 1 else Alt(tuple(branches))
 
     def parse_root(self) -> Node:
+        """Parse the full token stream into a rule node, rejecting trailing tokens."""
         node = self._expr()
         if self.i != len(self.toks):
             raise GbnfError(f"trailing tokens: {self.toks[self.i:]}")
@@ -363,6 +367,7 @@ class GbnfGrammar:
 
     @classmethod
     def from_text(cls, text: str) -> "GbnfGrammar":
+        """Parse a GBNF document string into a GbnfGrammar."""
         g = cls()
         toks_all = _gbnf_tokens(text)
         n = len(toks_all)
@@ -497,10 +502,12 @@ class GbnfGrammar:
         return self._match(text, self.rules[start], 0, memo, set())
 
     def accepts(self, text: str) -> bool:
+        """Whether the start rule fully consumes `text`."""
         return len(text) in self.accept_positions(text)
 
 
 def collect_refs(node: Node) -> List[str]:
+    """Recursively collect Ref leaf names from a GBNF node."""
     if isinstance(node, Ref):
         return [node.name]
     if isinstance(node, Seq):
@@ -552,4 +559,5 @@ def token_spelling(tokens: Sequence[object]) -> str:
 
 
 def accepts_program(tokens: Sequence[object], grammar: GbnfGrammar) -> bool:
+    """Whether the token stream is accepted by the grammar (for completion filtering)."""
     return grammar.accepts(token_spelling(tokens))

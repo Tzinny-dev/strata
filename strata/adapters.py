@@ -40,14 +40,17 @@ class Warehouse(abc.ABC):
 
     @abc.abstractmethod
     def connect(self) -> None:
+        """Open the warehouse connection."""
         ...
 
     @abc.abstractmethod
     def execute(self, sql: str) -> None:
+        """Run a statement that returns no rows."""
         ...
 
     @abc.abstractmethod
     def fetch(self, sql: str) -> List[tuple]:
+        """Run a query and return all result rows."""
         ...
 
     @abc.abstractmethod
@@ -61,10 +64,12 @@ class Warehouse(abc.ABC):
 
     @abc.abstractmethod
     def drop(self, name: str) -> None:
+        """Drop the physical table if it exists."""
         ...
 
     @abc.abstractmethod
     def list_views(self) -> List[str]:
+        """Names of live views in the warehouse default schema."""
         ...
 
 
@@ -106,22 +111,28 @@ class DuckDBWarehouse(Warehouse):
         self.con = con
 
     def connect(self) -> None:
+        """Open the warehouse connection."""
         pass
 
     def execute(self, sql: str) -> None:
+        """Run a statement that returns no rows."""
         self.con.execute(sql)
 
     def fetch(self, sql: str) -> List[tuple]:
+        """Run a query and return all result rows."""
         return self.con.execute(sql).fetchall()
 
     def materialize(self, name: str, sql: str, partition_by: Optional[List[str]] = None) -> None:
         # DuckDB doesn't support partitioning in CTAS, so we ignore it
+        """Create the table atomically (partitioning ignored where unsupported)."""
         self.con.execute(f"CREATE TABLE {name} AS {sql}")
 
     def drop(self, name: str) -> None:
+        """Drop the physical table if it exists."""
         self.con.execute(f"DROP TABLE IF EXISTS {name}")
 
     def list_views(self) -> List[str]:
+        """Names of live views in the warehouse default schema."""
         rows = self.con.execute(
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema='main' AND table_type='VIEW'").fetchall()

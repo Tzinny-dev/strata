@@ -73,18 +73,22 @@ def _elem_target(dialect, t: StrataType) -> str:
 
 
 class Translator:
+    """Compile a TypedModel's plan into dialect-specific SQL expressions."""
+
     def __init__(self, plan, mode: str, dialect=DUCKDB):
         self.dialect = dialect
         self.plan = plan
         self.mode = mode
 
     def lookup_input(self, qualifier):
+        """Index of the plan input with the given alias; raises KeyError."""
         for i, inp in enumerate(self.plan.inputs):
             if inp.alias == qualifier:
                 return i
         raise KeyError(qualifier)
 
     def col(self, name: str, qualifier=None) -> str:
+        """Qualified SQL column reference for an identifier."""
         if qualifier:
             i = self.lookup_input(qualifier)
             if i == 0:
@@ -93,6 +97,7 @@ class Translator:
         return name
 
     def expr(self, e: ast.Node) -> str:
+        """Compile one expression AST node into dialect SQL."""
         if isinstance(e, ast.Literal):
             return _lit(e.value)
         if isinstance(e, ast.ColumnRef):
@@ -767,6 +772,7 @@ def join_check_sql(table: str, keys) -> str:
 
 
 def gen_outer(plan, dialect=DUCKDB) -> str:
+    """Compile a plan's outer projection (SELECT/HAVING/ORDER BY/LIMIT) to SQL."""
     t = Translator(plan, _OUTER, dialect=dialect)
     parts = []
     for out in plan.outputs:
@@ -793,6 +799,10 @@ def gen_outer(plan, dialect=DUCKDB) -> str:
 
 
 def model_sql(tm: TypedModel, dialect=DUCKDB, upstream_prefix: str = "v_") -> str:
+    """Full SQL text for one typed model (CTEs + outer SELECT).
+
+    Upstream inputs are referenced as ``<upstream_prefix><name>``; returns
+    ``-- no plan`` for seed/identity models without a transformation plan."""
     plan = tm.plan
     if plan is None:
         return "-- no plan"
@@ -804,6 +814,7 @@ def model_sql(tm: TypedModel, dialect=DUCKDB, upstream_prefix: str = "v_") -> st
 
 def full_sql(tms: List[TypedModel], names: List[str], dialect=DUCKDB,
            view_prefix: str = "v_", upstream_prefix: str = "v_") -> str:
+    """One CREATE-statement string per model in `names`, in given order."""
     # One statement per view: `materialize` executes them sequentially in
     # topological order, so upstream views (v_base) already exist when the
     # downstream view compiles. A single multi-CTE string would collide

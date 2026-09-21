@@ -62,6 +62,7 @@ def _run_diff(root: Path, case: dict) -> list[str]:
 
 
 def run_cases(root: Path | None = None, update: bool = False) -> int:
+    """Run the golden bench cases (overwrite with update=True) and return the exit code."""
     root = Path(root) if root else Path.cwd()
     manifest = json.loads((BENCH_DIR / "manifest.json").read_text())
     fails: list[str] = []

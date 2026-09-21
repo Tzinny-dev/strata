@@ -33,28 +33,34 @@ class Parser:
 
     # ------------------------------------------------------------ token helpers
     def cur(self) -> Token:
+        """Return the current token (never past EOF)."""
         return self.ts[self.i]
 
     def peek(self, n=1) -> Token:
+        """Look at the token n positions ahead without consuming it."""
         j = min(self.i + n, len(self.ts) - 1)
         return self.ts[j]
 
     def advance(self) -> Token:
+        """Consume and return the current token (EOF is sticky)."""
         t = self.ts[self.i]
         if t.kind != "EOF":
             self.i += 1
         return t
 
     def at(self, kind, value=None) -> bool:
+        """True when the current token has the given kind and optional value."""
         t = self.cur()
         return t.kind == kind and (value is None or t.value == value)
 
     def match(self, kind, value=None) -> Optional[Token]:
+        """Consume and return the current token when it matches kind/value, else None."""
         if self.at(kind, value):
             return self.advance()
         return None
 
     def expect(self, kind, value=None) -> Token:
+        """Consume a token of the given kind/value or raise ParseError with a span."""
         t = self.cur()
         if (value is None and t.kind == kind) or (value is not None and t.kind == kind and t.value == value):
             return self.advance()
@@ -64,10 +70,12 @@ class Parser:
             end_line=t.end_line, end_col=t.end_col)
 
     def span(self, tok: Token):
+        """Source span tuple (line, col, end_line, end_col) of a token."""
         return (tok.line, tok.col, tok.end_line, tok.end_col)
 
     # ------------------------------------------------------------ top level
     def parse_module(self) -> ast.Module:
+        """Entry point: parse the whole token stream into a Module."""
         m = ast.Module(path=self.path)
         while not self.at("EOF"):
             if self.at("KW", "import"):
@@ -146,6 +154,7 @@ class Parser:
         return decl
 
     def parse_source(self) -> ast.SourceDecl:
+        """Parse a `source` declaration."""
         kw = self.expect("KW", "source")
         decl = ast.SourceDecl(span=self.span(kw))
         decl.name = self.expect("ID").value
@@ -168,6 +177,7 @@ class Parser:
         return decl
 
     def parse_source_props(self):
+        """Parse the resource property list of a source declaration."""
         props = []
         while not self.at("SYM", "}"):
             k = self.cur().value
@@ -198,6 +208,7 @@ class Parser:
         return props
 
     def parse_contract(self) -> ast.ContractDecl:
+        """Parse a `contract` declaration."""
         kw = self.expect("KW", "contract")
         decl = ast.ContractDecl(span=self.span(kw))
         decl.name = self.expect("ID").value
@@ -212,6 +223,7 @@ class Parser:
         return decl
 
     def parse_domain(self) -> ast.DomainDecl:
+        """Parse a `domain` declaration."""
         kw = self.expect("KW", "domain")
         decl = ast.DomainDecl(span=self.span(kw))
         decl.name = self.expect("ID").value
@@ -258,6 +270,7 @@ class Parser:
         return spec, []
 
     def parse_contract_field(self) -> ast.ContractField:
+        """Parse a single contract field."""
         f = ast.ContractField()
         f.name = self.expect("ID").value
         self.expect("SYM", ":")
@@ -279,6 +292,12 @@ class Parser:
                 self.expect("SYM", "{")
                 vals = []
                 while not self.at("SYM", "}"):
+                    if self.at("EOF"):
+                        t = self.cur()
+                        raise ParseError(
+                            "unterminated enum values (expected '}')",
+                            file=self.path, line=t.line, col=t.col,
+                            end_line=t.end_line, end_col=t.end_col)
                     if self.at("STR"):
                         vals.append("".join(p[1] for p in self.advance().value))
                     else:
@@ -342,6 +361,7 @@ class Parser:
         return values
 
     def parse_model_decl(self) -> ast.ModelDecl:
+        """Parse a `model` declaration."""
         kw = self.expect("KW", "model")
         decl = ast.ModelDecl(span=self.span(kw))
         name_tok = self.cur()
@@ -362,6 +382,12 @@ class Parser:
             if self.at("ID") and self.peek().value == ":" and self.cur().value in MODEL_ATTRS:
                 k = self.advance().value
                 self.advance()  # ':'
+                if not self.at("STR"):
+                    t = self.cur()
+                    raise ParseError(
+                        f"expected string value for model attribute {k!r}",
+                        file=self.path, line=t.line, col=t.col,
+                        end_line=t.end_line, end_col=t.end_col)
                 v = "".join(p[1] for p in self.advance().value)  # STR
                 decl.attrs[k] = v
             elif self.at("KW", "from"):
@@ -551,6 +577,7 @@ class Parser:
         return decl
 
     def parse_join_expect(self) -> Optional[str]:
+        """Parse an optional `expect ...` marker after a join key."""
         # `expect many_to_one|one_to_one` after a join condition. The two
         # cardinalities are contextual identifiers (not keywords) so existing
         # columns named like them keep parsing; anything else is a parse error.
@@ -566,6 +593,7 @@ class Parser:
             end_line=t.end_line, end_col=t.end_col)
 
     def parse_sort(self, t):
+        """Parse a `sort` statement (may be asc)."""
         self.expect("SYM", "{")
         keys = []
         while not self.at("SYM", "}"):
@@ -582,6 +610,7 @@ class Parser:
         return ast.SortStmt(keys=keys, span=self.span(t))
 
     def parse_take(self, t):
+        """Parse a `take` / `take_last` statement."""
         st = ast.TakeStmt(span=self.span(t))
         st.start = int(self.expect("INT").value)
         if self.match("SYM", ".") and self.match("SYM", "."):
@@ -591,6 +620,7 @@ class Parser:
         return st
 
     def parse_assigns(self):
+        """Parse the `assign { ... }` block of a transform step."""
         self.expect("SYM", "{")
         assigns = []
         while not self.at("SYM", "}"):
@@ -604,6 +634,7 @@ class Parser:
 
     # ------------------------------------------------------------ fn decl
     def parse_fn(self) -> ast.FnDecl:
+        """Parse a `fn` declaration."""
         kw = self.expect("KW", "fn")
         decl = ast.FnDecl(span=self.span(kw))
         decl.name = self.expect("ID").value
@@ -625,6 +656,7 @@ class Parser:
         return decl
 
     def parse_type_str(self) -> List[str]:
+        """Parse a type expression (`List<...>`, primitive, or model reference)."""
         if self.at("ID") and self.cur().value == "List":
             self.advance()
             self.expect("SYM", "<")
@@ -641,6 +673,7 @@ class Parser:
 
     # ------------------------------------------------------------ expressions
     def parse_expr(self, min_prec: int = 0):
+        """Parse an infix expression down to the given minimum precedence."""
         left = self.parse_unary()
         while True:
             op = self.cur().value if self.cur().kind in ("KW", "SYM") else None
@@ -667,6 +700,7 @@ class Parser:
         return -1
 
     def parse_unary(self):
+        """Parse a unary (NOT / negation) expression."""
         t = self.cur()
         if self.at("KW", "not") or self.at("SYM", "-"):
             op = self.advance().value
@@ -674,6 +708,7 @@ class Parser:
         return self.parse_primary()
 
     def parse_primary(self):
+        """Parse a primary expression: literal, call, list, column ref, or group."""
         t = self.cur()
         span = self.span(t)
 
@@ -799,6 +834,7 @@ class Parser:
                 end_line=t.end_line, end_col=t.end_col)
 
     def parse_list(self, span):
+        """Parse a list literal [...]."""
         # [ ... ] or [ body for var in iter ]
         first = None
         if not self.at("SYM", "]"):
@@ -818,6 +854,7 @@ class Parser:
         return ast.ListExpr(items=items, span=span)
 
     def parse_model_value(self) -> ast.ModelValue:
+        """Parse a `model value` expression."""
         t = self.expect("KW", "model")
         mv = ast.ModelValue(span=self.span(t))
         name_tok = self.cur()
@@ -842,6 +879,12 @@ class Parser:
             if self.at("ID") and self.peek().value == ":" and self.cur().value in MODEL_ATTRS:
                 k = self.advance().value
                 self.advance()
+                if not self.at("STR"):
+                    t = self.cur()
+                    raise ParseError(
+                        f"expected string value for model attribute {k!r}",
+                        file=self.path, line=t.line, col=t.col,
+                        end_line=t.end_line, end_col=t.end_col)
                 mv.attrs[k] = "".join(p[1] for p in self.advance().value)
             elif self.at("KW", "from"):
                 tt = self.advance()
@@ -877,6 +920,7 @@ class Parser:
         return mv
 
     def parse_pipeline(self) -> ast.PipelineDecl:
+        """Parse a `pipeline` declaration."""
         kw = self.expect("KW", "pipeline")
         decl = ast.PipelineDecl(span=self.span(kw))
         decl.name = self.expect("ID").value
@@ -932,4 +976,5 @@ class Parser:
 
 
 def parse_strata(text: str, path: str = "<strata>") -> ast.Module:
+    """Parse Strata source text into a Module AST."""
     return Parser(text, path).parse_module()

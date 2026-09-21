@@ -4,6 +4,7 @@ from typing import Dict, List
 from .analysis import Project, TypedModel
 
 def lint(proj: Project, tms: Dict[str, TypedModel]) -> List[str]:
+    """Return a list of static warning strings over the typed model graph."""
     warns: List[str] = []
     for name, tm in tms.items():
         if not tm.contract:

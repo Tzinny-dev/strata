@@ -34,6 +34,7 @@ class StrataError(Exception):
 
 def err(code: str, msg: str, span=None, file=None,
         severity="error", help=None):
+    """Build a StrataError with a code, optional span/file, severity and help."""
     return StrataError(msg, code=code, span=span, file=file,
                        severity=severity, help=help)
 
@@ -68,6 +69,7 @@ class Origin:
     kind: str = "passthrough"
 
     def key(self):
+        """Identity key (node, col) used as the edge label in lineage maps."""
         return (self.node, self.col)
 
 
@@ -218,6 +220,7 @@ def _elem_type(p: object, domains: Optional[Dict[str, StrataType]]) -> StrataTyp
 
 def contract_field_col(f: ast.ContractField,
                        domains: Optional[Dict[str, StrataType]] = None) -> Col:
+    """Resolve a ContractField into a typed Col (resolving domain aliases, E078 on unknowns)."""
     t = type_from_spec(f.type_spec, f.params, domains)
     if t.name == "unknown":
         raise err("E078", f"unknown type {f.type_spec!r} for column {f.name!r} "
@@ -236,6 +239,7 @@ def contract_field_col(f: ast.ContractField,
 
 def source_decl_cols(decl: ast.SourceDecl,
                      domains: Optional[Dict[str, StrataType]] = None) -> List[Col]:
+    """Column list declared by a source declaration (`columns: {...}`), empty when absent."""
     for kind, val in decl.props:
         if kind == "columns":
             return [contract_field_col(f, domains) for f in val]
@@ -249,6 +253,7 @@ class FnEvaluator:
         self.project = project
 
     def call(self, decl: ast.FnDecl, args: List[object]) -> object:
+        """Evaluate a fn call with the given argument values."""
         env = dict(zip([p for p, _ in decl.params], args))
         return self._val(decl.body, env)
 
@@ -494,6 +499,7 @@ class Project:
         return out
 
     def source_schema(self, name: str) -> "OrderedDict[str, Col]":
+        """Ordered column schema of a source declaration by name (E020/E021 when unknown/empty)."""
         decl = self.sources.get(name)
         if decl is None:
             raise err("E020", f"unknown source {name!r}")
@@ -503,6 +509,7 @@ class Project:
         return OrderedDict((c.name, c) for c in cols)
 
     def input_schema(self, name: str) -> Tuple["OrderedDict[str, Col]", bool, str]:
+        """(cols, is_source, node) where the input name is a source or an already-typed model."""
         if name in self.sources:
             return self.source_schema(name), True, name
         if name in self.models:
@@ -513,6 +520,7 @@ class Project:
         raise err("E020", f"unknown input {name!r} (not a source or model)")
 
     def model_names_for(self, pipeline: Optional[ast.PipelineDecl], include_generated=False) -> List[str]:
+        """Names of the models a pipeline selects (or all non-generated models when None)."""
         if pipeline is None:
             return [n for n in self.models if include_generated or not self.models[n].generated]
         names = []
@@ -528,6 +536,7 @@ class Project:
         return names
 
     def pipeline_by_name(self, name: Optional[str]) -> Optional[ast.PipelineDecl]:
+        """Pipeline declaration by name, or the first one when name is None."""
         if not self.pipelines:
             return None
         if name is None:
@@ -557,6 +566,7 @@ TYPE_FROM_KW_EXT = dict(TYPE_FROM_KW)
 
 
 def types_compat(exp: StrataType, got: StrataType) -> bool:
+    """Whether a value of type `got` satisfies a contract type `exp` (widening: int64 into any numeric)."""
     if got.name == "unknown":
         return False
     if exp == got:
@@ -568,6 +578,7 @@ def types_compat(exp: StrataType, got: StrataType) -> bool:
 
 
 def infer_binary(op: str, lt: Inf, rt: Inf, span=None) -> Inf:
+    """Infer the result type of a binary operator, raising E05x on invalid combinations."""
     if op in ("==", "!=", "<", "<=", ">", ">=", "in"):
         if lt.t.is_numeric() and rt.t.is_numeric():
             return Inf(BOOL, lt.nullable or rt.nullable)
@@ -603,6 +614,7 @@ class Checker:
         raise err(code, msg, span=span, file=self.file, help=help)
 
     def check_all(self, model_names: Optional[List[str]] = None) -> Dict[str, TypedModel]:
+        """Typecheck every model in topological order and return the typed graph."""
         names = model_names if (model_names is not None and model_names) else list(self.p.models)
         order = self._topo(names)
         for n in order:
@@ -712,6 +724,7 @@ class _ModelState:
         raise err(code, msg, span=span, file=self.file, help=help)
 
     def run(self) -> TypedModel:
+        """Typecheck the model body and finalize its TypedModel."""
         for s in self.decl.stmts:
             self.stmt(s)
         self.finish()
@@ -719,6 +732,7 @@ class _ModelState:
 
     # -- column lookups ----------------------------------------------
     def lookup(self, e: ast.ColumnRef) -> Col:
+        """Resolve a column reference to its Col, raising E040/E041 when unknown."""
         if e.qualifier:
             for inp in self.inputs:
                 if inp.alias == e.qualifier:
@@ -734,6 +748,7 @@ class _ModelState:
         return col
 
     def origin_of(self, e: ast.ColumnRef) -> List[Origin]:
+        """Lineage [Origin] entries backing a column reference."""
         if e.qualifier:
             for i, inp in enumerate(self.inputs):
                 if inp.alias == e.qualifier:
@@ -744,6 +759,7 @@ class _ModelState:
 
     # -- expressions ---------------------------------------------------
     def infer(self, e: ast.Node) -> Inf:
+        """Infer the type/nullability of an expression, raising on ill-typed expressions."""
         if isinstance(e, ast.Literal):
             v = e.value
             if isinstance(v, bool):
@@ -784,6 +800,7 @@ class _ModelState:
         raise self._err("E055", f"unsupported expression {type(e).__name__}", e.span)
 
     def infer_window(self, e: ast.WindowCall) -> Inf:
+        """Typecheck a window call against the catalog, including partition/sort keys."""
         fn = functions.get(e.name)
         if fn is None:
             raise self._err("E059", f"unknown function {e.name!r}", e.span)
@@ -830,6 +847,7 @@ class _ModelState:
             self._reject_nested_window(e.operand, span)
 
     def infer_call(self, e: ast.Call, window_allowed: bool = False) -> Inf:
+        """Typecheck a function call (casts, date and json functions get special handling)."""
         name = e.name
         if name == "cast" and any(isinstance(a, ast.Kwarg) for a in e.args):
             raise self._err(functions.E_DATE_ARG, "cast() does not accept keyword arguments", e.span)
@@ -920,6 +938,7 @@ class _ModelState:
 
     def infer_date_call(self, e: ast.Call, fn: "functions.Fn") -> Inf:
         # Check arity before indexing; symbolic units never resolve as columns.
+        """Typecheck a date_add/date_sub/date_trunc/date_diff call with its symbolic unit."""
         if len(e.args) != fn.min_args:
             raise self._err(functions.E_ARITY,
                       f"{fn.name}() takes exactly {fn.min_args} arguments", e.span)
@@ -957,6 +976,7 @@ class _ModelState:
 
     # -- statements -----------------------------------------------------
     def stmt(self, s: ast.Stmt):
+        """Dispatch one model-body statement to its handler."""
         if isinstance(s, ast.FromStmt):
             self.do_from(s)
         elif isinstance(s, ast.JoinStmt):
@@ -999,6 +1019,7 @@ class _ModelState:
             raise self._err("E060", f"unsupported statement {type(s).__name__}", s.span)
 
     def do_from(self, s: ast.FromStmt):
+        """Register the from input: columns, ownership and passthrough lineage."""
         if self.tm.plan.set_op is not None:
             raise self._err("E076", "a set model combines exactly one from with one "
                               "named model; chain further inputs downstream", s.span)
@@ -1014,6 +1035,7 @@ class _ModelState:
             self.base_cols.append(BaseCol(name=name, expr=None))
 
     def do_join(self, s: ast.JoinStmt):
+        """Register a join input and extract expect-cardinality keys when annotated."""
         if self.tm.plan.set_op is not None:
             raise self._err("E076", f"{s.kind} join after a set operation is not supported; "
                               "join the combined rows in a downstream model", s.span)
@@ -1130,6 +1152,7 @@ class _ModelState:
         return s.expect, left_keys, right_keys
 
     def do_let(self, s: ast.LetStmt):
+        """Register a named let expression: infer, add col and lineage."""
         self._require_no_window(s.expr, s.span, "let")
         inf = self.infer(s.expr)
         self.cols[s.name] = Col(name=s.name, t=inf.t, nullable=inf.nullable)
@@ -1250,6 +1273,7 @@ class _ModelState:
         return None
 
     def do_output(self, a: ast.OutAssign):
+        """Handle a projection output assignment, enforcing group-body aggregate rules."""
         inf = self.infer(a.expr)
         col = Col(name=a.name, t=inf.t, nullable=inf.nullable)
         if self.in_group:
@@ -1312,6 +1336,7 @@ class _ModelState:
         return []
 
     def do_group(self, s: ast.GroupStmt):
+        """Register group keys, infer the grouped body and record planned group expressions."""
         self.in_group = True
         for k in s.keys:
             self._require_no_window(k, s.span, "group keys")
@@ -1335,6 +1360,7 @@ class _ModelState:
 
     # -- finalization -----------------------------------------------------
     def finish(self):
+        """Finalize the plan (outputs, schema, lineage), then incremental/contract checks and fingerprint."""
         plan = self.tm.plan
         plan.base_cols = list(self.base_cols)
         plan.grouped = bool(self.group_keys)
@@ -1394,6 +1420,7 @@ class _ModelState:
                     self.decl.span)
 
     def verify_contract(self):
+        """Enforce the declared contract: presence, type, nullability, enum/classification."""
         model = self.tm
         if not model.contract:
             return
@@ -1416,6 +1443,7 @@ class _ModelState:
         # Canonical fingerprint: AST-shape, not source-whitespace. `str(decl)`
         # embeds raw spans/whitespace, so `fmt` (which only re-emits the same
         # AST) would spuriously mark everything stale. Canonicalize instead.
+        """Canonical SHA-256 fingerprint over fmt-canonicalized AST text and upstream fingerprints."""
         from . import fmt as _fmt
         text = _fmt.format_module(__import__("strata.ast", fromlist=["Module"]).Module(
             path="<fp>", decls=[self.decl]))
@@ -1442,6 +1470,7 @@ def build_down_edges(tms: Dict[str, TypedModel]) -> Dict[Tuple[str, str], List[T
 
 
 def blast_radius(tms: Dict[str, TypedModel], changes: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    """All (node, col) descendants transitively affected by the given changed columns."""
     down = build_down_edges(tms)
     seen, stack = set(), list(changes)
     while stack:

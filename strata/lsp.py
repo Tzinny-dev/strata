@@ -63,6 +63,7 @@ SEVERITY_HINT = 4
 
 
 def diag_from_error(e: Exception) -> Optional[Diagnostic]:
+    """Map an exception to an LSP Diagnostic, or None when it carries no source span."""
     file = getattr(e, "file", None)
     line = getattr(e, "line", 1) - 1
     col = getattr(e, "col", 1) - 1
@@ -97,6 +98,7 @@ class LSPContext:
         self.parsed: Optional[Any] = None
 
     def reload(self, text: str, uri: str):
+        """Re-parse `text` for `uri` and refresh the cached project state."""
         self.text = text
         self.uri = uri
         self.path = uri.replace("file://", "")
@@ -153,6 +155,7 @@ class LSPServer:
         return None
 
     def completion(self, line: int, col: int) -> List[Dict[str, Any]]:
+        """Completion items at (line, col): model names and source names."""
         items: List[Dict[str, Any]] = []
         # Model names
         proj = getattr(self.ctx, '_proj', None)
@@ -184,6 +187,7 @@ class LSPServer:
         return items
 
     def hover(self, line: int, col: int) -> Optional[Dict[str, Any]]:
+        """Hover text for the token at (line, col), or None."""
         text = self.ctx.text
         lines = text.split("\n")
         if line >= len(lines):
@@ -216,6 +220,7 @@ class LSPServer:
         return None
 
     def definition(self, line: int, col: int) -> Optional[Dict[str, Any]]:
+        """Definition location for the token at (line, col), or None."""
         text = self.ctx.text
         lines = text.split("\n")
         if line >= len(lines):

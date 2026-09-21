@@ -21,6 +21,7 @@ from .diagnostic import format_diagnostic
 
 
 def load(path: str, search_dirs=None):
+    """Parse a `.strata` file and build its analysis Project (parse errors raise)."""
     src = Path(path).read_text()
     module = parse_strata(src, path)
     proj = analysis.Project(module, search_dirs=search_dirs)
@@ -28,6 +29,7 @@ def load(path: str, search_dirs=None):
 
 
 def check(proj, model_names=None):
+    """Typecheck a Project; returns {model_name: TypedModel}, raising StrataError on failure."""
     ck = Checker(proj)
     tms = ck.check_all(model_names)
     return tms
@@ -65,6 +67,7 @@ def open_warehouse(output, read_only=False):
 # ---------------------------------------------------------------- commands
 
 def cmd_build(args):
+    """`strata build <file>`: compile gate — prints typed contracts, fingerprints and lineage."""
     proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
     tms = check(proj, args.model)
     names = args.model or list(tms)
@@ -100,6 +103,7 @@ def render_build(proj, tms, names):
 
 
 def cmd_compile(args):
+    """`strata compile <file> --dialect D`: emit dialect-constrained SQL for the selected models."""
     proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
     tms = check(proj, args.model)
     dialect = getattr(args, "dialect", "duckdb")
@@ -120,6 +124,7 @@ def cmd_compile(args):
 
 
 def cmd_plan(args):
+    """`strata plan <file>`: print the model graph with staleness status (or seed a baseline with --seed)."""
     proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, 'search_dir', None) else None))
     tms = check(proj)
     if args.seed:
@@ -170,6 +175,7 @@ def _fail_loud_contracts(proj, tms, changes, radius):
 
 
 def cmd_lineage(args):
+    """`strata lineage <file> [<file2>]`: column-level dependency edges, or a semantic diff vs a second module."""
     base_path = args.file
     if getattr(args, "head2", None):
         return _semantic_diff(base_path, args.head2,
@@ -211,6 +217,7 @@ def _semantic_diff(base_path: str, head_path: str,
     from .diff import diff_projects, impact_radius, render, to_json_dict
 
     def _load_checked(p):
+        """Load and typecheck a module; returns (project, first-error-string-or-None)."""
         proj = load(p, search_dirs=([search_dir] if search_dir else None))
         diag = None
         try:
@@ -251,6 +258,7 @@ def _semantic_diff(base_path: str, head_path: str,
 
 
 def cmd_run(args):
+    """`strata run <file>`: materialize stale model views against a real warehouse (`-o`)."""
     search = ([args.search_dir] if getattr(args, "search_dir", None) else [])
     proj = load(args.file, search_dirs=search or None)
     tms = check(proj)
@@ -546,6 +554,7 @@ def cmd_seed(args):
 
 
 def _run_seed(con, path: str):
+    """Seed a warehouse with the built-in demo sources (from strata.seed)."""
     from .seed import seed_sql  # lazy: seed imports live alongside examples
     con.execute(seed_sql()[0])
 
@@ -569,6 +578,7 @@ def cmd_import_dbt(args):
 
 
 def cmd_init(args):
+    """`strata init <dir>`: scaffold a project — writing a deterministic AGENTS.md for Strata."""
     target = Path(args.target)
     target.mkdir(parents=True, exist_ok=True)
     name = "--codex" if args.codex else ("--claude" if args.claude else None)
@@ -629,6 +639,7 @@ def cmd_branches(args):
 
 
 def cmd_fmt(args):
+    """`strata fmt <file>`: canonical formatting — prints (default), writes in place, or --check."""
     from .fmt import format_module
     proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, "search_dir", None) else None))
     text = format_module(proj.module)
@@ -647,6 +658,7 @@ def cmd_fmt(args):
 
 
 def cmd_lint(args):
+    """`strata lint <file>`: static warnings over the typed module; --strict turns warnings into a failure."""
     from .lint import lint
     proj = load(args.file, search_dirs=([args.search_dir] if getattr(args, "search_dir", None) else None))
     tms = check(proj)
@@ -661,6 +673,7 @@ def cmd_lint(args):
 
 
 def cmd_replay(args):
+    """`strata replay <file>`: verify (--verify), re-execute (--execute), or list recorded runs."""
     if getattr(args, "verify", None):
         try:
             e = exec_mod.verify_run(args.file, args.verify)
@@ -721,6 +734,7 @@ def cmd_replay(args):
 
 
 def cmd_backfill(args):
+    """`strata backfill <file> --run <id>`: re-run a past run's model set against today's sources."""
     rec = exec_mod.find_run(args.file, args.run_id)
     if rec is None:
         print(f"error: E085: unknown run {args.run_id!r} (see strata replay)", file=sys.stderr)
@@ -778,6 +792,7 @@ def cmd_backfill(args):
 
 
 def cmd_rollback(args):
+    """`strata rollback <file> --run <id>`: repoint live views to a previous run's snapshots."""
     e = exec_mod.find_run(args.file, args.run_id)
     if e is None:
         print(f"error: E081: unknown run {args.run_id!r} (see strata replay)", file=sys.stderr)
@@ -878,6 +893,7 @@ def cmd_gc(args):
 
 
 def main(argv=None):
+    """CLI entry point: build the argument parser, dispatch the subcommand, return its exit code."""
     ap = argparse.ArgumentParser(prog="strata", description="declarative, versioned data transformations")
     sub = ap.add_subparsers(dest="cmd", required=True)
 

@@ -24,10 +24,20 @@ from . import dbcompat
 from .dialects import DUCKDB, get_dialect, physical_type
 from .analysis import Project, TypedModel, StrataError, contract_field_col
 from .types import StrataType, STRING
+from .observability import MetricsCollector, PrometheusExporter
 
 
 class PinError(Exception):
     pass
+
+
+# Module-level metrics collector (initialized on first run).
+_metrics_collector: Optional[MetricsCollector] = None
+
+
+def get_metrics() -> Optional[MetricsCollector]:
+    """Return the metrics collector from the last run, or None."""
+    return _metrics_collector
 
 
 def parse_freshness_threshold(freshness: str) -> Optional[datetime.timedelta]:
@@ -84,16 +94,19 @@ ID_SUFFIX = ".strata-id"
 
 
 def history_path(module_path: str) -> Path:
+    """Path to the module's run-history sidecar (`.strata-history.jsonl`)."""
     p = Path(module_path)
     return p.parent / (p.stem + HISTORY_SUFFIX)
 
 
 def _lock_path(module_path: str) -> Path:
+    """Path to the module's writer-lock sidecar (`.strata-lock`)."""
     p = Path(module_path)
     return p.parent / (p.stem + LOCK_SUFFIX)
 
 
 def _id_path(module_path: str) -> Path:
+    """Path to the module's stable-identity sidecar (`.strata-id`)."""
     p = Path(module_path)
     return p.parent / (p.stem + ID_SUFFIX)
 
@@ -222,6 +235,10 @@ def load_history(module_path: str, lenient: bool = False) -> list:
 
 
 def find_run(module_path: str, run_id: str) -> Optional[dict]:
+    """Resolve a (possibly prefix) run_id to its history entry, or None.
+
+    Prefers the latest non-pending phase: a pending record was superseded by
+    its completion (or abandoned by recovery)."""
     matches = [e for e in load_history(module_path)
                if e.get("run_id", "").startswith(run_id)]
     # Prefer the latest non-pending phase: a pending record was superseded by
@@ -233,11 +250,13 @@ def find_run(module_path: str, run_id: str) -> Optional[dict]:
 
 
 def manifest_path(module_path: str) -> Path:
+    """Path to the module's manifest sidecar (`.strata-manifest.json`)."""
     p = Path(module_path)
     return p.parent / (p.stem + MANIFEST_SUFFIX)
 
 
 def load_manifest(path: str) -> Dict[str, str]:
+    """Load the module's manifest as {model_name: fingerprint}; {} if absent/corrupt."""
     mp = manifest_path(path)
     if mp.exists():
         try:
@@ -248,15 +267,18 @@ def load_manifest(path: str) -> Dict[str, str]:
 
 
 def save_manifest(path: str, fingerprints: Dict[str, str]):
+    """Atomically persist the module's {model_name: fingerprint} manifest."""
     _atomic_write(manifest_path(path), json.dumps(fingerprints, indent=2, sort_keys=True))
 
 
 def stale_models(tms: Dict[str, TypedModel], path: str) -> List[str]:
+    """Models whose fingerprint differs from the persisted manifest (code-changed)."""
     manifest = load_manifest(path)
     return [n for n, tm in tms.items() if manifest.get(n) != tm.fingerprint]
 
 
 def _contract_decl(project: Project, tm: TypedModel):
+    """Resolve a model's contract declaration, or None; raises PinError if missing."""
     if not tm.contract:
         return None
     cd = project.contracts.get(tm.contract)
@@ -324,6 +346,9 @@ def check_join_cardinality(con, project: Project, tm: TypedModel, order,
 
 
 def runtime_pins(con, project: Project, tm: TypedModel, view: str, report: List[str]):
+    """Phase-C runtime pins: verify the materialized view's physical schema
+    against the model's declared contract. Raises PinError on any mismatch
+    and appends one `ok` line per field to `report`."""
     if not tm.contract:
         return
     cd = _contract_decl(project, tm)
@@ -416,10 +441,12 @@ def staged_name(name: str, branch: str = "main") -> str:
 
 
 def promoted_name(name: str) -> str:
+    """Live view name for a model: `v_<name>`."""
     return f"{PROMOTED_PREFIX}{name}"
 
 
 def list_branches(con) -> List[str]:
+    """Branches present in the warehouse (staged view prefixes), or `["main"]`."""
     try:
         rows = con.execute(
             "SELECT table_name FROM information_schema.tables "
@@ -533,6 +560,7 @@ def materialize(con, project: Project, tms: Dict[str, TypedModel],
         # swap otherwise (standalone `strata test` path).
         if run_id is not None:
             def validate_snapshots():
+                """Validate every published snapshot's pins and declarative tests."""
                 for name in order:
                     runtime_pins(con, project, tms[name], snapshot_name(run_id, name), [])
                 run_tests(con, project, tms, order, dialect, branch)
@@ -898,10 +926,12 @@ def _apply_source_overrides(sql: str, project: Project,
 
 
 def _dep_order(tms: Dict[str, TypedModel], names: List[str]) -> List[str]:
+    """Topologically sort `names` so every dependency precedes its dependents."""
     done: set = set()
     out: List[str] = []
 
     def visit(n):
+        """Depth-first helper: append n after its (in-set) dependencies."""
         if n in done:
             return
         tm = tms[n]
@@ -1217,6 +1247,11 @@ def _run_locked(con, project: Project, tms: Dict[str, TypedModel], module_path: 
                 branch: str = "main", stage_only: bool = False,
                 reason: Optional[str] = None, backfill_of: Optional[str] = None,
                 freshness_override: Optional[str] = None):
+    """Body of `run()` while holding the module writer lock: computes staleness,
+    materializes the selected models, records the run, and collects metrics."""
+    global _metrics_collector
+    _metrics_collector = MetricsCollector()
+    start = datetime.datetime.now()
     if names is None:
         names = list(tms)
     for src in source_overrides or {}:
@@ -1341,6 +1376,15 @@ def _run_locked(con, project: Project, tms: Dict[str, TypedModel], module_path: 
                 stale.discard(name)
         names = [n for n in names if n in stale]
         if not names:
+            elapsed = (datetime.datetime.now() - start).total_seconds() * 1000
+            try:
+                n_rows = sum(
+                    con.execute(f"SELECT COUNT(*) FROM {('v_' if not stage_only else 'stg_main__')}{n}").fetchone()[0]
+                    for n in []
+                )
+            except Exception:
+                n_rows = 0
+            get_metrics().record_materialization(", ".join(names) if names else "unknown", elapsed, n_rows)
             return [], [], "everything up to date (nothing to do)"
     # Identity includes data; snapshots are never overwritten on a repeated id.
     entry = {
@@ -1351,6 +1395,18 @@ def _run_locked(con, project: Project, tms: Dict[str, TypedModel], module_path: 
         "branch": branch,
         "source_fingerprints": source_fps,
     }
+    elapsed = (datetime.datetime.now() - start).total_seconds() * 1000
+    n_rows = 0
+    if not names:
+        try:
+            n_rows = sum(
+                con.execute(f"SELECT COUNT(*) FROM {('v_' if not stage_only else 'stg_main__')}{n}").fetchone()[0]
+                for n in []
+            )
+        except Exception:
+            n_rows = 0
+        get_metrics().record_materialization(", ".join(names) if names else "unknown", elapsed, n_rows)
+        return [], [], "everything up to date (nothing to do)"
     if reason is not None:
         entry["reason"] = reason
     if backfill_of is not None:
@@ -1366,6 +1422,13 @@ def _run_locked(con, project: Project, tms: Dict[str, TypedModel], module_path: 
                                                  module_path=module_path)
     entry["applied"] = applied
     entry["pins"] = pins
+    get_metrics().record_materialization(
+        ", ".join(names) if names else "unknown",
+        elapsed,
+        n_rows,
+    )
+    if not applied:
+        get_metrics().record_error("run", "no_models_applied")
     if stage_only:
         save_manifest(module_path, entry["fingerprints"])
         record_run(module_path, entry, run_id=rid)

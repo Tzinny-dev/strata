@@ -73,5 +73,39 @@ class TestLexerBadInput(unittest.TestCase):
             parse_strata("model x { from orders ")  # EOF inside model body
 
 
+class TestParserFuzzRegressions(unittest.TestCase):
+    """Diagnostics found by tests/test_parser_fuzz.py (parser and lexer must
+    fail with the expected error type, never crash or hang on garbage)."""
+
+    def test_enum_unterminated_raises_parse_error_not_hang(self):
+        # EOF inside `enum {` used to spin forever (sticky-EOF advance loop).
+        with self.assertRaises(ParseError):
+            parse_strata("source s(a: string) { columns: {\n"
+                         "  country: string enum {ES, MX", "enum.strata")
+
+    def test_lexer_error_uses_file_not_path_kwag(self):
+        # LexError.__init__ took `file=`; the lexer passed `path=` so any
+        # unterminated string/empty interpolation raised TypeError instead.
+        from strata.lexer import LexError
+        with self.assertRaises(LexError) as cm:
+            parse_strata("model x { let a = \"unterminated", "bad.strata")
+        self.assertEqual(cm.exception.file, "bad.strata")
+
+    def test_unterminated_string_with_trailing_backslash(self):
+        # `_advance()` indexed text[pos] past EOF on a trailing backslash.
+        from strata.lexer import LexError
+        with self.assertRaises(LexError):
+            parse_strata("model x { let a = \"oops\\", "bs.strata")
+
+    def test_model_attr_truncated_raises_parse_error(self):
+        # attr value read `for p in advance().value` -> iterated None at EOF.
+        with self.assertRaises(ParseError):
+            parse_strata("model x { owner: ", "attr.strata")
+
+    def test_fn_model_attr_truncated_raises_parse_error(self):
+        with self.assertRaises(ParseError):
+            parse_strata("fn f() -> List<Model> { model m { owner: ", "fnattr.strata")
+
+
 if __name__ == "__main__":
     unittest.main()
