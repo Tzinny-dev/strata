@@ -674,6 +674,171 @@ class TestMapExecutionDuckDB(unittest.TestCase):
             self.assertIsInstance(id_val, int)
 
 
+class TestStructConstructors(unittest.TestCase):
+    """Typed struct constructors and accessor."""
+
+    def test_struct_inferred_type(self):
+        tm = model('select { s = struct("id", n, "name", a) }')
+        self.assertEqual(str(tm.schema["s"].t), "struct<id:int64,name:string>")
+
+    def test_struct_get_returns_field_type(self):
+        tm = model('select { s = struct("id", n, "name", a), v = struct_get(s, "id") }')
+        self.assertEqual(str(tm.schema["v"].t), "int64")
+
+    def test_struct_get_nullable(self):
+        tm = model('select { s = struct("id", n), v = struct_get(s, "id") }')
+        self.assertTrue(tm.schema["v"].nullable)
+
+    def test_struct_odd_args_fails(self):
+        self.assertEqual(
+            error('model m { from s select { s = struct("a") } }').code, "E062")
+
+    def test_struct_non_string_name_fails(self):
+        self.assertEqual(
+            error('model m { from s select { s = struct(n, 1) } }').code, "E063")
+
+    def test_struct_get_non_struct_fails(self):
+        self.assertEqual(
+            error('model m { from s select { v = struct_get(n, "id") } }').code, "E063")
+
+    def test_struct_get_non_string_field_fails(self):
+        self.assertEqual(
+            error('model m { from s select { s = struct("id", n), v = struct_get(s, n) } }').code,
+            "E063")
+
+
+class TestStructContractTypes(unittest.TestCase):
+    """struct field specs in contracts and domains."""
+
+    def test_contract_column_struct_type(self):
+        body = 'contract t { s: struct<id: int64, name: string> }'
+        proj, tms = project(body)
+        self.assertTrue(True)
+
+    def test_domain_struct_type(self):
+        body = 'domain my = struct<id: int64, name: string>'
+        proj, tms = project(body)
+        self.assertTrue(True)
+
+
+class TestStructCodegenByDialect(unittest.TestCase):
+    """Cross-dialect SQL emission for struct() and struct_get()."""
+
+    def assert_sql_contains(self, body, dialect, expected_frag):
+        sql = sql_of(body, dialect=dialect)
+        self.assertIn(expected_frag, sql, f"dialect {dialect.name}: missing {expected_frag!r}")
+
+    def test_struct_constructor_duckdb(self):
+        self.assert_sql_contains('select { s = struct("id", n, "name", a) }', DUCKDB,
+                                 "{'id': n, 'name': a}")
+
+    def test_struct_constructor_postgres(self):
+        self.assert_sql_contains('select { s = struct("id", n, "name", a) }', POSTGRES,
+                                 "jsonb_build_object('id', n, 'name', a)")
+
+    def test_struct_constructor_bigquery(self):
+        self.assert_sql_contains('select { s = struct("id", n, "name", a) }', BIGQUERY,
+                                 "STRUCT(n AS id, a AS name)")
+
+    def test_struct_constructor_snowflake(self):
+        self.assert_sql_contains('select { s = struct("id", n, "name", a) }', SNOWFLAKE,
+                                 "OBJECT_CONSTRUCT_KEEP_NULL('id', n, 'name', a)")
+
+    def test_struct_get_duckdb(self):
+        self.assert_sql_contains('select { s = struct("id", n), v = struct_get(s, "id") }', DUCKDB,
+                                 "struct_extract(s, 'id')")
+
+    def test_struct_get_postgres(self):
+        self.assert_sql_contains('select { s = struct("id", n), v = struct_get(s, "id") }', POSTGRES,
+                                 "(s ->> 'id')")
+
+    def test_struct_get_bigquery(self):
+        self.assert_sql_contains('select { s = struct("id", n), v = struct_get(s, "id") }', BIGQUERY,
+                                 "s.id")
+
+    def test_struct_get_snowflake(self):
+        self.assert_sql_contains('select { s = struct("id", n), v = struct_get(s, "id") }', SNOWFLAKE,
+                                 "GET(s, 'id')")
+
+
+@unittest.skipUnless(HAVE_DUCKDB, "duckdb not available")
+class TestStructExecutionDuckDB(unittest.TestCase):
+    """End-to-end: struct/struct_get runs on DuckDB."""
+
+    def test_struct_roundtrip(self):
+        import duckdb
+        from strata.seed import seed_sql
+        from strata import exec as ex
+        import strata.analysis as analysis
+        from strata.parser import parse_strata
+        from strata.analysis import Checker
+
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "s.strata")
+        text = (
+            'source orders(ns: "n", dataset: "orders") {\n'
+            '  columns: { order_id: int64, customer_id: int64, country: string }\n'
+            '}\n'
+            'model w {\n'
+            '  from orders\n'
+            '  select {\n'
+            '    st   = struct("id", order_id, "cust", customer_id),\n'
+            '    id   = struct_get(st, "id"),\n'
+            '    cust = struct_get(st, "cust"),\n'
+            '  }\n'
+            '}\n')
+        Path(path).write_text(text)
+
+        con = duckdb.connect()
+        for stmt in seed_sql()[0].split(";"):
+            if stmt.strip():
+                con.execute(stmt)
+        proj = analysis.Project(parse_strata(text, path))
+        tms = Checker(proj).check_all()
+        ex.materialize(con, proj, tms, names=["w"])
+        rows = con.execute("SELECT id, cust FROM v_w ORDER BY id").fetchall()
+        self.assertGreater(len(rows), 0)
+        for id_val, cust_val in rows:
+            self.assertIsInstance(id_val, int)
+            self.assertIsInstance(cust_val, int)
+
+    def test_struct_in_filter(self):
+        import duckdb
+        from strata.seed import seed_sql
+        from strata import exec as ex
+        import strata.analysis as analysis
+        from strata.parser import parse_strata
+        from strata.analysis import Checker
+
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "s.strata")
+        text = (
+            'source orders(ns: "n", dataset: "orders") {\n'
+            '  columns: { order_id: int64, customer_id: int64, country: string }\n'
+            '}\n'
+            'model w {\n'
+            '  from orders\n'
+            '  filter customer_id > 1001\n'
+            '  select {\n'
+            '    st = struct("id", order_id, "cust", customer_id),\n'
+            '    id = struct_get(st, "id"),\n'
+            '  }\n'
+            '}\n')
+        Path(path).write_text(text)
+
+        con = duckdb.connect()
+        for stmt in seed_sql()[0].split(";"):
+            if stmt.strip():
+                con.execute(stmt)
+        proj = analysis.Project(parse_strata(text, path))
+        tms = Checker(proj).check_all()
+        ex.materialize(con, proj, tms, names=["w"])
+        rows = con.execute("SELECT id FROM v_w ORDER BY id").fetchall()
+        self.assertGreater(len(rows), 0)
+        for (id_val,) in rows:
+            self.assertIsInstance(id_val, int)
+
+
 if __name__ == "__main__":
     unittest.main()
 

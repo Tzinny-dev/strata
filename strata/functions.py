@@ -21,7 +21,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from .dialects import Dialect
 from .types import (
     Inf, StrataType, INT64, FLOAT64, STRING, BOOL, JSON, UNKNOWN, array,
-    map_type, unify,
+    map_type, struct_type, unify,
 )
 
 # error codes owned by this module
@@ -109,6 +109,7 @@ _KINDS: Dict[str, Callable[[Inf], bool]] = {
     "json": lambda a: a.t == JSON,
     "array": lambda a: a.t.name == "array" and a.t.elem is not None,
     "map": lambda a: a.t.name == "map" and a.t.key is not None and a.t.value is not None,
+    "struct": lambda a: a.t.name == "struct" and a.t.fields is not None,
 }
 
 
@@ -269,6 +270,8 @@ def check(fn: Fn, args: List[Inf], has_star: bool = False) -> Optional[Tuple[str
         return _check_array_operation(fn, args)
     if fn.name in ("map", "dict", "map_get"):
         return _check_map_operation(fn, args)
+    if fn.name in ("struct", "struct_get"):
+        return _check_struct_operation(fn, args)
     if fn.name == "json_build":
         return _check_json_build(fn, args)
     if fn.name == "array_agg":
@@ -376,6 +379,56 @@ def _check_map_operation(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
     if not _valid_map_value(vt):
         return E_ARG_TYPE, (f"{fn.name}() values must be a JSON-representable scalar "
                             f"(string/int64/float64/bool/decimal/money/json, got {vt})")
+    return None
+
+
+def _struct_constructed_type(args: List[Inf]) -> StrataType:
+    """Struct constructor return type: named fields with their unified types.
+    Args come as (name, value) pairs; names are literal strings, values unify."""
+    fields = []
+    for i in range(0, len(args), 2):
+        name_expr = args[i]
+        val_expr = args[i + 1]
+        # name_expr should be a string Literal; fall back to "field"
+        fname = getattr(name_expr, "value", None)
+        if not isinstance(fname, str):
+            fname = "field"
+        fields.append((fname, val_expr.t))
+    return struct_type(fields)
+
+
+def _struct_field_type(struct_t: StrataType, field_expr: Inf) -> StrataType:
+    """Extract the field type from a struct type for struct_get return."""
+    if struct_t.fields is None:
+        return UNKNOWN
+    fname = getattr(field_expr, "value", None)
+    if isinstance(fname, str):
+        for n, t in struct_t.fields:
+            if n == fname:
+                return t
+    return UNKNOWN
+
+
+def _check_struct_operation(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
+    """Validate struct() constructor and struct_get() accessor.
+    - struct() needs name/value pairs (even count), string literal names;
+    - struct_get() needs a typed struct and a string literal field name."""
+    if fn.name == "struct_get":
+        base = args[0].t
+        field = args[1]
+        if base.name != "struct" or base.fields is None:
+            return E_ARG_TYPE, "struct_get() requires a typed struct first argument"
+        if field.t not in (STRING, UNKNOWN):
+            return E_ARG_TYPE, f"struct_get() field must be a string, got {field.t}"
+        return None
+    # struct() constructor
+    if len(args) % 2 != 0:
+        return (E_ARITY, f"{fn.name}() requires name/value pairs (even argument count)")
+    names = args[0::2]
+    vals = args[1::2]
+    for n in names:
+        if n.t.name != "string":
+            return E_ARG_TYPE, f"{fn.name}() field names must be string literals"
     return None
 
 
@@ -562,6 +615,12 @@ FUNCTIONS: List[Fn] = [
        max_args=2, collection=True, arg_kinds=("map", "string"),
        doc="value for the exact-key lookup; NULL when the key is absent or the "
            "map/key is NULL"),
+    Fn("struct", 2, lambda a: Inf(_struct_constructed_type(a), False),
+       collection=True, doc="typed struct from name/value pairs; names are string literals"),
+    Fn("struct_get", 2, lambda a: Inf(_struct_field_type(a[0].t, a[1]), True),
+       max_args=2, collection=True, arg_kinds=("struct", "string"),
+       doc="value for the exact-field lookup; NULL when the field is absent or the "
+           "struct/field is NULL"),
     Fn("array_contains", 2, lambda a: Inf(BOOL, any(i.nullable for i in a)),
        max_args=2, collection=True,
        doc="membership by scalar equality; NULL array or needle returns NULL; NULL elements do not match"),

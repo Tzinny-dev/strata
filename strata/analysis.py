@@ -17,7 +17,7 @@ from . import ast
 from . import functions
 from .types import (
     StrataType, Inf, INT64, FLOAT64, STRING, BOOL, DATE, TIMESTAMP, UUID, JSON,
-    UNKNOWN, decimal, money, array, map_type, binary_type, unify, Col,
+    UNKNOWN, decimal, money, array, map_type, struct_type, binary_type, unify, Col,
 )
 
 
@@ -218,6 +218,17 @@ def type_from_spec(spec: str, params: List[object],
                       f"map values must be a JSON-representable scalar "
                       f"(string/int64/float64/bool/decimal/money/json, got {value})")
         return map_type(key, value)
+    if spec == "struct":
+        if not params:
+            return struct_type([])
+        fields = []
+        for p in params:
+            if not isinstance(p, tuple) or len(p) != 2:
+                raise err("E063", "struct() fields must be name:type pairs")
+            fname, fspec = p
+            ftype = _elem_type(fspec, domains)
+            fields.append((fname, ftype))
+        return struct_type(fields)
     if domains is not None and spec in domains:
         return domains[spec]
     return UNKNOWN
@@ -496,6 +507,17 @@ class Project:
                               f"(string/int64/float64/bool/decimal/money/json, "
                               f"got {value})")
                 return map_type(key, value)
+            if spec == "struct":
+                if not params:
+                    return struct_type([])
+                fields = []
+                for p in params:
+                    if not isinstance(p, tuple) or len(p) != 2:
+                        raise err("E063", "struct() fields must be name:type pairs")
+                    fname, fspec = p
+                    ftype = _elem_type(fspec, self.domain_types)
+                    fields.append((fname, ftype))
+                return struct_type(fields)
             return rec(spec)
 
         def rec(name: str) -> StrataType:
@@ -980,6 +1002,18 @@ class _ModelState:
                 base_t = fn.ret(args).t
             elif name in ("map", "dict"):
                 base_t = fn.ret(args).t
+            elif name == "struct":
+                # Compute struct type from AST to get field names
+                fields = []
+                for i in range(0, len(e.args), 2):
+                    name_node = e.args[i]
+                    val_node = e.args[i + 1]
+                    if not isinstance(name_node, ast.Literal) or not isinstance(name_node.value, str):
+                        raise self._err("E063", f"struct() field names must be string literals", name_node.span)
+                    fname = name_node.value
+                    ftype = self.infer(val_node).t
+                    fields.append((fname, ftype))
+                base_t = struct_type(fields)
             elif name == "json_build":
                 base_t = fn.ret(args).t
             elif name == "array_agg":
@@ -1022,6 +1056,26 @@ class _ModelState:
                               f"json_build() key at position {i + 1} must be a "
                               "simple ASCII identifier literal",
                               key.span)
+        if name == "struct_get":
+            # Compute return type from AST field name
+            base = self.infer(e.args[0]).t
+            field_node = e.args[1]
+            if not isinstance(field_node, ast.Literal) or not isinstance(field_node.value, str):
+                raise self._err("E063", "struct_get() field must be a string literal", field_node.span)
+            fname = field_node.value
+            if base.fields is None:
+                raise self._err("E063", "struct_get() requires a typed struct", e.span)
+            ftype = UNKNOWN
+            for n, t in base.fields:
+                if n == fname:
+                    ftype = t
+                    break
+            return Inf(ftype, True)
+        if name == "struct":
+            # Return type was computed in the collection branch above
+            base_t = self.tm.plan.collection_arg_types.get(id(e))
+            if base_t is not None:
+                return Inf(base_t, False)
         return fn.ret(args)
 
     # -- date functions (date_add/date_sub/date_trunc/date_diff) -----------

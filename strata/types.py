@@ -12,6 +12,7 @@ class StrataType:
     elem: Optional["StrataType"] = None
     key: Optional["StrataType"] = None     # map key type
     value: Optional["StrataType"] = None   # map value type
+    fields: Optional[List[Tuple[str, "StrataType"]]] = None  # struct fields: [(name, type), ...]
     precision: int = 38
     scale: int = 2
 
@@ -24,6 +25,10 @@ class StrataType:
             return f"array<{self.elem}>"
         if self.name == "map":
             return f"map<{self.key},{self.value}>"
+        if self.name == "struct":
+            if not self.fields:
+                return "struct<>"
+            return "struct<" + ",".join(f"{n}:{t}" for n, t in self.fields) + ">"
         return self.name
 
     def is_numeric(self) -> bool:
@@ -65,6 +70,11 @@ def array(elem: StrataType) -> StrataType:
 def map_type(key: StrataType, value: StrataType) -> StrataType:
     """Construct a map<K, V> type over the given key/value types."""
     return StrataType("map", key=key, value=value)
+
+
+def struct_type(fields: List[Tuple[str, StrataType]]) -> StrataType:
+    """Construct a struct type over the given named fields."""
+    return StrataType("struct", fields=fields)
 
 
 # ---------------------------------------------------------------- types ops

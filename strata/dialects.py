@@ -232,6 +232,22 @@ def physical_type(dialect: Dialect, t: StrataType) -> str:
         if json_sql is None:
             raise ValueError(f"dialect {dialect.name}: no physical type for map<{t.key},{t.value}>")
         return json_sql
+    if t.name == "struct":
+        if t.fields is None:
+            raise ValueError(f"dialect {dialect.name}: struct without fields")
+        if dialect.name == "duckdb":
+            # DuckDB native STRUCT
+            fields_sql = ", ".join(f"{n} {physical_type(dialect, ft)}" for n, ft in t.fields)
+            return f"STRUCT({fields_sql})"
+        if dialect.name == "bigquery":
+            # BigQuery native STRUCT
+            fields_sql = ", ".join(f"{n} {physical_type(dialect, ft)}" for n, ft in t.fields)
+            return f"STRUCT({fields_sql})"
+        # Postgres and Snowflake: back by JSON
+        json_sql = dialect.sql_type("json")
+        if json_sql is None:
+            raise ValueError(f"dialect {dialect.name}: no physical type for struct")
+        return json_sql
     sql = dialect.sql_type(t.name)
     if sql is None:
         raise ValueError(f"dialect {dialect.name}: no physical type for {t.name}")

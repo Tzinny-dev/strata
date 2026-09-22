@@ -470,8 +470,11 @@ Verificado que fallan (no es una omisión, es el estado real):
   valores homogéneos en el subconjunto JSON-representable
   (string/int64/float64/bool/decimal/money/json). DuckDB nativo `MAP`,
   Postgres/BigQuery/Snowflake respaldados por JSONB/JSON/VARIANT.
-- Tipo `struct`: `meta: struct` en una columna → `E078: unknown type
-  'struct'`.
+- Tipo `struct`: → **implementado** desde **2026-09-21**:
+  `struct("f", v, "g", w)` construye `struct<f: T, g: U>`; `struct_get(s, "f")`
+  accede por campo exacto. DuckDB/BigQuery nativo `STRUCT`, Postgres/Snowflake
+  respaldados por JSONB/VARIANT. Campos con tipos escalares del subconjunto
+  JSON-representable.
 
-Si necesitas `struct`, `spec/grammar.md` lo deja documentado como fuera
-del subconjunto soportado, no como un error de esta versión.
+Si necesitas algo fuera de este subconjunto, `spec/grammar.md` lo deja
+documentado como fuera del soporte, no como un error de esta versión.

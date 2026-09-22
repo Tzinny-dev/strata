@@ -253,6 +253,22 @@ class Parser:
                 k = kspec if kparams == [] else (kspec, kparams)
                 v = vspec if vparams == [] else (vspec, vparams)
                 return "map", [k, v]
+            if tok.value == "struct" and self.peek().kind == "SYM" and self.peek().value == "<":
+                # struct<f: t, ...> — not a keyword, so stays free as ident elsewhere
+                self.advance()
+                self.expect("SYM", "<")
+                fields = []
+                while True:
+                    fname = self.expect("ID").value
+                    self.expect("SYM", ":")
+                    fspec, fparams = self.parse_type_spec()
+                    f = fspec if fparams == [] else (fspec, fparams)
+                    fields.append((fname, f))
+                    if self.at("SYM", ">"):
+                        break
+                    self.expect("SYM", ",")
+                self.expect("SYM", ">")
+                return "struct", fields
             return self.advance().value, []
         if tok.kind != "TYPE_KW":
             raise ParseError(
@@ -673,7 +689,7 @@ class Parser:
         return decl
 
     def parse_type_str(self) -> List[str]:
-        """Parse a type expression (`List<...>`, `Map<K,V>`, primitive, or model reference)."""
+        """Parse a type expression (`List<...>`, `Map<K,V>`, `Struct<...>`, primitive, or model reference)."""
         if self.at("ID") and self.cur().value == "List":
             self.advance()
             self.expect("SYM", "<")
@@ -688,6 +704,20 @@ class Parser:
             value = self.parse_type_str()
             self.expect("SYM", ">")
             return ["Map<"] + key + [","] + value + [">"]
+        if self.at("ID") and self.cur().value == "Struct":
+            self.advance()
+            self.expect("SYM", "<")
+            fields = []
+            while True:
+                fname = self.expect("ID").value
+                self.expect("SYM", ":")
+                ftype = self.parse_type_str()
+                fields.append(fname + ":" + "".join(ftype))
+                if self.at("SYM", ">"):
+                    break
+                self.expect("SYM", ",")
+            self.expect("SYM", ">")
+            return ["Struct<"] + [",".join(fields)] + [">"]
         if self.at("TYPE_KW") or self.at("ID"):
             self.advance()
             return [self.ts[self.i - 1].value]

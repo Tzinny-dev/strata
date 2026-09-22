@@ -151,13 +151,18 @@ RULES["contract-field"] = ("name : type annotations", [
     r'ident ":" type-spec type-annot*',
 ])
 
-RULES["type-spec"] = ("builtin type with optional parameters (array/map recurse; a bare ident is a domain alias)", [
+RULES["type-spec"] = ("builtin type with optional parameters (array/map/struct recurse; a bare ident is a domain alias)", [
     r'"decimal" "(" int-lit "," int-lit ")"',
     r'"array" "(" type-spec ")"',
     r'"map" "(" type-spec "," type-spec ")"',
+    r'"struct" "<" struct-field-list ">"',
     r'"money" ("(" ident ")")?',
     "type-kw-scalar",
     "ident",
+])
+
+RULES["struct-field-list"] = ("field list for struct: name : type-spec", [
+    r'ident ":" type-spec ("," ident ":" type-spec)*',
 ])
 
 RULES["type-kw-scalar"] = ("builtin type keyword sans decimal/array (must be parameterized)", [
@@ -300,10 +305,15 @@ RULES["param-list"] = ("fn parameters (no trailing comma)", [
     'ident ":" type-str (\",\" ident ":" type-str)*',
 ])
 
-RULES["type-str"] = ("List<...> | Map<K,V> | TYPE_KW | ident", [
+RULES["type-str"] = ("List<...> | Map<K,V> | Struct<...> | TYPE_KW | ident", [
     r'"List" "<" type-str ">"',
     r'"Map" "<" type-str "," type-str ">"',
+    r'"Struct" "<" struct-field-str-list ">"',
     "type-kw", "ident",
+])
+
+RULES["struct-field-str-list"] = ("field list for Struct type: name : type-str", [
+    r'ident ":" type-str ("," ident ":" type-str)*',
 ])
 
 RULES["expr-list"] = ("expressions, comma separated", [

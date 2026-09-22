@@ -305,6 +305,59 @@ class Translator:
                 return f"GET({base}, {key})"
             return f"CAST(GET({base}, {key}) AS {vtarget})"
 
+        # --- struct: typed struct from name/value pairs ---
+        # DuckDB and BigQuery have native STRUCT; Postgres/Snowflake use JSON.
+        if name == "struct":
+            # base_t carries the typed field names (struct<id:int64,...>)
+            assert base_t.fields is not None
+            if d == "duckdb":
+                inner = ", ".join(
+                    f"{_lit(fname)}: {self.expr(e.args[2 * i + 1])}"
+                    for i, (fname, _) in enumerate(base_t.fields)
+                )
+                return f"{{{inner}}}"
+            if d == "bigquery":
+                inner = ", ".join(
+                    f"{self.expr(e.args[2 * i + 1])} AS {fname}"
+                    for i, (fname, _) in enumerate(base_t.fields)
+                )
+                return f"STRUCT({inner})"
+            # PG / Snowflake: JSON object
+            inner = ", ".join(
+                f"{_lit(fname)}, {self.expr(e.args[2 * i + 1])}"
+                for i, (fname, _) in enumerate(base_t.fields)
+            )
+            if d == "postgres":
+                return f"jsonb_build_object({inner})"
+            return f"OBJECT_CONSTRUCT_KEEP_NULL({inner})"
+
+        # --- struct_get: value for the exact field ---
+        if name == "struct_get":
+            base = self.expr(e.args[0])
+            field_expr = e.args[1]
+            if d == "duckdb":
+                if isinstance(field_expr, ast.Literal) and isinstance(field_expr.value, str):
+                    return f"struct_extract({base}, {_lit(field_expr.value)})"
+                return f"struct_extract({base}, {self.expr(field_expr)})"
+            if d == "bigquery":
+                if isinstance(field_expr, ast.Literal) and isinstance(field_expr.value, str):
+                    return f"{base}.{field_expr.value}"
+                raise RuntimeError(
+                    f"dialect 'bigquery' cannot take a dynamic field in struct_get(): "
+                    "use a literal field name")
+            if d == "postgres":
+                if isinstance(field_expr, ast.Literal) and isinstance(field_expr.value, str):
+                    return f"({base} ->> {_lit(field_expr.value)})"
+                raise RuntimeError(
+                    f"dialect 'postgres' cannot take a dynamic field in struct_get(): "
+                    "use a literal field name")
+            # Snowflake: GET on VARIANT
+            if isinstance(field_expr, ast.Literal) and isinstance(field_expr.value, str):
+                return f"GET({base}, {_lit(field_expr.value)})"
+            raise RuntimeError(
+                f"dialect 'snowflake' cannot take a dynamic field in struct_get(): "
+                "use a literal field name")
+
         # --- json_get / json_value: object member by literal key, or by an
         # expression that the checker has already proven to be a string ---
         # A literal key becomes a compile-time path/member. A dynamic key is a
