@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install PostgreSQL binaries (for ephemeral_postgres harness)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-16
+          /usr/lib/postgresql/16/bin/initdb --version
+          /usr/lib/postgresql/16/bin/postgres --version
+
+      - name: Install strata + dev deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run tests with coverage gate (80%)
+        # pyproject.toml already sets: --cov=strata --cov-fail-under=80
+        run: |
+          pytest -q
+
+      - name: Verify build (wheel) and twine check
+        if: matrix.python-version == '3.12'
+        run: |
+          pip install build twine
+          python -m build --wheel
+          twine check dist/*
+          ls -lh dist/
+
+      - name: Smoke test installed entry point
+        if: matrix.python-version == '3.12'
+        run: |
+          strata --help
+          strata build examples/daily_orders.strata
+          strata compile examples/daily_orders.strata --dialect postgres > /tmp/out.sql
+          test -s /tmp/out.sql
+
+      - name: Upload coverage HTML
+        if: always() && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: htmlcov
+          path: htmlcov/
+          if-no-files-found: ignore

@@ -8,16 +8,20 @@ seis operaciones (`connect`, `execute`, `fetch`, `materialize`,
 
 ## Estado actual
 
-| Warehouse | Adapter | Ejecución real |
-| --- | --- | --- |
-| DuckDB | `DuckDBWarehouse` (incluido) | ✅ `duckdb` |
-| Postgres | stub E095 | ❌ requiere `psycopg2-binary` |
-| BigQuery | stub E095 | ❌ requiere `google-cloud-bigquery` |
-| Snowflake | stub E095 | ❌ requiere `snowflake-connector-python` |
+| Warehouse | Adapter ABC (`strata.adapters`) | Ejecución real del motor (`strata.exec`) | Driver |
+| --- | --- | --- | --- |
+| DuckDB | `DuckDBWarehouse` ✅ | ✅ `duckdb` (default dep) | `duckdb` |
+| Postgres | stub E095 — sin `Warehouse` ABC aún | ✅ `cli.open_warehouse("postgres://...")` → `dbcompat.PGConn` (psycopg2, probado contra Postgres 16 efímero en `tests/pg_harness.py`) | `pip install strata[postgres]` |
+| BigQuery | stub E095 | ❌ solo `sqlgen` (`--dialect bigquery` emite SQL) | `pip install strata[bigquery]` |
+| Snowflake | stub E095 | ❌ solo `sqlgen` (`--dialect snowflake` emite SQL) | `pip install strata[snowflake]` |
 
 `sqlgen` ya produce SQL por dialecto; el adapter solo transporta
 (transacción, materialización, listado). No hay traducción de
-semántica en el adapter — eso vive en `dialects.py`.
+semántica en el adapter — eso vive en `dialects.py`. La bifurcación
+Postgres (motor real vía `dbcompat.PGConn`, adapter ABC aún stub) es
+intencional y está testeada en `tests/test_exec_postgres.py` (6 tests
+contra Postgres real); `get_adapter("postgres")` sigue tirando E095
+a propósito con hint a la ruta CLI.
 
 ## Uso
 

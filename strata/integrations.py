@@ -1,7 +1,16 @@
-"""Orchestrator integrations: Airflow, Prefect, Dagster.
+"""Orchestrator integrations: Airflow, Prefect — scaffolding only.
 
-Provides hooks and operators to integrate Strata pipelines with
-workflow orchestrators for production deployments.
+Status: experimental, scaffolding generator — not a runtime integration.
+Each factory returns a *string* of Python source that imports the
+orchestrator (`airflow`/`prefect`). Those packages are NOT dependencies
+of `strata` itself (`pyproject.toml` extra `airflow`/`prefect`), and no
+real DAG/flow is instantiated or validated here — tests only check
+substrings. The generated code shells out to `strata run`/`strata check`
+via `subprocess`, so it works with any strata install.
+
+See `plan-hito-2.md` §B: this module is intentionally disconnected
+until a real driver/integration is implemented; it must never be
+documented as "completed" or "production-ready".
 """
 from __future__ import annotations
 

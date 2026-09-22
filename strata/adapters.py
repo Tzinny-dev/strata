@@ -1,24 +1,20 @@
 """Warehouse adapters: abstract interface for real execution.
 
-The Strata engine today runs against DuckDB (the only warehouse with
-a real Python driver). Other warehouses (Postgres, BigQuery, Snowflake)
-are reachable through their official drivers (`psycopg2`,
-`google-cloud-bigquery`, `snowflake-connector-python`) — none of which
-is installed in the base environment, so their adapters raise
-`AdapterNotAvailable` (E095) with the package to install.
+DuckDB has a real `Warehouse` implementation (`DuckDBWarehouse`). Postgres
+has real *engine* execution via `strata.cli.open_warehouse("postgres://...")`
+which opens a `strata.dbcompat.PGConn` (psycopg2, tested against ephemeral
+Postgres 16 in `tests/pg_harness.py`) — the engine (`strata.exec`) works
+against either connection type without code changes (`dbcompat.is_postgres`).
 
-The `Warehouse` ABC defines the six operations the engine needs:
-`connect`, `execute`, `fetch`, `materialize` (CREATE TABLE snap),
-`drop` and `list_views`. A concrete adapter implements only those
-methods; `sqlgen` already produces dialect-specific SQL, so the
-adapter's job is transport, not translation.
+`strata.adapters.Warehouse` / `get_adapter("postgres")` is still a stub:
+even when `psycopg2-binary` is installed, `get_adapter("postgres")` raises
+`AdapterNotAvailable` (E095) because no `PostgresWarehouse` is wired to
+the ABC yet — use the CLI path or `dbcompat.PGConn` directly for real
+Postgres runs. BigQuery/Snowflake are SQL-emit only (no driver in base
+env, stub raises with install hint `pip install strata[bigquery]` etc.).
 
-Usage:
-    from strata.adapters import get_adapter, AdapterNotAvailable
-    try:
-        wh = get_adapter("postgres", conn_string="...")
-    except AdapterNotAvailable as e:
-        print(e.help)   # -> "pip install psycopg2-binary"
+`sqlgen` already produces dialect-specific SQL for all four; the adapter's
+job is transport, not translation.
 """
 from __future__ import annotations
 
@@ -83,9 +79,14 @@ _MISSING: Dict[str, tuple] = {
 def get_adapter(dialect: str, **kw) -> Warehouse:
     """Return a real Warehouse or raise AdapterNotAvailable (E095).
 
-    Only ``duckdb`` is available today (via ``duckdb``). Other
-    dialects look for their driver in the environment and raise
-    with the install instruction when absent.
+    ``duckdb`` returns a live ``DuckDBWarehouse``. ``postgres`` has a real
+    engine path (`strata.cli.open_warehouse("postgres://...")` →
+    ``dbcompat.PGConn``) but no ``Warehouse`` ABC implementation yet — this
+    function raises ``AdapterNotAvailable`` with a direct hint even when
+    ``psycopg2`` is importable, so callers don't misread "installed" as
+    "wired". BigQuery/Snowflake raise with the ``pip install strata[...]``
+    hint when their driver is absent, and "not yet implemented" when present
+    but unwired.
     """
     if dialect == "duckdb":
         import duckdb
@@ -97,11 +98,17 @@ def get_adapter(dialect: str, **kw) -> Warehouse:
         raise AdapterNotAvailable(
             dialect, pkg,
             f"warehouse adapter for {dialect!r} requires {pkg}; "
-            f"real execution is unavailable") from None
+            f"real execution is unavailable (pip install strata[{dialect}])") from None
+    if dialect == "postgres":
+        raise AdapterNotAvailable(
+            dialect, pkg,
+            f"warehouse adapter for {dialect!r} has no Warehouse ABC implementation yet; "
+            f"use strata.cli.open_warehouse('postgres://...') / dbcompat.PGConn for real Postgres runs "
+            f"(driver {pkg} is installed but adapters.Warehouse is not wired)") from None
     raise AdapterNotAvailable(
         dialect, pkg,
         f"warehouse adapter for {dialect!r} not yet implemented; "
-        f"install {pkg} and open a feature request") from None
+        f"install {pkg} and open a feature request (SQL emit via --dialect {dialect} works)") from None
 
 
 class DuckDBWarehouse(Warehouse):

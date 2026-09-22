@@ -1,6 +1,11 @@
-"""Observability: metrics collection and monitoring for Strata pipelines.
+"""Observability: metrics collection for Strata pipelines.
 
-Provides metrics exporters for Prometheus, StatsD, and custom monitoring.
+Status: connected since 2026-09-20 — `strata.exec` imports
+`MetricsCollector`/`PrometheusExporter` and records materialization
+duration/row counts and staleness errors via `_run_locked`/`get_metrics()`.
+Exporters (Prometheus/StatsD/JSON) are standalone formatters; wiring to a
+real pushgateway/statsd endpoint is left to the caller. No external
+dependency is required to import this module.
 """
 from __future__ import annotations
 

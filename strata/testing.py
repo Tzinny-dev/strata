@@ -1,7 +1,13 @@
-"""Testing utilities for freshness and staleness detection.
+"""Testing utilities — internal fixture helpers, not a public runtime API.
 
-Provides helpers for testing freshness thresholds, simulating stale data,
-and verifying staleness detection logic.
+Status: helper library for *authoring* tests/fixtures (create_test_source,
+create_test_model, FreshnessTestHelper, etc.). Not wired to the executor
+for end-to-end orchestration; the real freshness/staleness gate lives in
+`strata.exec` (`stale_models`, `run --only-stale`). These helpers just
+emit `.strata` text or create temp DuckDB tables.
+
+See `plan-hito-2.md` §B: documented as "helper, not connected" — do not
+present as a production testing framework.
 """
 from __future__ import annotations
 

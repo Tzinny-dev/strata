@@ -16,3 +16,8 @@ venv/
 htmlcov/
 .coverage
 .coverage.*
+
+# build artifacts (pip installable)
+dist/
+build/
+*.egg-info/
