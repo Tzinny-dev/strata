@@ -16,8 +16,24 @@ strata --help
 Or without venv after publish:
 
 ```bash
-pip install strata
+pip install strata-lang
 strata --help
+```
+
+### uv (standalone tool, no venv)
+
+```bash
+# from PyPI (once published) — package is strata-lang, entry point stays `strata`
+uv tool install strata-lang
+strata --help
+
+# from Git (before PyPI, or dev)
+uv tool install git+https://github.com/Tzinny-dev/strata --from prototype
+strata --help
+
+# upgrade
+uv tool upgrade strata-lang
+pip install --upgrade strata-lang
 ```
 
 ## Quick start
