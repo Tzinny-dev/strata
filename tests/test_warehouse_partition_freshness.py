@@ -41,7 +41,7 @@ def build_and_run(d, text, source_data=None):
         for table, rows in source_data.items():
             con.execute(f"CREATE TABLE {table} ({SRC_COLS})")
             for row in rows:
-                con.execute(f"INSERT INTO {table} VALUES ({", ".join(repr(v) for v in row)})")
+                con.execute(f"INSERT INTO {table} VALUES ({', '.join(repr(v) for v in row)})")
     applied, pins = materialize(con, proj, proj.typed, list(proj.typed.keys()))
     return con, proj, applied, pins
 
