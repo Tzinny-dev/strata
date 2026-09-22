@@ -69,6 +69,19 @@ See `docs/getting-started.md` and `docs/tutorial.md` for the full walkthrough (e
 | `strata.testing` | fixture helpers only | `create_test_source`/`FreshnessTestHelper` emit `.strata` text or temp tables; not wired to the executor for e2e. Use `strata.exec` for real freshness gates. |
 | `strata.observability` | connected | `MetricsCollector` is imported by `strata.exec._run_locked` and exposed via `get_metrics()`; exporters are formatters (Prometheus/StatsD/JSON) without external deps. |
 
+## Docker
+
+```bash
+# from GHCR (after tag push v0.1.0 triggers docker.yml)
+docker pull ghcr.io/tzinny-dev/strata:0.1.0
+docker run --rm ghcr.io/tzinny-dev/strata:0.1.0 --help
+docker run --rm -v $PWD:/work -w /work ghcr.io/tzinny-dev/strata:0.1.0 build examples/daily_orders.strata
+docker run --rm -v $PWD:/work -w /work ghcr.io/tzinny-dev/strata:0.1.0 run examples/daily_orders.strata --seed -o /tmp/demo.duckdb
+
+# local build (no docker daemon required on host for CI build via GHA)
+docker build -t ghcr.io/tzinny-dev/strata:0.1.0 -f Dockerfile .
+```
+
 ## Development
 
 ```bash
