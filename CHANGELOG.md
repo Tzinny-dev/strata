@@ -43,7 +43,15 @@ Documentado `docs/binary-standalone.md:1`.
 - `install.sh:33` arm64 detecta `strata-*-arm64` nativo o fallback `amd64` con warning Rosetta/qemu; `binary.yml:build` matriz arm64 comentada lista (`macos-14`/`ubuntu-24.04-arm`).
 - `binary.yml:88` firma prod documentada `codesign + notarytool` / `signtool` con `secrets.APPLE_CERT/WINDOWS_CERT`.
 
-## Unreleased — próximo 0.1.3
+## 0.1.3 — 2026-09-23
+
+**Fix binary compat + release collision**
+
+- `binary.yml:11` `ubuntu-latest→ubuntu-22.04` (GLIBC 2.38 en 24.04 rompe `ubuntu:20.04` 2.31 — probe `Failed to load libpython3.12.so.1.0`), `compat` `22.04 OK` + `20.04 probe warn` `continue-on-error`.
+- `binary.yml:185` `download-artifact` `merge-multiple true→pattern strata-* false` (colisión `strata` linux/macos sobrescribía uno — por eso `v0.1.2` faltó `macos` y `b66bd0a` quedó `sha ""`), `b66bd0a` hotfix `sha 32a9...` + upload manual `macos-amd64` (arm64) a `v0.1.2`.
+- `homebrew/strata-lang.rb:8` `b66bd0a` corregido, `install.sh:33` + `binary.yml:30c321d/4774bf3` ya en `main`.
+
+## Unreleased — próximo 0.1.4
 
 - Pendiente producto: `BigQuery/Snowflake` adapters reales `adapters.py:74`, `Iceberg` `propuesta §6`, `LSP` `vscode`, `WASM` descartado.
 
