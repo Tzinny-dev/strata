@@ -1,8 +1,11 @@
-export default {
+import { withMermaid } from "vitepress-plugin-mermaid";
+
+export default withMermaid({
   title: "Strata",
   description: "Declarative, versioned, immutable data transformations — compiles to SQL",
   base: "/",
   ignoreDeadLinks: true,
+  head: [["link", { rel: "icon", type: "image/svg+xml", href: "/logo.svg" }]],
   markdown: {
     // strata code blocks fallback to txt (no custom grammar yet)
   },
@@ -53,4 +56,4 @@ export default {
       copyright: "Copyright © 2026 Tzinny-dev / Strata"
     }
   }
-}
+})

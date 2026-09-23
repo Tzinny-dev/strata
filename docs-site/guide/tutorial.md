@@ -1,5 +1,15 @@
 # Tutorial: de una fuente a un resumen con ventana
 
+```mermaid
+flowchart LR
+  S1[(orders)] --> M1[paid_orders]
+  S2[(refunds)] --> M1
+  M1 --> M2[daily_orders]
+  M2 --> V1[(v_daily_orders)]
+  style S1 fill:#0ea5e9,stroke:#fff,color:#fff
+  style V1 fill:#10b981,stroke:#fff,color:#fff
+```
+
 Construimos un pipeline real, paso a paso, sobre los mismos datos de
 `strata/seed.py` (`--seed`): una tabla `orders` con 5 filas (una marcada
 `is_test`) y `refunds` con 2 reembolsos. Cada paso agrega código al mismo
