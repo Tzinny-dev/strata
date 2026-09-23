@@ -184,15 +184,13 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
+          pattern: strata-*
           path: dist/
-          merge-multiple: true
+          merge-multiple: false
       - name: Rename for release
         run: |
           ls -R dist/
-          # artifacts are flat: strata / strata.exe — rename with OS suffix for release
-          # download-artifact with merge-multiple puts each artifact's files directly in dist/
-          # we need to discover which is which by checking existence after download
-          # Simpler: re-list and move
+          # download-artifact with pattern strata-* creates dist/strata-linux-amd64/strata etc. — avoid name collision
           mkdir -p release/
           find dist -type f -name "strata*" | while read f; do
             echo "found $f"
