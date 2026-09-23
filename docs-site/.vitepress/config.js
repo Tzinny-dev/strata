@@ -7,9 +7,16 @@ export default {
     // strata code blocks fallback to txt (no custom grammar yet)
   },
   themeConfig: {
+    outline: "deep",
+    search: { provider: "local" },
+    lastUpdated: true,
+    editLink: {
+      pattern: "https://github.com/Tzinny-dev/strata/edit/main/:path",
+      text: "Edit this page on GitHub"
+    },
     nav: [
       { text: "Guide", link: "/guide/getting-started" },
-      { text: "Reference", link: "/reference/syntax" },
+      { text: "Reference", link: "/reference/syntax-reference" },
       { text: "Spec", link: "/spec/grammar" },
       { text: "Changelog", link: "/changelog" },
       { text: "GitHub", link: "https://github.com/Tzinny-dev/strata" },
@@ -24,7 +31,7 @@ export default {
         { text: "Binary Standalone", link: "/guide/binary-standalone" }
       ],
       "/reference/": [
-        { text: "Syntax", link: "/reference/syntax" },
+        { text: "Syntax", link: "/reference/syntax-reference" },
         { text: "Strict Contracts", link: "/reference/strict-contracts" },
         { text: "Incremental", link: "/reference/incremental" },
         { text: "SetOps & Dedup", link: "/reference/setops" },
