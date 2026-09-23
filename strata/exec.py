@@ -224,11 +224,17 @@ def _atomic_write(path: Path, text: str) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        # Directory fsync for durability — POSIX O_DIRECTORY not available on Windows
         try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+            flag = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            directory = os.open(path.parent, flag)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except (AttributeError, OSError):
+            # Windows: no O_DIRECTORY or fsync on directory unsupported — best effort, ignore
+            pass
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
