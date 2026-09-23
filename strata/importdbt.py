@@ -238,10 +238,117 @@ def _parse_where_conjunct(conj: List[Tuple[str, int]], model: str) -> Optional[s
     return None
 
 
+def _parse_case_expr(s: str, model: str) -> str:
+    """Translate SQL `CASE WHEN cond THEN val ... ELSE else END` into Strata `case(...)`.
+
+    Only searched CASE (`CASE WHEN`) is supported; simple `CASE expr WHEN val`
+    is out of subset (fail loud). Conditions are parsed via _parse_where_conjunct
+    (col vs literal / IS NULL), values are literals or bare columns.
+    """
+    # Normalize: strip outer CASE ... END, then split WHEN/THEN/ELSE
+    m = re.match(r"(?i)^CASE\s+(.*)\s+END\s*$", s, flags=re.S)
+    if not m:
+        raise TransformFailLoud(f"E042: {model}: malformed CASE {s!r}")
+    inner = m.group(1).strip()
+    # Split on WHEN / THEN / ELSE at top level (no nesting in subset)
+    # Use token-based split to avoid string pitfalls
+    toks = _tokenize(inner)
+    words = [t for t, _ in toks]
+    # Expect WHEN cond THEN val [WHEN cond THEN val]* [ELSE val]
+    # We'll walk words
+    i = 0
+    parts: List[str] = []
+    else_val: Optional[str] = None
+    while i < len(words):
+        if words[i].upper() != "WHEN":
+            if words[i].upper() == "ELSE":
+                # ELSE branch
+                if i + 1 >= len(words):
+                    raise TransformFailLoud(f"E042: {model}: CASE ELSE without value")
+                else_val = _literal_strata(words[i + 1]) if words[i + 1].upper() not in ("NULL", "TRUE", "FALSE") and not _IDENT.fullmatch(words[i + 1]) else words[i + 1] if _IDENT.fullmatch(words[i + 1]) else _literal_strata(words[i + 1])
+                # Handle quoted literals vs columns
+                raw = words[i + 1]
+                if raw[0] in "\"'":
+                    else_val = _literal_strata(raw)
+                elif raw.upper() in ("NULL", "TRUE", "FALSE"):
+                    else_val = _literal_strata(raw)
+                elif _IDENT.fullmatch(raw):
+                    else_val = raw
+                else:
+                    else_val = _literal_strata(raw)
+                i += 2
+                break
+            else:
+                raise TransformFailLoud(f"E042: {model}: CASE expected WHEN or ELSE, got {words[i]!r}")
+        # WHEN cond THEN val
+        if i + 1 >= len(words):
+            raise TransformFailLoud(f"E042: {model}: CASE WHEN without condition")
+        # Find THEN
+        try:
+            then_idx = next(j for j in range(i + 1, len(words)) if words[j].upper() == "THEN")
+        except StopIteration:
+            raise TransformFailLoud(f"E042: {model}: CASE WHEN without THEN")
+        cond_words = words[i + 1 : then_idx]
+        # cond is like `a > 0` or `a IS NULL` — reuse where conjunct parser for simple
+        # For CASE, cond may be `col op literal` etc. We'll try to parse as single conjunct
+        # Build a fake token list for _parse_where_conjunct
+        # cond_words like ['a', '>', '0'] or ['a', 'IS', 'NULL']
+        cond_toks = [(w, 0) for w in cond_words]
+        cond_expr = _parse_where_conjunct(cond_toks, model)
+        if cond_expr is None:
+            # Fallback: try to join as raw with == for = etc.
+            # Simple: "a = 1" -> "a == 1"
+            if len(cond_words) == 3 and cond_words[1] in _CMP:
+                a, op, b = cond_words
+                cond_expr = f"{_strip_qualifier(a)} {_CMP[op]} {_literal_strata(b)}"
+            else:
+                raise TransformFailLoud(f"E042: {model}: CASE WHEN condition {cond_words!r} out of subset")
+        val_idx = then_idx + 1
+        if val_idx >= len(words):
+            raise TransformFailLoud(f"E042: {model}: CASE THEN without value")
+        raw_val = words[val_idx]
+        if raw_val[0] in "\"'":
+            val_expr = _literal_strata(raw_val)
+        elif raw_val.upper() in ("NULL", "TRUE", "FALSE"):
+            val_expr = _literal_strata(raw_val)
+        elif _IDENT.fullmatch(raw_val):
+            val_expr = _strip_qualifier(raw_val)
+        else:
+            # Might be qualified like a.col
+            if "." in raw_val:
+                val_expr = _strip_qualifier(raw_val)
+            else:
+                val_expr = _literal_strata(raw_val)
+        parts.append(cond_expr)
+        parts.append(val_expr)
+        i = val_idx + 1
+        # Continue loop, expecting WHEN or ELSE or end
+    if else_val is not None:
+        parts.append(else_val)
+    # Strata case() needs at least cond,val
+    if len(parts) < 2:
+        raise TransformFailLoud(f"E042: {model}: CASE with no branches")
+    return f"case({', '.join(parts)})"
+
+
 def _parse_select_item(item: List[Tuple[str, int]], model: str) -> Tuple[str, str, str]:
     """One top-level SELECT expression => (kind, emit, out). kind is 'col'
-    (a plain column) or 'agg' (count/sum/avg/min/max)."""
+    (a plain column), 'agg' (count/sum/avg/min/max), or 'case' (CASE ...)."""
     s = _join_str(item).strip()
+    # CASE ... END [AS alias] — detect before other patterns
+    m_case = re.match(r"(?i)^CASE\s+WHEN.*\s+END(?:\s+AS\s+([A-Za-z_][A-Za-z0-9_]*))?$", s, flags=re.S)
+    if m_case:
+        alias = m_case.group(1)
+        # Extract CASE ... END part
+        m2 = re.match(r"(?i)^(CASE\s+WHEN.*\s+END)\s*(?:AS\s+[A-Za-z_][A-Za-z0-9_]*)?\s*$", s, flags=re.S)
+        case_part = m2.group(1) if m2 else s
+        out = alias or f"case_{abs(hash(s)) % 1000}"
+        if alias is None:
+            # Require alias for determinism — fail loud if no alias
+            raise TransformFailLoud(
+                f"E042: {model}: CASE expression {s!r} needs an AS alias — output name would be warehouse-defined")
+        emit = _parse_case_expr(case_part, model)
+        return "case", emit, out
     m = _AGG_RE.match(s)
     if m:
         fn, arg, out = m.group(1).lower(), m.group(2), m.group(3)
@@ -268,18 +375,19 @@ def _parse_select_item(item: List[Tuple[str, int]], model: str) -> Tuple[str, st
         return "col", s, s
     raise TransformFailLoud(
         f"E042: {model}: SELECT expression {s!r} is out of the subset "
-        f"(bare columns, aliases, and count/sum/avg/min/max only)")
+        f"(bare columns, aliases, CASE, and count/sum/avg/min/max only)")
 
 
 def _parse_transform(sql_text: str, model: str, models: Set[str],
                      sources: Set[str]) -> List[str]:
-    """Translate ONE dbt model .sql (single table) into Strata body statements.
+    """Translate ONE dbt model .sql into Strata body statements.
 
-    Step-1 subset: `SELECT <list> FROM <ref|source> [AS alias]` with optional
-    `WHERE` (column-vs-literal / IS [NOT] NULL, AND only) and optional `GROUP BY
-    <cols>` over `count/sum/avg/min/max`. Everything else — `select *`, joins,
-    CTEs, macros, ORDER BY, LIMIT, DISTINCT, expressions — raises
-    TransformFailLoud (E042, fail-loud §4). Never guesses."""
+    Subset: `SELECT <list> FROM <ref|source> [AS alias] [JOIN ... ON ...]`
+    with optional `WHERE` (col-vs-literal / IS NULL, AND) and optional
+    `GROUP BY` over aggregates, plus `CASE WHEN ... THEN ... ELSE ... END`
+    in SELECT (→ Strata `case(...)`). Everything else — `select *` without
+    contract, CTEs/WITH, subqueries, ORDER BY/LIMIT/DISTINCT/HAVING/UNION —
+    raises TransformFailLoud (E042, fail-loud §4). Never guesses."""
     sql = _strip_jinja(sql_text, model, models, sources)
     toks = _tokenize(sql)
     if not toks or toks[0][0].upper() != "SELECT":
@@ -325,30 +433,114 @@ def _parse_transform(sql_text: str, model: str, models: Set[str],
     # -- SELECT list
     select_items = [_parse_select_item(it, model) for it in _split_top_level(select_st, ",")]
 
-    # -- FROM: exactly one table token (plus an optional single alias). A
-    # multi-table FROM (`t1, t2`), a `JOIN ... ON`, or any dangling clause
-    # FAILS LOUD instead of silently dropping half the lineage.
-    from_words = [t for t, _ in from_st][1:]  # drop FROM keyword
-    if not from_words:
-        raise TransformFailLoud(f"E042: {model}: FROM is empty")
-    table = from_words[0]
-    if table not in models and table not in sources:
-        raise TransformFailLoud(
-            f"E042: {model}: FROM {table!r} is neither a dbt source table nor a "
-            f"model with a schema.yml contract — fail-loud §4.")
-    rest = from_words[1:]
-    if rest and rest[0].upper() == "AS":
-        rest = rest[1:]
-    join_words = {"JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "ON", "USING"}
-    if rest and (len(rest) != 1 or not _IDENT.fullmatch(rest[0])
-                 or rest[0].upper() in join_words):
-        if any(w.upper() in join_words for w in from_words[1:]):
+    # -- FROM: base table + optional alias + zero or more JOINs
+    # Supported: FROM tbl [AS alias] [ (LEFT|RIGHT|INNER|FULL)? JOIN tbl2 [AS alias2] ON cond [AND cond]* ]*
+    # Each JOIN must have ON with at least one `a.col = b.col` (AND-separated). USING, CROSS without ON, and comma-FROM are out of subset.
+    from_toks = from_st[1:]  # after FROM
+    # Helper to read a table ref + optional alias, returning (table, alias, consumed)
+    def _read_table_ref(idx: int) -> Tuple[str, Optional[str], int]:
+        if idx >= len(from_toks):
+            raise TransformFailLoud(f"E042: {model}: FROM/JOIN table missing")
+        tbl = from_toks[idx][0]
+        if tbl not in models and tbl not in sources:
             raise TransformFailLoud(
-                f"E042: {model}: JOIN is out of the step-1 subset — translate the "
-                f"join to a Strata `join_*` statement by hand (fail-loud §4)")
-        raise TransformFailLoud(
-            f"E042: {model}: FROM {table!r} has a trailing clause {rest!r} that "
-            f"is not a single alias — fail-loud §4 (never guess)")
+                f"E042: {model}: table {tbl!r} is neither a dbt source nor a model with a contract — fail-loud §4.")
+        nxt = idx + 1
+        alias: Optional[str] = None
+        if nxt < len(from_toks) and from_toks[nxt][0].upper() == "AS":
+            nxt += 1
+            if nxt >= len(from_toks) or not _IDENT.fullmatch(from_toks[nxt][0]):
+                raise TransformFailLoud(f"E042: {model}: AS without alias")
+            alias = from_toks[nxt][0]
+            nxt += 1
+        elif nxt < len(from_toks) and _IDENT.fullmatch(from_toks[nxt][0]) and from_toks[nxt][0].upper() not in {"JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "ON", "USING", "WHERE", "GROUP"}:
+            # Bare alias without AS (e.g. FROM orders a)
+            alias = from_toks[nxt][0]
+            nxt += 1
+        return tbl, alias, nxt
+
+    base_table, base_alias, pos = _read_table_ref(0)
+    table = base_table
+    alias_map: Dict[str, str] = {}
+    if base_alias:
+        alias_map[base_alias] = base_table
+    else:
+        alias_map[base_table] = base_table
+    joins: List[Tuple[str, str, str]] = []  # (join_type, join_table, on_expr)
+    while pos < len(from_toks):
+        # Parse join type
+        jt = "INNER"
+        if from_toks[pos][0].upper() in ("LEFT", "RIGHT", "INNER", "FULL", "CROSS"):
+            jt = from_toks[pos][0].upper()
+            pos += 1
+            if jt != "CROSS" and pos < len(from_toks) and from_toks[pos][0].upper() == "OUTER":
+                pos += 1  # LEFT OUTER JOIN == LEFT JOIN
+            if pos < len(from_toks) and from_toks[pos][0].upper() == "JOIN":
+                pos += 1
+            else:
+                if jt == "CROSS":
+                    # CROSS JOIN without ON is allowed only if followed by table (parsing will handle, but ON will be required later for Strata)
+                    pass
+                else:
+                    raise TransformFailLoud(f"E042: {model}: {jt} without JOIN")
+        elif from_toks[pos][0].upper() == "JOIN":
+            jt = "INNER"
+            pos += 1
+        else:
+            raise TransformFailLoud(f"E042: {model}: unexpected token in FROM/JOIN {from_toks[pos][0]!r}")
+        # Join table
+        j_tbl, j_alias, pos = _read_table_ref(pos)
+        # Map alias
+        if j_alias:
+            alias_map[j_alias] = j_tbl
+        else:
+            alias_map[j_tbl] = j_tbl
+        # ON clause required for non-CROSS
+        if jt == "CROSS":
+            # Strata has no CROSS without ON — fail loud, suggest join_inner
+            raise TransformFailLoud(f"E042: {model}: CROSS JOIN without ON is out of subset — use JOIN with ON")
+        if pos >= len(from_toks) or from_toks[pos][0].upper() != "ON":
+            raise TransformFailLoud(f"E042: {model}: JOIN {j_tbl!r} without ON")
+        pos += 1  # skip ON
+        # Collect ON condition tokens until next JOIN or end
+        on_toks: List[Tuple[str, int]] = []
+        while pos < len(from_toks) and from_toks[pos][0].upper() not in ("JOIN", "LEFT", "RIGHT", "INNER", "FULL", "CROSS"):
+            on_toks.append(from_toks[pos])
+            pos += 1
+        if not on_toks:
+            raise TransformFailLoud(f"E042: {model}: JOIN {j_tbl!r} ON is empty")
+        # ON is AND-separated `a.col = b.col` (only equi-joins in subset)
+        on_parts: List[str] = []
+        for conj in _split_top_level(on_toks, "AND"):
+            w = _flat_words(conj)
+            # Expect `a.col = b.col` or `a.col == b.col`
+            if len(w) == 3 and w[1] in ("=", "=="):
+                left, right = w[0], w[2]
+                # Resolve alias → real table for Strata (keep qualified)
+                def _qual(s: str) -> str:
+                    if "." in s:
+                        a, c = s.split(".", 1)
+                        real = alias_map.get(a, a)
+                        return f"{real}.{c}"
+                    return s
+                on_parts.append(f"{_qual(left)} == {_qual(right)}")
+            else:
+                raise TransformFailLoud(f"E042: {model}: JOIN ON {[t for t,_ in conj]!r} must be `a.col = b.col` (AND-separated equi-joins only)")
+        on_expr = " and ".join(on_parts)
+        # Map join type to Strata
+        if jt == "LEFT":
+            strata_jt = "join_left"
+        elif jt == "RIGHT":
+            strata_jt = "join_right"
+        elif jt in ("INNER",):
+            strata_jt = "join_inner"
+        elif jt == "FULL":
+            strata_jt = "join_full"
+        else:
+            strata_jt = "join_inner"
+        joins.append((strata_jt, j_tbl, on_expr))
+    # For backward compat, `table` stays as base table for single-table checks
+    # `alias_map` is used later for SELECT qualification if needed
 
     # -- WHERE (AND-only conjuncts)
     preds: List[str] = []
@@ -371,13 +563,25 @@ def _parse_transform(sql_text: str, model: str, models: Set[str],
             raise TransformFailLoud(f"E042: {model}: malformed GROUP BY")
         for item in _split_top_level([(t, 0) for t in gw], ","):
             w = _flat_words(item)
-            if len(w) != 1 or _IDENT.fullmatch(w[0]) is None:
+            if len(w) != 1:
                 raise TransformFailLoud(
                     f"E042: {model}: GROUP BY expression {w!r} is out of the subset")
-            keys.append(_strip_qualifier(w[0]))
+            cand = w[0]
+            # Allow qualified `a.col` or bare `col`
+            if "." in cand:
+                parts = cand.split(".")
+                if len(parts) != 2 or not all(_IDENT.fullmatch(p) for p in parts):
+                    raise TransformFailLoud(
+                        f"E042: {model}: GROUP BY expression {w!r} is out of the subset")
+            elif _IDENT.fullmatch(cand) is None:
+                raise TransformFailLoud(
+                    f"E042: {model}: GROUP BY expression {w!r} is out of the subset")
+            keys.append(_strip_qualifier(cand))
 
     # -- assemble the Strata body
     body: List[str] = [f"from {table}"]
+    for jt, jtbl, on in joins:
+        body.append(f"{jt} {jtbl} on {on}")
     if preds:
         body.append("filter " + " and ".join(preds))
     if not keys:
@@ -385,24 +589,28 @@ def _parse_transform(sql_text: str, model: str, models: Set[str],
             if kind == "agg":
                 raise TransformFailLoud(
                     f"E042: {model}: aggregate {emit} has no GROUP BY — invalid SQL")
+            if kind == "case" and any(k == out for k in keys):
+                pass  # case without GROUP BY is fine (derived column)
         body.append("select {")
         for _, col, out in select_items:
             body.append(f"  {out} = {col},")
         body.append("}")
         return body
     if any(kind == "agg" for kind, _, _ in select_items) is False:
+        # Allow GROUP BY with case-derived columns that are keys — but still need at least one agg or a dedup intent
+        # For now, require an agg; a pure GROUP BY without agg is out of subset (use dedup)
         raise TransformFailLoud(
             f"E042: {model}: GROUP BY with no aggregate is meaningless — translate "
             f"to a dedup by hand if that is what you meant (fail-loud §4)")
     key_terms: List[str] = []
-    key_outs = {it[2] for it in select_items if it[0] == "col"}
+    key_outs = {it[2] for it in select_items if it[0] in ("col", "case")}
     for k in keys:
         if k in key_outs:
-            match = next(it for it in select_items if it[0] == "col" and it[2] == k)
+            match = next(it for it in select_items if it[0] in ("col", "case") and it[2] == k)
             if match[1] != k:
                 body.append(f"let {k} = {match[1]}")
             key_terms.append(k)
-        elif any(it[0] == "col" and it[1] == k for it in select_items):
+        elif any(it[0] in ("col", "case") and it[1] == k for it in select_items):
             key_terms.append(k)
         else:
             raise TransformFailLoud(
@@ -410,7 +618,7 @@ def _parse_transform(sql_text: str, model: str, models: Set[str],
                 f"an alias — SQL would be invalid, Strata would silently pick a "
                 f"semantics (fail-loud §4)")
     for it in select_items:
-        if it[0] == "col" and it[2] not in key_terms and it[1] not in key_terms:
+        if it[0] in ("col", "case") and it[2] not in key_terms and it[1] not in key_terms:
             raise TransformFailLoud(
                 f"E042: {model}: SELECT {it[2]!r} is neither grouped nor "
                 f"aggregated (fail-loud §4)")

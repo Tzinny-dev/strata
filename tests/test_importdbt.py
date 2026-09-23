@@ -244,15 +244,165 @@ class TestImportDbtTransform(unittest.TestCase):
             self.assertEqual((Path(d) / "a.strata").read_text(),
                              (Path(d) / "b.strata").read_text())
 
-    def test_transform_fail_loud_join(self):
+    def test_transform_join_succeeds(self):
+        # Use a schema where the model's contract matches the SELECT
+        schema = """\
+version: 2
+sources:
+  - name: crm
+    schema: prod
+    tables:
+      - name: orders
+        columns:
+          - name: order_id
+            data_type: bigint
+          - name: country
+            data_type: string
+          - name: gross
+            data_type: numeric
+      - name: refunds
+        columns:
+          - name: order_id
+            data_type: bigint
+          - name: gross
+            data_type: numeric
+models:
+  - name: daily
+    depends_on: [orders]
+    columns:
+      - name: country
+        data_type: string
+      - name: total
+        data_type: numeric
+"""
         with __import__("tempfile").TemporaryDirectory() as d:
             code, err = _run_project_import(Path(d), {
+                "int_clean": None,
+                "daily": "SELECT a.country, SUM(b.gross) AS total\n"
+                         "FROM orders a JOIN refunds b ON a.order_id = b.order_id\n"
+                         "GROUP BY a.country"}, schema=schema)
+            self.assertEqual(code, 0, err)
+            art = (Path(d) / "imported.strata").read_text()
+            self.assertIn("join_inner", art)
+            self.assertIn("orders.order_id == refunds.order_id", art)
+            bcode = cli.main(["build", str(Path(d) / "imported.strata")])
+            self.assertEqual(bcode, 0, err)
+
+    def test_transform_case_succeeds(self):
+        schema = """\
+version: 2
+sources:
+  - name: crm
+    schema: prod
+    tables:
+      - name: orders
+        columns:
+          - name: country
+            data_type: string
+          - name: order_id
+            data_type: bigint
+models:
+  - name: daily
+    depends_on: [orders]
+    columns:
+      - name: region
+        data_type: string
+      - name: order_id
+        data_type: bigint
+"""
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {
+                "int_clean": None,
+                "daily": "SELECT CASE WHEN country = 'ES' THEN 'Spain' WHEN country = 'MX' THEN 'Mexico' ELSE 'Other' END AS region, order_id FROM orders"}, schema=schema)
+            self.assertEqual(code, 0, err)
+            art = (Path(d) / "imported.strata").read_text()
+            self.assertIn('case(country == "ES"', art)
+            bcode = cli.main(["build", str(Path(d) / "imported.strata")])
+            self.assertEqual(bcode, 0, err)
+
+    def test_transform_join_with_case_succeeds(self):
+        schema = """\
+version: 2
+sources:
+  - name: crm
+    schema: prod
+    tables:
+      - name: orders
+        columns:
+          - name: order_id
+            data_type: bigint
+          - name: country
+            data_type: string
+          - name: gross
+            data_type: numeric
+      - name: refunds
+        columns:
+          - name: order_id
+            data_type: bigint
+          - name: gross
+            data_type: numeric
+models:
+  - name: daily
+    depends_on: [orders]
+    columns:
+      - name: region
+        data_type: string
+      - name: total
+        data_type: numeric
+"""
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {
+                "int_clean": None,
+                "daily": "SELECT CASE WHEN a.country = 'ES' THEN 'EU' ELSE 'Other' END AS region, SUM(b.gross) AS total\n"
+                         "FROM orders a LEFT JOIN refunds b ON a.order_id = b.order_id\n"
+                         "GROUP BY region"}, schema=schema)
+            self.assertEqual(code, 0, err)
+            art = (Path(d) / "imported.strata").read_text()
+            self.assertIn("join_left", art)
+            self.assertIn("case(", art)
+            bcode = cli.main(["build", str(Path(d) / "imported.strata")])
+            self.assertEqual(bcode, 0, err)
+
+    def test_transform_fail_loud_join_using_still_fails(self):
+        schema = """\
+version: 2
+sources:
+  - name: crm
+    schema: prod
+    tables:
+      - name: orders
+        columns:
+          - name: order_id
+            data_type: bigint
+          - name: country
+            data_type: string
+          - name: gross
+            data_type: numeric
+      - name: refunds
+        columns:
+          - name: order_id
+            data_type: bigint
+          - name: gross
+            data_type: numeric
+models:
+  - name: daily
+    depends_on: [orders]
+    columns:
+      - name: country
+        data_type: string
+      - name: total
+        data_type: numeric
+"""
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {
+                "int_clean": None,
                 "daily": "SELECT a.country, SUM(b.gross) AS g\n"
-                         "FROM orders a JOIN orders b ON a.id = b.id\n"
-                         "GROUP BY a.country"})
+                         "FROM orders a JOIN refunds b USING (order_id)\n"
+                         "GROUP BY a.country"}, schema=schema)
             self.assertEqual(code, 1)
             self.assertIn("E042", err)
-            self.assertIn("JOIN", err)
+            # USING is out of subset — error mentions USING or ON
+            self.assertTrue("USING" in err or "ON" in err)
             self.assertFalse((Path(d) / "imported.strata").exists())
 
     def test_transform_fail_loud_select_star(self):
