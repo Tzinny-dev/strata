@@ -1,7 +1,7 @@
 export default {
   title: "Strata",
   description: "Declarative, versioned, immutable data transformations — compiles to SQL",
-  base: "/strata/",
+  base: "/",
   ignoreDeadLinks: true,
   markdown: {
     // strata code blocks fallback to txt (no custom grammar yet)
