@@ -31,6 +31,13 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: Install UPX (size hardening)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq upx-ucl
+          upx --version
+
       - name: Install deps + PyInstaller
         run: |
           python -m pip install --upgrade pip
@@ -41,6 +48,8 @@ jobs:
         run: |
           pyinstaller strata.spec --noconfirm
           ls -lh dist/
+          du -h dist/*
+          sha256sum dist/* 2>/dev/null || shasum -a 256 dist/*
 
       - name: Smoke — help
         shell: bash
@@ -72,6 +81,13 @@ jobs:
             ./dist/strata run examples/daily_orders.strata --seed 2>&1 | head -n 30
           fi
 
+      - name: Codesign macOS (ad-hoc, no Developer ID — proper signing needs APPLE_CERT)
+        if: matrix.os == 'macos-latest'
+        run: |
+          codesign --sign - --force --deep dist/strata || echo "::warning::codesign ad-hoc failed (needs Apple cert for Gatekeeper)"
+          codesign --verify dist/strata 2>&1 | head -n 5 || true
+          # Without real Developer ID, Gatekeeper will still warn — document in binary-standalone.md Fase 3
+
       - name: Smoke — bench
         shell: bash
         run: |
@@ -80,6 +96,16 @@ jobs:
           else
             ./dist/strata bench
           fi
+
+      - name: Report size (hardening gate)
+        shell: bash
+        run: |
+          bin="${{ matrix.binary }}"
+          size=$(stat -c%s "$bin" 2>/dev/null || stat -f%z "$bin" 2>/dev/null || wc -c < "$bin")
+          mb=$(awk "BEGIN {printf \"%.1f\", $size/1024/1024}")
+          echo "binary size: $mb MB ($size bytes) — $bin"
+          # soft gate: warn if >120M (spec expected 34M, 80-120M uncompressed, 40-60M UPX)
+          if [ "$size" -gt 125829120 ]; then echo "::warning::binary >120M, check bloat"; fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -94,6 +120,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -123,6 +151,11 @@ jobs:
             fi
           done
           ls -lh release/
+      - name: Attest build provenance (SLSA)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release/*
+
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
         with:

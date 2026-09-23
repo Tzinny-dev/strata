@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
 
-datas = [('examples', 'examples'), ('bench', 'bench')]
+datas = [('examples', 'examples'), ('bench', 'bench'), ('LICENSE', '.'), ('README.md', '.')]
 datas += collect_data_files('strata')
 
 
