@@ -1,5 +1,7 @@
 # Strata — prototype
 
+[![CI](https://github.com/Tzinny-dev/strata/actions/workflows/ci.yml/badge.svg)](https://github.com/Tzinny-dev/strata/actions/workflows/ci.yml) [![Binary](https://github.com/Tzinny-dev/strata/actions/workflows/binary.yml/badge.svg)](https://github.com/Tzinny-dev/strata/actions/workflows/binary.yml) [![Publish](https://github.com/Tzinny-dev/strata/actions/workflows/publish.yml/badge.svg)](https://github.com/Tzinny-dev/strata/actions/workflows/publish.yml) [![PyPI](https://img.shields.io/pypi/v/strata-lang)](https://pypi.org/project/strata-lang/) [![Python](https://img.shields.io/pypi/pyversions/strata-lang)](https://pypi.org/project/strata-lang/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Coverage 81%](https://img.shields.io/badge/coverage-81%25-brightgreen)](htmlcov/index.html)
+
 Declarative, versioned, immutable data transformations. Compiles to SQL (DuckDB/Postgres/BigQuery/Snowflake), with column-level lineage and 3-phase contract pins.
 
 > Working title v0.1 — prototype lives in `prototype/`. Spec in `../spec/`.
