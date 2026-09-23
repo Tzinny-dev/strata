@@ -8,15 +8,20 @@ from __future__ import annotations
 
 import contextlib
 import datetime
-import fcntl
 import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, NoReturn, Optional, Set, Tuple
+
+try:
+    import fcntl  # POSIX file locking
+except ImportError:
+    fcntl = None  # type: ignore[assignment]  # Windows: no POSIX flock
 
 from . import ast
 from . import sqlgen
@@ -156,13 +161,43 @@ def _module_lock(module_path: str) -> Iterator[None]:
     the same process, so a nested acquire would deadlock the process
     against itself. POSIX advisory lock: released automatically if the
     holding process dies, so a crash never leaves an orphaned lock; not
-    supported on Windows, consistent with the rest of this prototype."""
+    supported on Windows, consistent with the rest of this prototype.
+
+    Windows / PyInstaller: `fcntl` is unavailable. Try `portalocker`
+    (optional dep `pip install strata-lang[portalocker]`) for a
+    cross-platform file lock; if neither is available, degrade to a
+    no-op lock with a one-time warning — single-writer guarantee is lost
+    but the binary still runs (fail-open for frozen builds)."""
+    if fcntl is None:
+        try:
+            import portalocker  # type: ignore[import]
+
+            fh = open(str(_lock_path(module_path)), "a+")
+            try:
+                portalocker.lock(fh, portalocker.LOCK_EX)
+                yield
+            finally:
+                try:
+                    portalocker.unlock(fh)
+                except Exception:
+                    pass
+                fh.close()
+            return
+        except ImportError:
+            # No fcntl and no portalocker: no-op lock (Windows frozen without portalocker).
+            # Warn once per process to avoid spamming concurrent runs.
+            if not getattr(_module_lock, "_warned_no_lock", False):
+                print("warning: file locking unavailable (no fcntl/portalocker) — "
+                      "concurrent writer protection disabled", file=sys.stderr)
+                _module_lock._warned_no_lock = True  # type: ignore[attr-defined]
+            yield
+            return
     fd = os.open(str(_lock_path(module_path)), os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        fcntl.flock(fd, fcntl.LOCK_EX)  # type: ignore[union-attr]
         yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        fcntl.flock(fd, fcntl.LOCK_UN)  # type: ignore[union-attr]
         os.close(fd)
 
 

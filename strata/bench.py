@@ -23,7 +23,25 @@ from .dialects import get_dialect
 from .sqlgen import full_sql
 from .diff import diff_projects, impact_radius, to_json_dict
 
-BENCH_DIR = Path(__file__).resolve().parent.parent / "bench"
+def _bench_dir() -> Path:
+    """Bench dir, aware of PyInstaller frozen builds (sys._MEIPASS).
+
+    In a `pyinstaller --onefile` binary, `__file__` points inside the temp
+    extraction dir and the original `bench/` tree is bundled as data. Check
+    `_MEIPASS` first (frozen), then fall back to the source tree layout.
+    """
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        cand = Path(sys._MEIPASS) / "bench"  # type: ignore[attr-defined]
+        if cand.exists():
+            return cand
+        # Some specs bundle as bench/ under strata/
+        cand2 = Path(sys._MEIPASS) / "strata" / "bench"  # type: ignore[attr-defined]
+        if cand2.exists():
+            return cand2
+    return Path(__file__).resolve().parent.parent / "bench"
+
+
+BENCH_DIR = _bench_dir()
 DIALECTS = ("duckdb", "postgres", "snowflake", "bigquery")
 
 
