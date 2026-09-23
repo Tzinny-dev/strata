@@ -45,9 +45,12 @@ jobs:
           pip install pyinstaller
 
       - name: Build standalone (spec)
+        shell: bash
         run: |
           pyinstaller strata.spec --noconfirm
           ls -lh dist/
+          du -h dist/* 2>/dev/null || du -h dist\*
+          sha256sum dist/* 2>/dev/null || sha256sum dist\\* 2>/dev/null || shasum -a 256 dist/* 2>/dev/null || Get-FileHash dist\* -Algorithm SHA256 2>/dev/null | cat
           du -h dist/*
           sha256sum dist/* 2>/dev/null || shasum -a 256 dist/*
 
