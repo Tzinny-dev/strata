@@ -25,6 +25,8 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: docs-site/package.json
+        env:
+          ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
       - name: Install docs deps
         working-directory: docs-site
         run: npm ci || npm install
@@ -33,6 +35,8 @@ jobs:
         run: npm run build
       - name: Setup Pages
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
