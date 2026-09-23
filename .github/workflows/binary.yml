@@ -1,0 +1,130 @@
+name: binary
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            artifact: strata-linux-amd64
+            binary: dist/strata
+          - os: macos-latest
+            artifact: strata-macos-amd64
+            binary: dist/strata
+          - os: windows-latest
+            artifact: strata-windows-amd64
+            binary: dist/strata.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install pyinstaller
+
+      - name: Build standalone (spec)
+        run: |
+          pyinstaller strata.spec --noconfirm
+          ls -lh dist/
+
+      - name: Smoke — help
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            ./dist/strata.exe --help
+          else
+            ./dist/strata --help
+          fi
+
+      - name: Smoke — build + compile
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            ./dist/strata.exe build examples/daily_orders.strata
+            ./dist/strata.exe compile examples/daily_orders.strata --dialect postgres > /tmp/out.sql
+          else
+            ./dist/strata build examples/daily_orders.strata
+            ./dist/strata compile examples/daily_orders.strata --dialect postgres > /tmp/out.sql
+          fi
+          test -s /tmp/out.sql
+
+      - name: Smoke — run --seed (DuckDB in-memory)
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            ./dist/strata.exe run examples/daily_orders.strata --seed 2>&1 | head -n 30
+          else
+            ./dist/strata run examples/daily_orders.strata --seed 2>&1 | head -n 30
+          fi
+
+      - name: Smoke — bench
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            ./dist/strata.exe bench
+          else
+            ./dist/strata bench
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+      - name: Rename for release
+        run: |
+          ls -R dist/
+          # artifacts are flat: strata / strata.exe — rename with OS suffix for release
+          # download-artifact with merge-multiple puts each artifact's files directly in dist/
+          # we need to discover which is which by checking existence after download
+          # Simpler: re-list and move
+          mkdir -p release/
+          find dist -type f -name "strata*" | while read f; do
+            echo "found $f"
+            # keep original name, GH release will deduplicate by OS if we rename
+            # Use artifact dir name is lost with merge-multiple, so infer by file type
+            if [[ "$f" == *.exe ]]; then
+              cp "$f" release/strata-windows-amd64.exe
+            else
+              # Distinguish linux vs macos by trying to detect Mach-O vs ELF
+              if file "$f" | grep -q "Mach-O"; then
+                cp "$f" release/strata-macos-amd64
+              else
+                cp "$f" release/strata-linux-amd64
+              fi
+            fi
+          done
+          ls -lh release/
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
