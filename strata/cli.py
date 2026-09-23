@@ -1,6 +1,6 @@
 """strata -- command line interface.
 
-One binary: build / plan / graph / profile / compile / run / lineage-diff / bench / grammar / dashboard / init / seed.
+One binary: build / plan / graph / profile / compile / run / lineage-diff / bench / grammar / dashboard / init / seed / lsp.
 """
 from __future__ import annotations
 
@@ -533,6 +533,14 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"    pins      {', '.join(pins) if pins else '(none)'}")
     print(f"  check OK: {len(tms)} model(s) green, dialect {dialect.name}, "
           "nothing materialized")
+    return 0
+
+
+def cmd_lsp(args: argparse.Namespace) -> int:
+    """`strata lsp`: run the LSP server on stdio (for VS Code etc.)."""
+    from . import lsp as lsp_mod
+
+    lsp_mod.run()
     return 0
 
 
@@ -1292,6 +1300,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--dialect", default="duckdb",
                    help="dialect probe target (default: duckdb)")
     p.set_defaults(fn=cmd_check)
+
+    p = sub.add_parser("lsp", help="Language Server Protocol (stdio JSON-RPC)")
+    p.set_defaults(fn=cmd_lsp)
     args = ap.parse_args(argv)
     try:
         return args.fn(args)

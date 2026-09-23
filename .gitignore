@@ -28,3 +28,6 @@ build/
 docs-site/node_modules
 docs-site/.vitepress/dist
 docs-site/.vitepress/cache
+vscode/node_modules/
+vscode/out/
+*.vsix

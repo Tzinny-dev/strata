@@ -1,0 +1,49 @@
+{
+  "name": "Strata",
+  "scopeName": "source.strata",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#functions" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.strata", "match": "//.*$" },
+        { "name": "comment.block.strata", "begin": "/\\*", "end": "\\*/" }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.strata",
+          "match": "\\b(source|model|contract|pipeline|import|from|let|select|derive|filter|having|group|aggregate|sort|take|join|join_left|join_inner|join_right|union|intersect|except|dedup|expand|over|expect|domain)\\b"
+        },
+        { "name": "keyword.other.strata", "match": "\\b(env|freshness|partition_by|protected|primary_key|unique|nonnull|enum)\\b" }
+      ]
+    },
+    "types": {
+      "patterns": [
+        { "name": "storage.type.strata", "match": "\\b(int64|float64|string|bool|date|timestamp|decimal|money|json|uuid|array|map|struct|binary_type)\\b" }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        { "name": "string.quoted.double.strata", "begin": "\"", "end": "\"", "patterns": [{ "name": "constant.character.escape.strata", "match": "\\\\." }] }
+      ]
+    },
+    "numbers": {
+      "patterns": [{ "name": "constant.numeric.strata", "match": "\\b\\d+(\\.\\d+)?\\b" }]
+    },
+    "functions": {
+      "patterns": [{ "name": "entity.name.function.strata", "match": "\\b(upper|lower|length|trim|substring|coalesce|count|sum|avg|min|max|array_construct|json_get|date_add|date_trunc|like|rlike|map_get|struct_get)\\b" }]
+    },
+    "operators": {
+      "patterns": [{ "name": "keyword.operator.strata", "match": "(==|!=|<=|>=|&&|\\|\\||->|=>|\\|)" }]
+    }
+  }
+}
