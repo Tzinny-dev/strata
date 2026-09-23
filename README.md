@@ -69,6 +69,23 @@ See `docs/getting-started.md` and `docs/tutorial.md` for the full walkthrough (e
 | `strata.testing` | fixture helpers only | `create_test_source`/`FreshnessTestHelper` emit `.strata` text or temp tables; not wired to the executor for e2e. Use `strata.exec` for real freshness gates. |
 | `strata.observability` | connected | `MetricsCollector` is imported by `strata.exec._run_locked` and exposed via `get_metrics()`; exporters are formatters (Prometheus/StatsD/JSON) without external deps. |
 
+## Standalone binary
+
+```bash
+# curl | bash (detects OS/arch, pulls from GH Releases)
+curl -fsSL https://raw.githubusercontent.com/Tzinny-dev/strata/main/install.sh | bash
+strata --help
+# or pin version / custom dir
+curl -fsSL .../install.sh | bash -s -- --version 0.1.1 --to /usr/local/bin
+```
+
+```bash
+# Homebrew (tap — formula in homebrew/strata-lang.rb, sha256 replaced on release)
+brew tap Tzinny-dev/strata  # or: brew tap Tzinny-dev/homebrew-strata if split
+brew install strata-lang
+strata --help
+```
+
 ## Docker
 
 ```bash
