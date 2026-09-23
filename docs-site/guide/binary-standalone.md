@@ -1,6 +1,6 @@
 # Strata — Binario standalone `strata`
 
-> Cumple `propuesta-lenguaje-strata.md:49` "un solo binario: compilador+LSP+runner". Estado: **implementado 2026-09-22** — `prototype/strata.spec:1`, `prototype/strata_entry.py:1`, `prototype/.github/workflows/binary.yml:1`, `prototype/dist/strata` `34M` (UPX), `prototype/pyproject.toml:7` `strata-lang==0.1.1`.
+> Cumple `propuesta-lenguaje-strata.md:49` "un solo binario: compilador+LSP+runner". Estado: **implementado 2026-09-22** — `prototype/strata.spec:1`, `prototype/strata_entry.py:1`, `prototype/.github/workflows/binary.yml:1`, `prototype/dist/strata` `34M` (UPX), `prototype/pyproject.toml:7` `strata-lang==0.1.4`.
 
 ## Resumen
 
@@ -9,7 +9,7 @@ Strata se distribuye en tres formas equivalentes (mismo `strata/cli.py:1084` `ma
 * `pip install strata-lang` — wheel `149K` `twine check PASSED` (`prototype/pyproject.toml:6`)
 * `uv tool install strata-lang` — atajo 0 costo
 * **Binario standalone** `strata` — `prototype/dist/strata` `34M` con UPX (`_duckdb.so 58M` → `34M` comprimido), `venv 143M` total. Sin UPX esperado `80–120M` (`prototype/docs-site/guide/binary-standalone.md:7` histórico)
-* `ghcr.io/tzinny-dev/strata:0.1.1` — Docker reproducible (`prototype/Dockerfile:1`)
+* `ghcr.io/tzinny-dev/strata:0.1.4` — Docker reproducible (`prototype/Dockerfile:1`)
 
 El binario ya existe y pasa smoke `help/build/compile --dialect postgres/run --seed/bench` en `binary.yml`. Recomendación actual: **usar binario para distribución**; `pip`/`uv` siguen válidos para desarrollo.
 
@@ -88,7 +88,7 @@ Tiempo CI `90s` → `~270s` (×3 OS).
 
 ## 4. Costos y riesgos — actualizados
 
-- **Tamaño:** `58M` solo `_duckdb.so` → binario `34M` con UPX (`CHANGELOG.md:30`), `~85M` sin UPX. `pip+Docker` (`ghcr.io/tzinny-dev/strata:0.1.1`) sigue vigente para CI.
+- **Tamaño:** `58M` solo `_duckdb.so` → binario `34M` con UPX (`CHANGELOG.md:30`), `~85M` sin UPX. `pip+Docker` (`ghcr.io/tzinny-dev/strata:0.1.4`) sigue vigente para CI.
 - **Mantenimiento:** cada bump `duckdb` o `psycopg2-binary` (`pyproject.toml:24`) obliga a rebuild triple + re-firma (automatizado en `binary.yml` on `tag v*`).
 - **WASM/playground** `docs/warehouse-adapters.md:69` descartado — mismo costo que binario sin demanda probada.
 - **Distribución:** `install.sh:1` + `homebrew/strata-lang.rb:1` operativos, pendientes: firma real Developer ID y `REPLACE_SHA256` automático (ver §5).
@@ -97,7 +97,7 @@ Tiempo CI `90s` → `~270s` (×3 OS).
 
 ## 5. Decisión tomada + deuda restante
 
-1. **Hecho 2026-09-22:** `PyPI strata-lang 0.1.1` + `binary.yml` matrix triple + `ghcr.io/tzinny-dev/strata:0.1.1` + `install.sh` + `homebrew`.
+1. **Hecho 2026-09-23:** `PyPI strata-lang 0.1.4` + `binary.yml` matrix triple + `ghcr.io/tzinny-dev/strata:0.1.4` + `install.sh` + `homebrew` + `vscode Tzinny-dev.strata-tzinny 0.1.4`.
 2. **Validar:** 5 entrevistas con demo `strata lineage-diff` (`market/market-validation.md:141`) — pendiente producto.
 3. **Deuda abierta (no bloquea uso, ver detalle abajo):**
    - **Firma real:** `binary.yml:88` ad-hoc → requiere `APPLE_CERT`/`signtool` para Gatekeeper/SmartScreen (coste `99$/año`).
@@ -108,4 +108,4 @@ Tiempo CI `90s` → `~270s` (×3 OS).
 
 ---
 
-*Actualizado 2026-09-23. Fuente: `prototype/` `CHANGELOG.md:25` Fase 0-4 cerrada, `dist/strata 34M`, `pytest 529 tests 83%` en `3.12`.*
+*Actualizado 2026-09-23. Fuente: `prototype/` `CHANGELOG.md:35` Fase 0-4 → 0.1.4, `dist/strata 34M` + `vscode`, `pytest 528 tests 83%` en `3.12`.*

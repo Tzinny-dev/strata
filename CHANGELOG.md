@@ -51,9 +51,18 @@ Documentado `docs/binary-standalone.md:1`.
 - `binary.yml:185` `download-artifact` `merge-multiple true→pattern strata-* false` (colisión `strata` linux/macos sobrescribía uno — por eso `v0.1.2` faltó `macos` y `b66bd0a` quedó `sha ""`), `b66bd0a` hotfix `sha 32a9...` + upload manual `macos-amd64` (arm64) a `v0.1.2`.
 - `homebrew/strata-lang.rb:8` `b66bd0a` corregido, `install.sh:33` + `binary.yml:30c321d/4774bf3` ya en `main`.
 
-## Unreleased — próximo 0.1.4
+## 0.1.4 — 2026-09-23
 
-- Pendiente producto: `BigQuery/Snowflake` adapters reales `adapters.py:74`, `Iceberg` `propuesta §6`, `LSP` `vscode`, `WASM` descartado.
+**VS Code extension + sync**
+
+- `vscode/package.json:2` `strata-lang→strata-tzinny` `displayName Strata→Strata — Tzinny` (Marketplace bloqueaba `strata-lang` de `prabathkumar` y `Strata` de `StrataTeam`), `vscode 0.1.4` publicado `Tzinny-dev.strata-tzinny` (`vsce 4.0` `Node 24` segfault → web Upload `vsix 6.07K`).
+- `strata/cli.py:1315` `cmd_lsp` + `cli.py:1328` parser `lsp` (ya documentado `cli.py:50` pero no wired) + `strata.spec:14` `hiddenimport strata.lsp`.
+- Sync `pyproject.toml:7` `strata-lang 0.1.3→0.1.4` (`strata/__init__.py:3`), `README.md:81` `0.1.1→0.1.4`, `Docker 0.1.0→0.1.4`, `guide/binary-standalone.md:3` `0.1.1→0.1.4`.
+- `vscode/README.md` `0.1.3→0.1.4` + `strata-tzinny-0.1.4.vsix` + `Tzinny-dev.strata-tzinny`.
+
+## Unreleased — próximo 0.1.5
+
+- Pendiente producto: `BigQuery/Snowflake` adapters reales `adapters.py:74`, `Iceberg` `propuesta §6`, `WASM` descartado.
 
 ---
 
