@@ -12,8 +12,8 @@ seis operaciones (`connect`, `execute`, `fetch`, `materialize`,
 | --- | --- | --- | --- |
 | DuckDB | `DuckDBWarehouse` ✅ | ✅ `duckdb` (default dep) | `duckdb` |
 | Postgres | stub E095 — sin `Warehouse` ABC aún | ✅ `cli.open_warehouse("postgres://...")` → `dbcompat.PGConn` (psycopg2, probado contra Postgres 16 efímero en `tests/pg_harness.py`) | `pip install strata[postgres]` |
-| BigQuery | stub E095 | ❌ solo `sqlgen` (`--dialect bigquery` emite SQL) | `pip install strata[bigquery]` |
-| Snowflake | stub E095 | ❌ solo `sqlgen` (`--dialect snowflake` emite SQL) | `pip install strata[snowflake]` |
+| BigQuery | `BigQueryWarehouse` ✅ | ✅ `BigQueryConn` (`bigquery://project/dataset?location=US`) + `cli.open_warehouse` / `get_adapter` | `pip install strata[bigquery]` |
+| Snowflake | `SnowflakeWarehouse` ✅ | ✅ `SnowflakeConn` (`snowflake://user:pass@account/db/schema?warehouse=WH`) + `cli.open_warehouse` / `get_adapter` | `pip install strata[snowflake]` |
 
 `sqlgen` ya produce SQL por dialecto; el adapter solo transporta
 (transacción, materialización, listado). No hay traducción de

@@ -4,7 +4,7 @@
 
 ## Requirements
 
-* `strata` on `PATH` (`pip install strata-lang` or standalone `strata` `0.1.4`), or set `strata.binaryPath` in settings.
+* `strata` on `PATH` (`pip install strata-lang` or standalone `strata` `0.1.5`), or set `strata.binaryPath` in settings.
 * The LSP is `strata lsp` (`strata/lsp.py:243`) — stdio JSON-RPC, no deps.
 
 ## Features
@@ -27,7 +27,7 @@ npm run compile
 # package
 npx vsce package
 # install
-code --install-extension strata-tzinny-0.1.4.vsix
+code --install-extension strata-tzinny-0.1.5.vsix
 # marketplace
 code --install-extension Tzinny-dev.strata-tzinny
 ```

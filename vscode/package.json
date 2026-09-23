@@ -2,7 +2,7 @@
   "name": "strata-tzinny",
   "displayName": "Strata — Tzinny",
   "description": "Strata — declarative, versioned, immutable data transformations (LSP: diagnostics, completion, hover, definition)",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "Tzinny-dev",
   "license": "MIT",
   "repository": {

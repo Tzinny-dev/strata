@@ -6,12 +6,11 @@ which opens a `strata.dbcompat.PGConn` (psycopg2, tested against ephemeral
 Postgres 16 in `tests/pg_harness.py`) — the engine (`strata.exec`) works
 against either connection type without code changes (`dbcompat.is_postgres`).
 
-`strata.adapters.Warehouse` / `get_adapter("postgres")` is still a stub:
-even when `psycopg2-binary` is installed, `get_adapter("postgres")` raises
-`AdapterNotAvailable` (E095) because no `PostgresWarehouse` is wired to
-the ABC yet — use the CLI path or `dbcompat.PGConn` directly for real
-Postgres runs. BigQuery/Snowflake are SQL-emit only (no driver in base
-env, stub raises with install hint `pip install strata[bigquery]` etc.).
+BigQuery and Snowflake now have real Warehouse implementations
+(`BigQueryWarehouse` / `SnowflakeWarehouse`) backed by
+`strata.dbcompat.BigQueryConn` / `SnowflakeConn` — same chaining
+`con.execute(sql, params).fetchall()` as DuckDB/PGConn, so `exec.py`
+works without changes (`dbcompat.is_bigquery` / `is_snowflake`).
 
 `sqlgen` already produces dialect-specific SQL for all four; the adapter's
 job is transport, not translation.
@@ -84,13 +83,46 @@ def get_adapter(dialect: str, **kw) -> Warehouse:
     ``dbcompat.PGConn``) but no ``Warehouse`` ABC implementation yet — this
     function raises ``AdapterNotAvailable`` with a direct hint even when
     ``psycopg2`` is importable, so callers don't misread "installed" as
-    "wired". BigQuery/Snowflake raise with the ``pip install strata[...]``
-    hint when their driver is absent, and "not yet implemented" when present
-    but unwired.
+    "wired". BigQuery/Snowflake return real warehouses when their driver
+    is installed, otherwise raise with the ``pip install strata[...]`` hint.
     """
     if dialect == "duckdb":
         import duckdb
         return DuckDBWarehouse(duckdb.connect(kw.get("database", ":memory:")))
+    if dialect == "bigquery":
+        pkg, mod = _MISSING["bigquery"]
+        try:
+            __import__(mod)
+        except ImportError:
+            raise AdapterNotAvailable(
+                dialect, pkg,
+                f"warehouse adapter for {dialect!r} requires {pkg}; "
+                f"real execution is unavailable (pip install strata[{dialect}])") from None
+        # project/dataset from kwargs or env — BigQuery client picks defaults if omitted
+        return BigQueryWarehouse(
+            project=kw.get("project"),
+            dataset=kw.get("dataset", kw.get("database", "")),
+            location=kw.get("location"),
+            credentials=kw.get("credentials"),
+        )
+    if dialect == "snowflake":
+        pkg, mod = _MISSING["snowflake"]
+        try:
+            __import__(mod)
+        except ImportError:
+            raise AdapterNotAvailable(
+                dialect, pkg,
+                f"warehouse adapter for {dialect!r} requires {pkg}; "
+                f"real execution is unavailable (pip install strata[{dialect}])") from None
+        return SnowflakeWarehouse(
+            account=kw.get("account"),
+            user=kw.get("user"),
+            password=kw.get("password"),
+            warehouse=kw.get("warehouse"),
+            database=kw.get("database"),
+            schema=kw.get("schema"),
+            role=kw.get("role"),
+        )
     pkg, mod = _MISSING.get(dialect, ("", ""))
     try:
         __import__(mod)
@@ -144,3 +176,144 @@ class DuckDBWarehouse(Warehouse):
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema='main' AND table_type='VIEW'").fetchall()
         return [r[0] for r in rows]
+
+
+class BigQueryWarehouse(Warehouse):
+    """Warehouse backed by google-cloud-bigquery. Also acts as a DB-API-like
+    connection for exec.py (execute/fetchone/fetchall chaining via BigQueryConn)."""
+
+    def __init__(self, project: Optional[str] = None, dataset: str = "", location: Optional[str] = None, credentials: Any = None) -> None:
+        from google.cloud import bigquery as bq  # type: ignore
+
+        # bigquery.Client picks project from env/credentials if not given
+        self.client = bq.Client(project=project, location=location, credentials=credentials) if project or credentials or location else bq.Client()
+        # dataset may be "project.dataset" or just "dataset"
+        if dataset and "." in dataset and not project:
+            # split project.dataset
+            proj, ds = dataset.split(".", 1)
+            self.dataset = ds
+            # recreate client with project if needed
+            if not project:
+                try:
+                    self.client = bq.Client(project=proj, location=location, credentials=credentials)
+                except Exception:
+                    pass
+        else:
+            self.dataset = dataset or getattr(self.client, "dataset", "") or ""
+        # BigQueryConn for exec.py dispatch
+        from .dbcompat import BigQueryConn
+
+        self._conn = BigQueryConn(self.client, self.dataset)
+        self.con = self._conn  # alias for exec.py is_* checks (is_bigquery checks BigQueryConn, but also handle Warehouse)
+
+    def connect(self) -> None:
+        pass
+
+    # Warehouse ABC
+    def execute(self, sql: str, params: Optional[Any] = None) -> Any:  # type: ignore
+        """Warehouse execute (no params) or Conn execute (with params) — both chain."""
+        return self._conn.execute(sql, params)
+
+    def fetch(self, sql: str) -> List[tuple]:
+        return self._conn.execute(sql).fetchall()
+
+    def fetchone(self) -> Optional[tuple]:
+        return self._conn.fetchone()
+
+    def fetchall(self) -> List[tuple]:
+        return self._conn.fetchall()
+
+    @property
+    def description(self) -> Optional[Any]:
+        return self._conn.description
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def materialize(self, name: str, sql: str, partition_by: Optional[List[str]] = None) -> None:
+        # BigQuery CREATE OR REPLACE TABLE `dataset.name` AS (sql) — partition_by ignored for now (requires PARTITION BY clause)
+        tbl = f"`{self.dataset}.{name}`" if self.dataset and "." not in name else f"`{name}`"
+        # Use backticks, handle already-qualified name
+        if self.dataset and "." not in name:
+            tbl = f"`{self.dataset}.{name}`"
+        else:
+            tbl = name if "." in name else f"`{name}`"
+        self._conn.execute(f"CREATE OR REPLACE TABLE {tbl} AS {sql}")
+
+    def drop(self, name: str) -> None:
+        tbl = f"`{self.dataset}.{name}`" if self.dataset and "." not in name else f"`{name}`" if "." not in name else name
+        try:
+            self._conn.execute(f"DROP TABLE IF EXISTS {tbl}")
+        except Exception:
+            pass
+
+    def list_views(self) -> List[str]:
+        try:
+            return list(self._conn.execute(
+                f"SELECT table_name FROM `{self.dataset}.INFORMATION_SCHEMA.VIEWS`"
+            ).fetchall())
+        except Exception:
+            return []
+
+
+class SnowflakeWarehouse(Warehouse):
+    """Warehouse backed by snowflake-connector-python. Also acts as DB-API conn."""
+
+    def __init__(self, account: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, warehouse: Optional[str] = None, database: Optional[str] = None, schema: Optional[str] = None, role: Optional[str] = None) -> None:
+        import snowflake.connector  # type: ignore
+
+        # snowflake.connector.connect requires account/user/password — let it raise if missing
+        self.raw = snowflake.connector.connect(
+            account=account or "",
+            user=user or "",
+            password=password or "",
+            warehouse=warehouse or "",
+            database=database or "",
+            schema=schema or "PUBLIC",
+            role=role or "",
+        )
+        from .dbcompat import SnowflakeConn
+
+        self._conn = SnowflakeConn(self.raw)
+        self.con = self._conn
+
+    def connect(self) -> None:
+        pass
+
+    def execute(self, sql: str, params: Optional[Any] = None) -> Any:  # type: ignore
+        return self._conn.execute(sql, params)
+
+    def fetch(self, sql: str) -> List[tuple]:
+        return self._conn.execute(sql).fetchall()
+
+    def fetchone(self) -> Optional[tuple]:
+        return self._conn.fetchone()
+
+    def fetchall(self) -> List[tuple]:
+        return self._conn.fetchall()
+
+    @property
+    def description(self) -> Optional[Any]:
+        return self._conn.description
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def materialize(self, name: str, sql: str, partition_by: Optional[List[str]] = None) -> None:
+        # Snowflake CREATE OR REPLACE TABLE name AS sql
+        self._conn.execute(f"CREATE OR REPLACE TABLE {name} AS {sql}")
+
+    def drop(self, name: str) -> None:
+        try:
+            self._conn.execute(f"DROP TABLE IF EXISTS {name}")
+        except Exception:
+            pass
+
+    def list_views(self) -> List[str]:
+        try:
+            rows = self._conn.execute(
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_SCHEMA = CURRENT_SCHEMA()"
+            ).fetchall()
+            return [r[0] for r in rows]
+        except Exception:
+            return []

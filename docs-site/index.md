@@ -60,8 +60,8 @@ strata --help
 ```
 
 ```bash [docker]
-docker pull ghcr.io/tzinny-dev/strata:0.1.4
-docker run --rm ghcr.io/tzinny-dev/strata:0.1.4 --help
+docker pull ghcr.io/tzinny-dev/strata:0.1.5
+docker run --rm ghcr.io/tzinny-dev/strata:0.1.5 --help
 ```
 
 :::
@@ -72,7 +72,7 @@ docker run --rm ghcr.io/tzinny-dev/strata:0.1.4 --help
 - **Tutorial** — end-to-end verified walkthrough
 - **Reference** — syntax, contracts, incremental, setops, JSON/arrays, dates, joins
 - **Spec** — grammar + types (normative)
-- **Changelog** — 0.1.0, 0.1.1, 0.1.2, 0.1.3, 0.1.4, binary Fase 0-4
+- **Changelog** — 0.1.0, 0.1.1, 0.1.2, 0.1.3, 0.1.4, 0.1.5, binary Fase 0-4
 
 ## Status
 
@@ -80,4 +80,4 @@ docker run --rm ghcr.io/tzinny-dev/strata:0.1.4 --help
 
 Prototype: `537 tests, 81% coverage`, `strata.spec` onefile `34M`, `bench all green`.
 
-> Working title v0.1 — `strata-lang 0.1.4` on PyPI · `strata 34M` standalone · `ghcr.io/tzinny-dev/strata`
+> Working title v0.1 — `strata-lang 0.1.5` on PyPI · `strata 34M` standalone · `ghcr.io/tzinny-dev/strata`

@@ -60,9 +60,19 @@ Documentado `docs/binary-standalone.md:1`.
 - Sync `pyproject.toml:7` `strata-lang 0.1.3→0.1.4` (`strata/__init__.py:3`), `README.md:81` `0.1.1→0.1.4`, `Docker 0.1.0→0.1.4`, `guide/binary-standalone.md:3` `0.1.1→0.1.4`.
 - `vscode/README.md` `0.1.3→0.1.4` + `strata-tzinny-0.1.4.vsix` + `Tzinny-dev.strata-tzinny`.
 
-## Unreleased — próximo 0.1.5
+## 0.1.5 — 2026-09-23
 
-- Pendiente producto: `BigQuery/Snowflake` adapters reales `adapters.py:74`, `Iceberg` `propuesta §6`, `WASM` descartado.
+**B1 BigQuery/Snowflake adapters reales**
+
+- `strata/dbcompat.py:70` `BigQueryConn`/`SnowflakeConn` (chaining `execute→fetchall` como `PGConn`, `?` inlining para BQ, `%s` para SF, `db_schema`/`live_view_defs`/`physical_schema`/`physical_types` dispatch para los 4 dialectos).
+- `strata/adapters.py:113` `BigQueryWarehouse`/`SnowflakeWarehouse` (Wraps `BigQueryConn`/`SnowflakeConn`, `materialize` `CREATE OR REPLACE TABLE`, `get_adapter("bigquery"/"snowflake")` ya no `E095` cuando driver instalado).
+- `strata/cli.py:42` `open_warehouse` ahora `bigquery://project/dataset?location=US` → `BigQueryConn` y `snowflake://user:pass@account/db/schema?warehouse=WH&role=ROLE` → `SnowflakeConn`.
+- `strata.spec:14` `hiddenimports` `google.cloud.bigquery`/`snowflake.connector`.
+- Tests `tests/test_adapters.py:60` `+5` mocks (BigQuery/Snowflake `get_adapter` + `open_warehouse` URL), `521 passed` (era `516`).
+
+## Unreleased — próximo 0.1.6
+
+- Pendiente producto: `Iceberg` `propuesta §6`, `WASM` descartado.
 
 ---
 

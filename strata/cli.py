@@ -43,12 +43,14 @@ def open_warehouse(output: Optional[str], read_only: bool = False) -> Any:
     """Open a warehouse connection for `-o`/`--output`.
 
     `postgres://...`/`postgresql://...` connects via psycopg2 (wrapped in
-    dbcompat.PGConn, see strata/dbcompat.py); anything else is a DuckDB
-    file path, or `:memory:` when `output` is falsy. `--dialect` (SQL
-    emission) and `-o` (which engine to connect to) are independent and
-    both explicit on purpose — no scheme-sniffing to infer one from the
-    other. Raises RuntimeError with an actionable message if the needed
-    driver isn't installed."""
+    dbcompat.PGConn, see strata/dbcompat.py); `bigquery://project/dataset`
+    via google-cloud-bigquery; `snowflake://user:pass@account/db/schema?...`
+    via snowflake-connector-python; anything else is a DuckDB file path,
+    or `:memory:` when `output` is falsy. `--dialect` (SQL emission) and
+    `-o` (which engine to connect to) are independent and both explicit on
+    purpose — no scheme-sniffing to infer one from the other. Raises
+    RuntimeError with an actionable message if the needed driver isn't
+    installed."""
     if output and output.startswith(("postgres://", "postgresql://")):
         try:
             import psycopg2
@@ -57,6 +59,60 @@ def open_warehouse(output: Optional[str], read_only: bool = False) -> Any:
                 "postgres driver not available; pip install psycopg2-binary")
         from . import dbcompat
         return dbcompat.PGConn(psycopg2.connect(output))
+    if output and output.startswith("bigquery://"):
+        try:
+            from google.cloud import bigquery as bq  # type: ignore
+        except ImportError:
+            raise RuntimeError(
+                "bigquery driver not available; pip install google-cloud-bigquery")
+        from .dbcompat import BigQueryConn
+        from urllib.parse import urlparse, parse_qs, unquote
+
+        # bigquery://project/dataset?location=US  or bigquery://project.dataset
+        parsed = urlparse(output)
+        # netloc is project, path is /dataset
+        project = unquote(parsed.netloc) if parsed.netloc else None
+        dataset = unquote(parsed.path.lstrip("/")) if parsed.path else ""
+        if not dataset and project and "." in project:
+            # allow bigquery://project.dataset
+            proj, ds = project.split(".", 1)
+            project, dataset = proj, ds
+        qs = parse_qs(parsed.query)
+        location = qs.get("location", [None])[0]
+        # bigquery.Client handles default project/credentials from env if project is None
+        client = bq.Client(project=project, location=location) if project or location else bq.Client()
+        return BigQueryConn(client, dataset)
+    if output and output.startswith("snowflake://"):
+        try:
+            import snowflake.connector  # type: ignore
+        except ImportError:
+            raise RuntimeError(
+                "snowflake driver not available; pip install snowflake-connector-python")
+        from .dbcompat import SnowflakeConn
+        from urllib.parse import urlparse, parse_qs, unquote
+
+        # snowflake://user:password@account/database/schema?warehouse=WH&role=ROLE
+        parsed = urlparse(output)
+        user = unquote(parsed.username) if parsed.username else None
+        password = unquote(parsed.password) if parsed.password else None
+        account = parsed.hostname or ""
+        # path is /database/schema
+        parts = [unquote(p) for p in parsed.path.lstrip("/").split("/") if p]
+        database = parts[0] if len(parts) > 0 else ""
+        schema = parts[1] if len(parts) > 1 else "PUBLIC"
+        qs = parse_qs(parsed.query)
+        warehouse = qs.get("warehouse", [None])[0]
+        role = qs.get("role", [None])[0]
+        raw = snowflake.connector.connect(
+            account=account,
+            user=user or "",
+            password=password or "",
+            database=database or "",
+            schema=schema,
+            warehouse=warehouse or "",
+            role=role or "",
+        )
+        return SnowflakeConn(raw)
     try:
         import duckdb
     except ImportError:
