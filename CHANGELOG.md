@@ -32,9 +32,19 @@ Documentado `docs/binary-standalone.md:1`.
 - **Fase 3 hardening** `6dedf62`: `strata.spec:4` añade `LICENSE+README` al bundle, `binary.yml:34` `upx-ucl` en ubuntu + `sha256sum` + gate `>120M` warn, `codesign --sign -` ad-hoc macOS, `attest-build-provenance` SLSA.
 - **Fase 4 distribución** `3374913`: `install.sh:1` `curl|bash` detecta OS/arch, pull `GH Releases v$VERSION/strata-*`, `homebrew/strata-lang.rb:1` tap formula (`version 0.1.1` `REPLACE_SHA256`), `README.md:72` sección Standalone binary, attest ya en Fase 3.
 
-## Unreleased — próximo 0.1.2
+## 0.1.2 — 2026-09-23
 
-- Docs polish en curso: `CHANGELOG.md` (este archivo), badges, `mkdocs` site.
+**Binary standalone deuda cerrada Fase 0-4 → producción**
+
+- `docs/binary-standalone.md:1` reescrito: de "análisis requisitos / no construir" a estado implementado `34M` + deuda restante documentada (firma real, SHA auto, parity, compat, arm64).
+- `binary.yml:185` release ahora parchea `homebrew/strata-lang.rb:7` `version` + `REPLACE_*SHA256` y commitea `[skip ci]` a `main`.
+- `binary.yml:103` gate `binary vs pip parity` (`build` diff + `bench` + `test --seed`) solo en `ubuntu-latest`.
+- `binary.yml:140` + `strata.spec:33` UPX condicionado + job `compat` `ubuntu:20.04` via Docker (glibc 2.31).
+- `install.sh:33` arm64 detecta `strata-*-arm64` nativo o fallback `amd64` con warning Rosetta/qemu; `binary.yml:build` matriz arm64 comentada lista (`macos-14`/`ubuntu-24.04-arm`).
+- `binary.yml:88` firma prod documentada `codesign + notarytool` / `signtool` con `secrets.APPLE_CERT/WINDOWS_CERT`.
+
+## Unreleased — próximo 0.1.3
+
 - Pendiente producto: `BigQuery/Snowflake` adapters reales `adapters.py:74`, `Iceberg` `propuesta §6`, `LSP` `vscode`, `WASM` descartado.
 
 ---

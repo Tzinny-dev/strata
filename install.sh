@@ -30,8 +30,23 @@ case "$OS" in
   MINGW*|MSYS*|CYGWIN*) ASSET="strata-windows-amd64.exe" ;;
   *) echo "unsupported OS $OS" >&2; exit 1;;
 esac
-# Normalize arch: binary.yml builds amd64 only today; arm64 will run via rosetta/emulation
-# Future: strata-macos-arm64, strata-linux-arm64 when matrix adds arm
+# Arch handling: binary.yml currently builds amd64 only (see binary-standalone.md §5)
+# arm64: try native asset first, fallback to amd64 via Rosetta/qemu with warning
+if [[ "$ARCH" == "arm64" || "$ARCH" == "aarch64" ]]; then
+  case "$OS" in
+    Darwin) TRY="strata-macos-arm64" ;;
+    Linux)  TRY="strata-linux-arm64" ;;
+    *) TRY="" ;;
+  esac
+  if [[ -n "$TRY" ]]; then
+    # probe if arm64 asset exists for this version (HEAD check, no download)
+    if curl -fsSL -I "https://github.com/$REPO/releases/download/v$VERSION/$TRY" >/dev/null 2>&1; then
+      ASSET="$TRY"
+    else
+      echo "warning: $TRY not yet published for v$VERSION — using $ASSET via emulation (Rosetta/qemu)" >&2
+    fi
+  fi
+fi
 
 URL="https://github.com/$REPO/releases/download/v$VERSION/$ASSET"
 TMP="$(mktemp -d)"

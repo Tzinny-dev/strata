@@ -30,8 +30,8 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
+    upx=True,  # effective only if `upx` present on PATH (ubuntu-latest has upx-ucl, macos/windows skip)
+    upx_exclude=[],  # keep empty — if UPX breaks duckdb on old glibc/kernels (<5.10), set upx=False or pin UPX off for that release (see binary-standalone.md §5)
     runtime_tmpdir=None,
     console=True,
     disable_windowed_traceback=False,
