@@ -636,8 +636,8 @@ def cmd_import_dbt(args: argparse.Namespace) -> int:
     deterministic .strata artifact via strata/importdbt.py (E041 fail-loud §4
     / §11: a dbt model doing `select *` with no columns cannot be imported — the
     warehouse owns the types). With `--models DIR`, each `models/*.sql` model is
-    translated into the Strata model body (single-table SELECT/WHERE/GROUP BY
-    subset; anything else is E042 fail-loud, nothing emitted)."""
+    translated into the Strata model body (SELECT/WHERE/GROUP BY/JOIN/CASE
+    subset plus `WITH` CTEs; anything else is E042 fail-loud, nothing emitted)."""
     from strata.importdbt import import_dbt_schema, import_dbt_project
     from strata.importdbt import ImportFailedFailLoud, TransformFailLoud
     path = Path(args.file)
@@ -1266,7 +1266,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("file", metavar="schema.yml", help="dbt schema.yml (sources + models with columns)")
     p.add_argument("--models", metavar="DIR", default=None,
                    help="dbt models/ dir: translate each *.sql into the Strata model "
-                        "body (single-table select/where/group-by subset; "
+                        "body (select/where/group-by/join/case subset, plus WITH CTEs; "
                         "out-of-subset SQL fails loud E042)")
     p.add_argument("--output", help="output .strata path (default: alongside the schema.yml)")
     p.set_defaults(fn=cmd_import_dbt)

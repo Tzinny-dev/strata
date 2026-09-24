@@ -219,6 +219,36 @@ def _run_project_import(tmp: Path, sql_map, schema=PROJECT_SCHEMA,
     return code, err.getvalue()
 
 
+CTE_SCHEMA = """\
+version: 2
+sources:
+  - name: crm
+    schema: prod
+    tables:
+      - name: orders
+        columns:
+          - name: order_id
+            data_type: bigint
+            tests: [not_null]
+          - name: country
+            data_type: string
+          - name: gross
+            data_type: numeric
+          - name: order_day
+            data_type: date
+            tests: [not_null]
+models:
+  - name: daily
+    depends_on: [orders]
+    columns:
+      - name: order_day
+        data_type: date
+        tests: [not_null]
+      - name: total
+        data_type: numeric
+"""
+
+
 class TestImportDbtTransform(unittest.TestCase):
     def test_transform_imports_and_builds_green(self):
         with __import__("tempfile").TemporaryDirectory() as d:
@@ -469,6 +499,80 @@ models:
                                             schema=schema)
             self.assertEqual(code, 1)
             self.assertIn("E041", err)
+            self.assertFalse((Path(d) / "imported.strata").exists())
+
+    def test_transform_with_cte_succeeds(self):
+        # Chained CTEs lower to contract-less helper models daily__es/daily__by_day
+        # that the main query reads from; the artifact must pass build.
+        cte_sql = ("WITH es AS (\n"
+                   "  SELECT order_id, gross, order_day\n"
+                   "  FROM {{ source('crm', 'orders') }}\n"
+                   "  WHERE country = 'ES'\n"
+                   "),\n"
+                   "by_day AS (\n"
+                   "  SELECT order_day, SUM(gross) AS total\n"
+                   "  FROM es\n"
+                   "  GROUP BY order_day\n"
+                   ")\n"
+                   "SELECT order_day, total FROM by_day")
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {"int_clean": None, "daily": cte_sql},
+                                            schema=CTE_SCHEMA)
+            self.assertEqual(code, 0, err)
+            art = (Path(d) / "imported.strata").read_text()
+            self.assertIn("model daily__es {", art)
+            self.assertIn("from orders", art)
+            self.assertIn("filter country == \"ES\"", art)
+            self.assertIn("model daily__by_day {", art)
+            self.assertIn("from daily__es", art)
+            self.assertIn("aggregate { total = sum(gross) }", art)
+            self.assertIn("from daily__by_day", art)
+            bcode = cli.main(["build", str(Path(d) / "imported.strata")])
+            self.assertEqual(bcode, 0, err)
+
+    def test_transform_with_cte_is_deterministic_byte_identical(self):
+        cte_sql = ("WITH es AS (SELECT gross, order_day FROM orders WHERE country = 'ES'),\n"
+                   "by_day AS (SELECT order_day, SUM(gross) AS total FROM es GROUP BY order_day)\n"
+                   "SELECT order_day, total FROM by_day")
+        with __import__("tempfile").TemporaryDirectory() as d:
+            c1, _ = _run_project_import(Path(d), {"int_clean": None, "daily": cte_sql},
+                                        schema=CTE_SCHEMA, output="a.strata")
+            c2, _ = _run_project_import(Path(d), {"int_clean": None, "daily": cte_sql},
+                                        schema=CTE_SCHEMA, output="b.strata")
+            self.assertEqual((c1, c2), (0, 0))
+            self.assertEqual((Path(d) / "a.strata").read_text(),
+                             (Path(d) / "b.strata").read_text())
+
+    def test_transform_fail_loud_with_recursive(self):
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {
+                "daily": "WITH RECURSIVE t AS (SELECT order_day FROM orders) SELECT order_day FROM t"},
+                schema=CTE_SCHEMA)
+            self.assertEqual(code, 1)
+            self.assertIn("E042", err)
+            self.assertIn("RECURSIVE", err)
+            self.assertFalse((Path(d) / "imported.strata").exists())
+
+    def test_transform_fail_loud_with_column_list(self):
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {
+                "daily": "WITH t(a, b) AS (SELECT order_day, gross FROM orders) SELECT a FROM t"},
+                schema=CTE_SCHEMA)
+            self.assertEqual(code, 1)
+            self.assertIn("E042", err)
+            self.assertIn("column", err)
+            self.assertFalse((Path(d) / "imported.strata").exists())
+
+    def test_transform_fail_loud_with_forward_reference(self):
+        # A CTE may only read sources/models/earlier CTEs; a forward ref (b defined
+        # after a reads it) would silently change semantics — fail-loud E042.
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {
+                "daily": "WITH a AS (SELECT order_day FROM b), "
+                         "b AS (SELECT order_day FROM orders) SELECT order_day FROM a"},
+                schema=CTE_SCHEMA)
+            self.assertEqual(code, 1)
+            self.assertIn("E042", err)
             self.assertFalse((Path(d) / "imported.strata").exists())
 
 

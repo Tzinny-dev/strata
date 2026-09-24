@@ -378,16 +378,165 @@ def _parse_select_item(item: List[Tuple[str, int]], model: str) -> Tuple[str, st
         f"(bare columns, aliases, CASE, and count/sum/avg/min/max only)")
 
 
+_strip_comments_re = re.compile(r"(\"\"\"|\")(?:[^\"\\\\]|\\\\[\"\\\\nt])*\"|'[^']*'|--[^\n]*|/\*.*?(?:\*/|\Z)", flags=re.S)
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """Remove `--` and `/* */` comments while keeping string literals intact."""
+    out: List[str] = []
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if ch in ("'", '"'):
+            quote = ch
+            j = i + 1
+            while j < len(sql):
+                if sql[j] == "\\":
+                    j += 2
+                    continue
+                if sql[j] == quote:
+                    j += 1
+                    break
+                j += 1
+            out.append(sql[i:j])
+            i = j
+            continue
+        if ch == "-" and sql[i:i + 2] == "--":
+            j = sql.find("\n", i)
+            i = j if j != -1 else len(sql)
+            continue
+        if ch == "/" and sql[i:i + 2] == "/*":
+            j = sql.find("*/", i + 2)
+            i = j + 2 if j != -1 else len(sql)
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _split_with(sql: str, model: str) -> Tuple[List[Tuple[str, str]], str]:
+    """Split `WITH cte AS (...), cte2 AS (...)  SELECT ...` into:
+      - (cte_name, cte_body_sql) pairs, in order
+      - the trailing top-level SELECT (the model's main query)
+
+    Comprehension caveat: the bodies are whole `(...)` groups (they must be),
+    so a nested `WITH` inside a CTE would try to re-enter _split_with; the
+    translator rejects a `WITH` that appears inside a body (E042, no guessing).
+    Only `WITH x AS (SELECT ...)` column-less form is understood; anything else
+    (WITH RECURSIVE, per-CTE column lists) raises TransformFailLoud."""
+    body = _strip_sql_comments(sql)
+    toks = _tokenize(body)
+    if not toks or toks[0][0].upper() != "WITH":
+        return [], body  # not a CTE query at all
+    if len(toks) > 1 and toks[1][0].upper() == "RECURSIVE":
+        raise TransformFailLoud(
+            f"E042: {model}: `WITH RECURSIVE` is out of the translatable subset "
+            f"(fail-loud §4) — translate the recursion to plain Strata instead.")
+    # walk depth-0 tokens to find `name AS ( ... )` blocks
+    ctes: List[Tuple[str, str]] = []
+    i = 1  # skip WITH
+    while True:
+        if i >= len(toks) or not _IDENT.fullmatch(toks[i][0]):
+            raise TransformFailLoud(
+                f"E042: {model}: expected a CTE name after WITH/`,`, got "
+                f"{toks[i][0] if i < len(toks) else 'end of input'} (fail-loud §4)")
+        name = toks[i][0]
+        i += 1
+        # optional column list `cte (a, b)` — not understood (column renaming)
+        if i < len(toks) and toks[i][0] == "(":
+            raise TransformFailLoud(
+                f"E042: {model}: CTE {name!r} declares a column list (a, b) — "
+                f"column renaming is out of the subset (fail-loud §4, translate "
+                f"it to plain Strata instead)")
+        if i >= len(toks) or toks[i][0].upper() != "AS":
+            raise TransformFailLoud(
+                f"E042: {model}: CTE {name!r} missing `AS` (fail-loud §4)")
+        i += 1
+        if i >= len(toks) or toks[i][0] != "(":
+            raise TransformFailLoud(
+                f"E042: {model}: CTE {name!r} has no parenthesized body — only "
+                f"`WITH name AS (SELECT ...)` is understood (fail-loud §4)")
+        depth = 0
+        start = i
+        while i < len(toks):
+            t = toks[i][0]
+            if t == "(":
+                depth += 1
+            elif t == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if depth != 0 or i >= len(toks):
+            raise TransformFailLoud(
+                f"E042: {model}: CTE {name!r} body is not closed (fail-loud §4)")
+        cte_sql = _join_str(toks[start + 1:i])
+        ctes.append((name, cte_sql))
+        i += 1  # skip closing ')'
+        # after the body: either `, name AS (` or the final top-level SELECT
+        if i < len(toks) and toks[i][0] == ",":
+            i += 1
+            continue
+        break
+    main_toks = toks[i:]
+    if not main_toks or main_toks[0][0].upper() != "SELECT":
+        raise TransformFailLoud(
+            f"E042: {model}: after the WITH chain there must be a top-level "
+            f"SELECT (the model's main query), got "
+            f"{main_toks[0][0] if main_toks else 'end of input'} (fail-loud §4)")
+    main_sql = _join_str(main_toks)
+    return ctes, main_sql
+
+
+def _translate_sql(sql_text: str, model: str, models: Set[str],
+                   sources: Set[str]) -> Tuple[List[str], List[Tuple[str, List[str]]]]:
+    """Translate a dbt model .sql into (main_body, cte_helpers).
+
+    `main_body` is the Strata body lines for `model`. `cte_helpers` are
+    (helper_name, body_lines) contract-less Strata models that stand in for
+    each `WITH` CTE the main query (or a later CTE) reads from. The main
+    query's `from`/`join` table names are mapped onto those helpers via
+    `table_map`, so a CTE becomes just another model ref — Strata's compiler
+    decides materialization. Nested/recursive CTEs fail loud E042."""
+    ctes, main_sql = _split_with(_strip_jinja(sql_text, model, models, sources), model)
+    if not ctes:
+        return _parse_transform(main_sql, model, models, sources), []
+    # Each CTE is a contract-less helper model named `{model}__{cte}`.
+    table_map: Dict[str, str] = {}
+    helper_defs: List[Tuple[str, List[str]]] = []
+    for name, cte_sql in ctes:
+        helper = f"{model}__{name}"
+        if helper in models or helper in sources:
+            raise TransformFailLoud(
+                f"E042: {model}: CTE {name!r} maps to helper model {helper!r} "
+                f"which collides with a schema-declared table — rename the CTE "
+                f"(fail-loud §4)")
+        # The CTE body may reference sources, models, or earlier CTEs (mapped).
+        body = _parse_transform(cte_sql, helper, models | set(table_map), sources,
+                                table_map=table_map)
+        helper_defs.append((helper, body))
+        table_map[name] = helper
+    main_body = _parse_transform(main_sql, model, models | set(table_map), sources,
+                                 table_map=table_map)
+    return main_body, helper_defs
+
+
 def _parse_transform(sql_text: str, model: str, models: Set[str],
-                     sources: Set[str]) -> List[str]:
-    """Translate ONE dbt model .sql into Strata body statements.
+                     sources: Set[str],
+                     table_map: Optional[Dict[str, str]] = None) -> List[str]:
+    """Translate ONE dbt model .sql (WITH already peeled off) into Strata body statements.
 
     Subset: `SELECT <list> FROM <ref|source> [AS alias] [JOIN ... ON ...]`
     with optional `WHERE` (col-vs-literal / IS NULL, AND) and optional
     `GROUP BY` over aggregates, plus `CASE WHEN ... THEN ... ELSE ... END`
     in SELECT (→ Strata `case(...)`). Everything else — `select *` without
-    contract, CTEs/WITH, subqueries, ORDER BY/LIMIT/DISTINCT/HAVING/UNION —
-    raises TransformFailLoud (E042, fail-loud §4). Never guesses."""
+    contract, WITH (handled by _translate_with), subqueries, ORDER BY/LIMIT/
+    DISTINCT/HAVING/UNION — raises TransformFailLoud (E042, fail-loud §4).
+
+    `table_map` maps a SQL table name (a CTE, peeled earlier) to the Strata
+    model name that stands in for it (a contract-less helper); those names are
+    accepted in FROM/JOIN and emitted as-is so the final model references the
+    helper. Never guesses."""
     sql = _strip_jinja(sql_text, model, models, sources)
     toks = _tokenize(sql)
     if not toks or toks[0][0].upper() != "SELECT":
@@ -442,9 +591,12 @@ def _parse_transform(sql_text: str, model: str, models: Set[str],
         if idx >= len(from_toks):
             raise TransformFailLoud(f"E042: {model}: FROM/JOIN table missing")
         tbl = from_toks[idx][0]
-        if tbl not in models and tbl not in sources:
+        if tbl not in models and tbl not in sources \
+                and (table_map is None or tbl not in table_map):
             raise TransformFailLoud(
-                f"E042: {model}: table {tbl!r} is neither a dbt source nor a model with a contract — fail-loud §4.")
+                f"E042: {model}: table {tbl!r} is neither a dbt source, a model "
+                f"with a contract, nor a CTE in scope — fail-loud §4.")
+        emit_name = table_map.get(tbl, tbl) if table_map else tbl
         nxt = idx + 1
         alias: Optional[str] = None
         if nxt < len(from_toks) and from_toks[nxt][0].upper() == "AS":
@@ -457,7 +609,7 @@ def _parse_transform(sql_text: str, model: str, models: Set[str],
             # Bare alias without AS (e.g. FROM orders a)
             alias = from_toks[nxt][0]
             nxt += 1
-        return tbl, alias, nxt
+        return emit_name, alias, nxt
 
     base_table, base_alias, pos = _read_table_ref(0)
     table = base_table
@@ -723,23 +875,27 @@ def _emit_model_body(mdl: dict, transforms: Dict[str, List[str]],
 
 def import_dbt_project(schema: Path, model_dir: Path) -> str:
     """`import-dbt --models DIR`: dbt schema.yml PLUS translation of each
-    `models/*.sql` (single-table subset) into the Strata model body. A .sql file
-    whose stem has no schema contract, or SQL outside the subset, raises
-    TransformFailLoud (E042, fail-loud §4, nothing emitted)."""
+    `models/*.sql` (SELECT/WHERE/GROUP BY/JOIN/CASE subset, `WITH` CTEs
+    lowered to contract-less `{model}__{cte}` helpers) into the Strata model
+    body. A .sql file whose stem has no schema contract, or SQL outside the
+    subset, raises TransformFailLoud (E042, fail-loud §4, nothing emitted)."""
     doc = yaml.safe_load(schema.read_text())
     model_names = {m["name"] for m in doc.get("models", []) or []}
     source_names = {t["name"]
                     for s in doc.get("sources", []) or []
                     for t in s.get("tables", []) or []}
     transforms: Dict[str, List[str]] = {}
+    cte_helpers: Dict[str, List[Tuple[str, List[str]]]] = {}
     for sql_file in sorted(model_dir.glob("*.sql")):
         stem = sql_file.stem
         if stem not in model_names:
             raise TransformFailLoud(
                 f"E042: {sql_file}: dbt model {stem!r} has no entry in schema.yml "
                 f"(no column contract) — fail-loud §4.")
-        transforms[stem] = _parse_transform(sql_file.read_text(), stem,
-                                            model_names, source_names)
+        transformed, helpers = _translate_sql(sql_file.read_text(), stem,
+                                              model_names, source_names)
+        transforms[stem] = transformed
+        cte_helpers[stem] = helpers
 
     header = ("// generated deterministically by `strata import-dbt` — byte-identical "
               "re-runs (same schema.yml + models/*.sql) produce identical .strata. "
@@ -773,6 +929,12 @@ def import_dbt_project(schema: Path, model_dir: Path) -> str:
             nn = " nonnull" if "not_null" in (c.get("tests", []) or []) else ""
             out.append(f"  {c['name']} : {ctype}{nn},")
         out.append("}")
+        out.append("")
+        for helper_name, helper_body in cte_helpers.get(mname, []):
+            out.append(f"model {helper_name} {{")
+            for line in helper_body:
+                out.append(f"  {line}")
+            out.append("}")
         out.append("")
         out.append(f"model {mname} -> contract {mname}Contract {{")
         for line in _emit_model_body(mdl, transforms, schema):
