@@ -183,8 +183,8 @@ def _require_run(catalog_dir: Path, run_id: str) -> Dict[str, Any]:
     if run_id not in mf.get("runs", {}):
         raise IcebergExportError(
             f"run {run_id!r} is not in catalog {catalog_dir} "
-            "(see ~/. …; a run only rolls back/verifies against the catalog "
-            "that actually exported it)")
+            "(a run only rolls back/verifies against the catalog that "
+            "actually exported it; a collected run fails loud instead)")
     return mf
 
 
