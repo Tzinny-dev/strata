@@ -965,6 +965,24 @@ def cmd_replay(args: argparse.Namespace) -> int:
             print(f"error: E082: {ex}", file=sys.stderr)
             return 1
         print(f"verify OK: run {e['run_id']} stable ({len(e.get('fingerprints', {}))} model(s), no re-execution)")
+        if getattr(args, "iceberg_dir", None):
+            con = None
+            try:
+                con = open_warehouse(None)
+                from . import iceberg as iceberg_mod
+                iceberg_mod.ensure_iceberg(con)
+                status = iceberg_mod.verify_catalog_run(
+                    con, Path(args.iceberg_dir), e["run_id"])
+            except Exception as ex:
+                print(f"error: E083: iceberg catalog verify failed for run "
+                      f"{e['run_id']}: {ex}", file=sys.stderr)
+                return 1
+            finally:
+                if con is not None:
+                    con.close()
+            total = sum(status["rows"].values())
+            print(f"  catalog OK: {len(status['models'])} table(s) in "
+                  f"{args.iceberg_dir} readable ({total} rows)")
         return 0
     if getattr(args, "execute", False):
         if not args.run_id:
@@ -1077,6 +1095,20 @@ def cmd_backfill(args: argparse.Namespace) -> int:
 
 def cmd_rollback(args: argparse.Namespace) -> int:
     """`strata rollback <file> --run <id>`: repoint live views to a previous run's snapshots."""
+    if getattr(args, "iceberg_dir", None):
+        e = exec_mod.find_run(args.file, args.run_id)
+        if e is None:
+            print(f"error: E081: unknown run {args.run_id!r} (see strata replay)", file=sys.stderr)
+            return 1
+        from . import iceberg as iceberg_mod
+        try:
+            mf = iceberg_mod.rollback_run(Path(args.iceberg_dir), e["run_id"])
+        except iceberg_mod.IcebergExportError as ice:
+            print(f"error: E083: {ice}", file=sys.stderr)
+            return 1
+        print(f"catalog {args.iceberg_dir}: default run repointed -> {e['run_id']} "
+              f"({len(mf['runs'][e['run_id']])} table(s))")
+        return 0
     e = exec_mod.find_run(args.file, args.run_id)
     if e is None:
         print(f"error: E081: unknown run {args.run_id!r} (see strata replay)", file=sys.stderr)
@@ -1138,6 +1170,30 @@ def cmd_gc(args: argparse.Namespace) -> int:
     any publication whose metadata export is pending. History is never pruned,
     so a collected run's rollback/replay fails loud instead of reading wrong
     data."""
+    if not getattr(args, "output", None) and not getattr(args, "iceberg_dir", None):
+        print("error: E084: --output <warehouse.duckdb> (or --iceberg-dir <catalog>) "
+              "is required (snapshots live in the warehouse/catalog)", file=sys.stderr)
+        return 1
+    if getattr(args, "iceberg_dir", None):
+        from . import iceberg as iceberg_mod
+        try:
+            plan = iceberg_mod.gc_catalog(
+                Path(args.iceberg_dir), keep=args.keep,
+                keep_days=getattr(args, "keep_days", None), apply=args.apply)
+        except iceberg_mod.IcebergExportError as ice:
+            print(f"error: E084: {ice}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(plan, indent=2, sort_keys=True))
+            return 0
+        print(f"catalog retained runs: {', '.join(plan['keep_runs']) or '-'}")
+        verb = "dropped" if plan["applied"] else "would drop"
+        print(f"{verb} {len(plan['drop_dirs'])} Iceberg run dir(s)")
+        for d in plan["drop_dirs"]:
+            print(f"  - {d}")
+        if plan["drop_runs"] and not plan["applied"]:
+            print("re-run with --apply to drop them")
+        return 0
     if not getattr(args, "output", None):
         print("error: E084: --output <warehouse.duckdb> is required "
               "(snapshots live in the warehouse)", file=sys.stderr)
@@ -1335,6 +1391,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--seed", action="store_true", help="with --execute: seed demo sources into a fresh warehouse")
     p.add_argument("-o", "--output", default=None, help="with --execute: persist the warehouse to this .duckdb file")
     p.add_argument("--search-dir", default=None, help="with --execute: extra dir resolving import a.b")
+    p.add_argument("--iceberg-dir", default=None,
+                   help="with --verify: also verify the run's tables in this Iceberg "
+                        "catalog (read-only, no re-execution)")
     p.set_defaults(fn=cmd_replay)
 
     p = sub.add_parser("backfill", help="corrected rerun journaled against a past run (duckdb required)")
@@ -1361,12 +1420,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("file")
     p.add_argument("run_id")
     p.add_argument("-o", "--output", default=None, help="warehouse file whose live v_* views to repoint")
+    p.add_argument("--iceberg-dir", default=None,
+                   help="repoint this Iceberg catalog's live run instead of "
+                        "warehouse views (fail-loud if the run isn't in the catalog)")
     p.add_argument("--branch", default=None, help="staging branch to repoint from (default: run's recorded branch)")
     p.set_defaults(fn=cmd_rollback)
 
     p = sub.add_parser("gc", help="snapshot retention: report (default) or drop (--apply) old run snapshots")
     p.add_argument("file")
     p.add_argument("-o", "--output", default=None, help="warehouse .duckdb file holding the snapshots")
+    p.add_argument("--iceberg-dir", default=None,
+                   help="gc an Iceberg catalog instead of a warehouse: drop retired "
+                        "runs/<run_id> dirs (default run and last --keep always kept)")
     p.add_argument("--keep", type=int, default=2,
                    help="most recent runs to retain for rollback/replay (default: 2)")
     p.add_argument("--keep-days", type=float, default=None,

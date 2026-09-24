@@ -123,7 +123,8 @@ def test_fail_loud_missing_snapshot_exports_nothing(tmp_path):
     catalog = tmp_path / "lakehouse"
     con = _con_and_seed()
     with pytest.raises(iceberg_mod.IcebergExportError):
-        iceberg_mod.export_snapshot(con, "snap_000000000000_x", "m0", catalog)
+        iceberg_mod.export_snapshot(con, "snap_000000000000_x", "m0",
+                                    "000000000000", catalog)
     assert not catalog.exists()
 
 
@@ -138,3 +139,94 @@ def test_fail_loud_partial_export_no_manifest(tmp_path):
             catalog)
     # Without a manifest the catalog is provably incomplete.
     assert not (catalog / iceberg_mod.MANIFEST_NAME).exists()
+
+
+# ------------------------------------------------------------------ L2 ops
+
+def test_catalog_verify_reads_exported_run_without_execution(tmp_path):
+    catalog = tmp_path / "lakehouse"
+    entry, manifest, con = _run_full(tmp_path, catalog)
+    # Fresh connection, no re-execution: just read the physical tables back.
+    other = duckdb.connect(":memory:")
+    other.execute("INSTALL iceberg")
+    other.execute("LOAD iceberg")
+    status = iceberg_mod.verify_catalog_run(other, catalog, entry["run_id"])
+    assert set(status["models"]) == {"m0", "m1"}
+    assert status["rows"]["m0"] == 3
+    assert status["rows"]["m1"] == 3
+
+
+def test_catalog_verify_fails_loud_after_gc_collects_run(tmp_path):
+    catalog = tmp_path / "lakehouse"
+    con = _con_and_seed()
+    proj, tms, path = _proj(tmp_path)
+    exec_mod.run(con, proj, tms, path)
+    e1 = exec_mod.load_history(path)[-1]
+    iceberg_mod.export_run(con, e1["run_id"], e1["snapshots"], catalog)
+    changed = BASE.replace('ctry     = concat(orders.country, "!")',
+                           'ctry     = concat(orders.country, "!!")')
+    proj2, tms2, path = _proj(tmp_path, changed)
+    exec_mod.run(con, proj2, tms2, path)
+    e2 = exec_mod.load_history(path)[-1]
+    iceberg_mod.export_run(con, e2["run_id"], e2["snapshots"], catalog)
+    assert e1["run_id"] != e2["run_id"]
+    # keep=1: the default (newest) is kept+protected; old run is retirable only
+    # with --apply. Verify the LIVE run still reads fine afterward.
+    plan = iceberg_mod.gc_catalog(catalog, keep=1, apply=True)
+    assert e1["run_id"] in plan["drop_runs"]
+    assert e2["run_id"] in plan["keep_runs"]
+    other = duckdb.connect(":memory:")
+    other.execute("INSTALL iceberg")
+    other.execute("LOAD iceberg")
+    status = iceberg_mod.verify_catalog_run(other, catalog, e2["run_id"])
+    assert status["rows"]["m0"] == 3
+    # The collected run must fail loud — its physical tables are gone.
+    with pytest.raises(iceberg_mod.IcebergExportError):
+        iceberg_mod.verify_catalog_run(other, catalog, e1["run_id"])
+
+
+def test_rollback_repoints_default_and_is_immutable(tmp_path):
+    catalog = tmp_path / "lakehouse"
+    con = _con_and_seed()
+    # Run 1 with both models minted; then a *changed* run exports a second ID.
+    proj, tms, path = _proj(tmp_path)
+    applied, _pins, _ = exec_mod.run(con, proj, tms, path)
+    entry1 = exec_mod.load_history(path)[-1]
+    iceberg_mod.export_run(con, entry1["run_id"], entry1["snapshots"], catalog)
+    rid1 = entry1["run_id"]
+    # Change the module: m1 gets different content, m0 stays identical.
+    changed = BASE.replace('ctry     = concat(orders.country, "!")',
+                           'ctry     = concat(orders.country, "!!")')
+    proj2, tms2, path = _proj(tmp_path, changed)
+    applied2, _pins2, _ = exec_mod.run(con, proj2, tms2, path)
+    entry2 = exec_mod.load_history(path)[-1]
+    iceberg_mod.export_run(con, entry2["run_id"], entry2["snapshots"], catalog)
+    rid2 = entry2["run_id"]
+    assert rid1 != rid2
+    assert iceberg_mod.load_manifest(catalog)["default"] == rid2
+
+    # Rollback to run 1: default repoints, physical tables untouched.
+    mf = iceberg_mod.rollback_run(catalog, rid1)
+    assert mf["default"] == rid1
+    assert rid2 in mf["runs"]  # nothing deleted
+    assert (catalog / "runs" / rid2 / "m1").exists()
+
+
+def test_rollback_fails_loud_when_run_not_in_catalog(tmp_path):
+    catalog = tmp_path / "lakehouse"
+    _entry, _manifest, con = _run_full(tmp_path, catalog)
+    with pytest.raises(iceberg_mod.IcebergExportError):
+        iceberg_mod.rollback_run(catalog, "deadbeef0000")
+
+
+def test_gc_keeps_default_and_retires_others(tmp_path):
+    catalog = tmp_path / "lakehouse"
+    entry, manifest, con = _run_full(tmp_path, catalog)
+    rid = manifest["default"]
+    assert rid == entry["run_id"]
+    plan = iceberg_mod.gc_catalog(catalog, keep=0, apply=False)
+    assert plan["keep_runs"] == [rid]  # default always protected
+    assert plan["drop_runs"] == []
+    # Without --apply nothing is deleted.
+    assert (catalog / "runs" / rid).exists()
+    assert (catalog / iceberg_mod.MANIFEST_NAME).exists()
