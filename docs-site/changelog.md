@@ -80,6 +80,10 @@ Documentado `docs/binary-standalone.md:1`.
 
 - **Lector independiente de catálogo Iceberg con `pyiceberg` (L3)** (`strata/iceberg.py` `ensure_pyiceberg`/`verify_catalog_run_pyiceberg`, `strata/cli.py` `--verify-reader`, `pyproject.toml:34` extra `iceberg`): `strata replay <file> --verify <run> --iceberg-dir --verify-reader pyiceberg` verifica las tablas publicadas SIN DuckDB (lee `*.metadata.json` vía `StaticTable` + `pyarrow` scan): si el catálogo es Iceberg estándar, cualquier motor lo lee; el lector no confía en el escritor. Fail-loud: `pyiceberg` ausente → `IcebergUnavailable` (`E083`) con `pip install 'pyiceberg[pyarrow]'`. Por defecto `--verify-reader duckdb` (cero deps nuevas); el extra `iceberg` es opcional y el intérprete sin él corre 12 tests + 1 skip, con él 13/13 — `541 passed` + 1 skip en suite (era `539`).
 
+- **`import-dbt` CTEs (`WITH cte AS (...)`) → Strata helpers** (`strata/importdbt.py:417` `_split_with`, `:490` `_translate_sql`): cada `WITH` se traduce a un modelo helper sin contrato `{model}__{cte}` que el modelo principal lee vía `from` (`import_dbt_project` los antecede a su modelo). Referencias hacia delante / CTE sin usar → helper inerte, build verde (`529 passed`).
+
+- **`strata catalog` — inspección del catálogo Iceberg (L2 §10.4)** (`strata/cli.py` `cmd_catalog`): `strata catalog <dir>` lista runs publicados, modelos por run y marca el `default` (`*`); `--json` página el manifest; `--run <id> [--verify-reader duckdb|pyiceberg]` muestra filas por modelo sin re-ejecutar (sendos readers coinciden → cross-check independiente de Iceberg estándar). Fail-loud: sin manifest `E084`; run ajeno `E081`; lectura rota `E083` — `545 passed` (era `541`).
+
 ---
 
 *Generado desde `git log --oneline 7376003..3374913` y `pyproject.toml` / `strata.spec` / `binary.yml`.*

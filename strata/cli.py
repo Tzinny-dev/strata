@@ -1239,6 +1239,72 @@ def cmd_gc(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_catalog(args: argparse.Namespace) -> int:
+    """Inspect an Iceberg catalog: runs, their models, and the live (`default`) run.
+
+    `strata catalog <dir>` lists every exported run with its models; with
+    `--run <id>` it shows that run's tables (models + row counts via the
+    requested reader, no re-execution). Read-only: identical output between
+    the duckdb and pyiceberg readers is an independent cross-check that the
+    catalog is standard Iceberg.
+    """
+    from . import iceberg as iceberg_mod
+    catalog = Path(args.catalog)
+    try:
+        mf = iceberg_mod.load_manifest(catalog)
+    except Exception as e:
+        print(f"error: E084: cannot read catalog {catalog}: {e}", file=sys.stderr)
+        return 1
+    if mf is None:
+        print(f"error: E084: catalog {catalog} has no manifest "
+              "(run strata run --iceberg-dir first)", file=sys.stderr)
+        return 1
+    runs = mf["runs"]
+    default = mf.get("default")
+    if args.run:
+        if args.run not in runs:
+            print(f"error: E081: run {args.run!r} is not in catalog {catalog} "
+                  "(see the runs listed below)", file=sys.stderr)
+            return 1
+        status = None
+        reader = getattr(args, "verify_reader", "duckdb") or "duckdb"
+        if reader == "pyiceberg":
+            try:
+                status = iceberg_mod.verify_catalog_run_pyiceberg(catalog, args.run)
+            except (iceberg_mod.IcebergUnavailable,
+                    iceberg_mod.IcebergExportError) as e:
+                print(f"error: E083: {e}", file=sys.stderr)
+                return 1
+        else:
+            con = None
+            try:
+                con = open_warehouse(None)
+                iceberg_mod.ensure_iceberg(con)
+                status = iceberg_mod.verify_catalog_run(con, catalog, args.run)
+            except (iceberg_mod.IcebergUnavailable,
+                    iceberg_mod.IcebergExportError) as e:
+                print(f"error: E083: {e}", file=sys.stderr)
+                return 1
+            finally:
+                if con is not None:
+                    con.close()
+        print(f"catalog {catalog}: run {args.run} ({reader})")
+        for model in sorted(status["models"]):
+            print(f"  {model:<24} {status['rows'][model]} rows")
+        return 0
+    if args.json:
+        print(json.dumps({"default": default, "runs": runs}, indent=2, sort_keys=True))
+        return 0
+    live = " (live)" if default in runs else ""
+    print(f"catalog {catalog}: {len(runs)} run(s){live}")
+    for rid in sorted(runs):
+        mark = " *" if rid == default else ""
+        print(f"  {rid}{mark}: {', '.join(sorted(runs[rid]))}")
+    if default and default not in runs:
+        print(f"  default {default} is gone (collected by gc)")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI entry point: build the argument parser, dispatch the subcommand, return its exit code."""
     ap = argparse.ArgumentParser(prog="strata", description="declarative, versioned data transformations")
@@ -1453,6 +1519,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--apply", action="store_true", help="drop the reported tables (default: report only)")
     p.add_argument("--json", action="store_true", help="machine-readable plan (agent supervision artifact)")
     p.set_defaults(fn=cmd_gc)
+
+    p = sub.add_parser("catalog", help="inspect an Iceberg catalog: runs, models, live run (read-only)")
+    p.add_argument("catalog", help="Iceberg catalog directory (the --iceberg-dir of a run)")
+    p.add_argument("--run", default=None, help="show this run's tables with row counts (no re-execution)")
+    p.add_argument("--verify-reader", choices=("duckdb", "pyiceberg"),
+                   default="duckdb",
+                   help="reader for --run row counts: duckdb iceberg_scan (default) "
+                        "or pyiceberg (independent of the writer)")
+    p.add_argument("--json", action="store_true", help="machine-readable runs/default")
+    p.set_defaults(fn=cmd_catalog)
 
     p = sub.add_parser("test", help="run declarative data tests against a module's models")
     p.add_argument("file")

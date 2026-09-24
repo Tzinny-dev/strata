@@ -14,6 +14,7 @@ seis operaciones (`connect`, `execute`, `fetch`, `materialize`,
 | Postgres | stub E095 — sin `Warehouse` ABC aún | ✅ `cli.open_warehouse("postgres://...")` → `dbcompat.PGConn` (psycopg2, probado contra Postgres 16 efímero en `tests/pg_harness.py`) | `pip install strata[postgres]` |
 | BigQuery | `BigQueryWarehouse` ✅ | ✅ `BigQueryConn` (`bigquery://project/dataset?location=US`) + `cli.open_warehouse` / `get_adapter` | `pip install strata[bigquery]` |
 | Snowflake | `SnowflakeWarehouse` ✅ | ✅ `SnowflakeConn` (`snowflake://user:pass@account/db/schema?warehouse=WH`) + `cli.open_warehouse` / `get_adapter` | `pip install strata[snowflake]` |
+| Iceberg | no aplica — no es un dialecto SQL | post-run: `--iceberg-dir` copia snapshots a tablas Iceberg reales (`strata/iceberg.py`, `propuesta-iceberg.md` L1-L3) | extensión DuckDB `iceberg`; lectura opcional `pip install strata[iceberg]` (`pyiceberg`) |
 
 `sqlgen` ya produce SQL por dialecto; el adapter solo transporta
 (transacción, materialización, listado). No hay traducción de
@@ -22,6 +23,14 @@ Postgres (motor real vía `dbcompat.PGConn`, adapter ABC aún stub) es
 intencional y está testeada en `tests/test_exec_postgres.py` (6 tests
 contra Postgres real); `get_adapter("postgres")` sigue tirando E095
 a propósito con hint a la ruta CLI.
+
+**Iceberg no es un dialecto SQL**: el motor sigue computando en DuckDB
+y congelando snapshot tables; `--iceberg-dir` copia cada snapshot a una
+tabla Apache Iceberg real bajo un catálogo local (`runs/<run_id>/<model>`)
+y registra `run_id → modelos` en `_strata_manifest.json`. rollback/gc/
+replay operan sobre el manifest; la lectura independiente (sin DuckDB)
+usa `pyiceberg` vía `replay --verify --verify-reader pyiceberg`
+(extra opcional `strata[iceberg]`).
 
 ## Uso
 

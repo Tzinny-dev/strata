@@ -266,3 +266,63 @@ def test_gc_keeps_default_and_retires_others(tmp_path):
     # Without --apply nothing is deleted.
     assert (catalog / "runs" / rid).exists()
     assert (catalog / iceberg_mod.MANIFEST_NAME).exists()
+
+
+# ------------------------------------------------------------------ catalog
+
+def test_cmd_catalog_lists_runs_and_marks_default(tmp_path, capsys, monkeypatch):
+    from strata.cli import main
+    catalog = tmp_path / "lakehouse"
+    entry, manifest, con = _run_full(tmp_path, catalog)
+    monkeypatch.setattr("sys.argv", ["strata", "catalog", str(catalog)])
+    assert main() == 0
+    out = capsys.readouterr().out
+    assert entry["run_id"] in out
+    assert "m0" in out and "m1" in out
+    assert f"{entry['run_id']} *" in out  # live run marker
+
+
+def test_cmd_catalog_run_shows_row_counts(tmp_path, capsys, monkeypatch):
+    from strata.cli import main
+    catalog = tmp_path / "lakehouse"
+    entry, manifest, con = _run_full(tmp_path, catalog)
+    monkeypatch.setattr("sys.argv", ["strata", "catalog", str(catalog),
+                                     "--run", entry["run_id"]])
+    assert main() == 0
+    out = capsys.readouterr().out
+    assert f"{entry['run_id']} (duckdb)" in out
+    assert "m0" in out and "3 rows" in out
+
+
+def test_cmd_catalog_run_via_pyiceberg(tmp_path, capsys, monkeypatch):
+    px = pytest.importorskip("pyiceberg.table")
+    from strata.cli import main
+    catalog = tmp_path / "lakehouse"
+    entry, manifest, con = _run_full(tmp_path, catalog)
+    monkeypatch.setattr("sys.argv", ["strata", "catalog", str(catalog),
+                                     "--run", entry["run_id"],
+                                     "--verify-reader", "pyiceberg"])
+    assert main() == 0
+    out = capsys.readouterr().out
+    assert f"{entry['run_id']} (pyiceberg)" in out
+    assert "3 rows" in out
+
+
+def test_cmd_catalog_fails_loud_when_run_absent(tmp_path, capsys, monkeypatch):
+    from strata.cli import main
+    catalog = tmp_path / "lakehouse"
+    _entry, _manifest, con = _run_full(tmp_path, catalog)
+    monkeypatch.setattr("sys.argv", ["strata", "catalog", str(catalog),
+                                     "--run", "deadbeef0000"])
+    assert main() == 1
+    err = capsys.readouterr().err
+    assert "not in catalog" in err
+
+
+def test_cmd_catalog_fails_loud_without_manifest(tmp_path, capsys, monkeypatch):
+    from strata.cli import main
+    catalog = tmp_path / "lakehouse"
+    monkeypatch.setattr("sys.argv", ["strata", "catalog", str(catalog)])
+    assert main() == 1
+    err = capsys.readouterr().err
+    assert "has no manifest" in err

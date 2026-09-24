@@ -82,6 +82,8 @@ Documentado `docs/binary-standalone.md:1`.
 
 - **`import-dbt` CTEs (`WITH cte AS (...)`) → Strata helpers** (`strata/importdbt.py:417` `_split_with`, `:490` `_translate_sql`): cada `WITH` se traduce a un modelo helper sin contrato `{model}__{cte}` que el modelo principal lee vía `from` (`import_dbt_project` los antecede a su modelo). Referencias hacia delante / CTE sin usar → helper inerte, build verde (`529 passed`).
 
+- **`strata catalog` — inspección del catálogo Iceberg (L2 §10.4)** (`strata/cli.py` `cmd_catalog`): `strata catalog <dir>` lista runs publicados, modelos por run y marca el `default` (`*`); `--json` página el manifest; `--run <id> [--verify-reader duckdb|pyiceberg]` muestra filas por modelo sin re-ejecutar (sendos readers coinciden → cross-check independiente de Iceberg estándar). Fail-loud: sin manifest `E084`; run ajeno `E081`; lectura rota `E083` — `545 passed` (era `541`).
+
 ---
 
 *Generado desde `git log --oneline 7376003..3374913` y `pyproject.toml` / `strata.spec` / `binary.yml`.*
