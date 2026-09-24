@@ -33,6 +33,7 @@ snowflake = ["snowflake-connector-python>=3.0"]
 airflow = ["apache-airflow>=2.8"]
 prefect = ["prefect>=2.14"]
 portalocker = ["portalocker>=2.8"]
+iceberg = ["pyiceberg[pyarrow]>=0.7"]
 dev = [
   "pytest>=8.0",
   "pytest-cov>=5.0",

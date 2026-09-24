@@ -216,6 +216,55 @@ def verify_catalog_run(con: Any, catalog_dir: Path, run_id: str) -> Dict[str, An
     return out
 
 
+def ensure_pyiceberg() -> Any:
+    """Import pyiceberg lazily (fail-loud, §4) or raise IcebergUnavailable.
+
+    Returns the pyiceberg `StaticTable` reader class; the CLI calls this only
+    when `--verify-reader pyiceberg` is requested, so a DuckDB-only install
+    keeps working without the extra dependency.
+    """
+    try:
+        from pyiceberg.table import StaticTable
+        return StaticTable
+    except ImportError as e:
+        raise IcebergUnavailable(
+            "pyiceberg is not installed; cannot verify the catalog without "
+            "DuckDB. Install it via: pip install 'pyiceberg[pyarrow]'"
+        ) from None
+
+
+def verify_catalog_run_pyiceberg(catalog_dir: Path, run_id: str,
+                                 engine_cls: Any = None) -> Dict[str, Any]:
+    """Verify a published run with pyiceberg — a DuckDB-independent reader.
+
+    Same contract as `verify_catalog_run` ({run_id, models, rows}, first
+    broken table raises IcebergExportError), but reads each model's Iceberg
+    metadata directly (StaticTable + pyarrow scan): if the catalog is really
+    standard Iceberg, any engine can read it; if only the exporter can, this
+    fails loud instead of trusting the writer.
+    """
+    StaticTable = engine_cls or ensure_pyiceberg()
+    mf = _require_run(catalog_dir, run_id)
+    out = {"run_id": run_id, "models": {}, "rows": {}}
+    for model, rel in sorted(mf["runs"][run_id].items()):
+        tbl = catalog_dir / rel
+        metas = sorted((tbl / "metadata").glob("*.metadata.json"))
+        if not metas:
+            raise IcebergExportError(
+                f"run {run_id!r}: model {model!r} Iceberg table {tbl} has no "
+                "metadata (catalog is incomplete)")
+        try:
+            table = StaticTable.from_metadata(str(metas[-1]))
+            rows = table.scan().to_arrow().num_rows
+        except Exception as e:
+            raise IcebergExportError(
+                f"run {run_id!r}: model {model!r} unreadable via pyiceberg "
+                f"({tbl}): {e}") from None
+        out["models"][model] = str(rel)
+        out["rows"][model] = rows
+    return out
+
+
 def rollback_run(catalog_dir: Path, run_id: str) -> Dict[str, Any]:
     """Repoint the catalog's live run (`default`) to a previously exported run.
 

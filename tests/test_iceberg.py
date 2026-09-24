@@ -156,6 +156,42 @@ def test_catalog_verify_reads_exported_run_without_execution(tmp_path):
     assert status["rows"]["m1"] == 3
 
 
+# --------------------------------------------------------------- L3 reader
+
+def test_pyiceberg_reader_independent_of_duckdb(tmp_path):
+    catalog = tmp_path / "lakehouse"
+    entry, _manifest, con = _run_full(tmp_path, catalog)
+    static = pytest.importorskip("pyiceberg.table").StaticTable
+    status = iceberg_mod.verify_catalog_run_pyiceberg(
+        catalog, entry["run_id"], engine_cls=static)
+    assert set(status["models"]) == {"m0", "m1"}
+    assert status["rows"]["m0"] == 3
+    assert status["rows"]["m1"] == 3
+
+
+def test_pyiceberg_reader_fails_loud_when_unavailable(tmp_path):
+    catalog = tmp_path / "lakehouse"
+    entry, _manifest, con = _run_full(tmp_path, catalog)
+
+    class _NoPyIceberg:
+        pass
+
+    with pytest.raises(iceberg_mod.IcebergExportError):
+        iceberg_mod.verify_catalog_run_pyiceberg(
+            catalog, entry["run_id"], engine_cls=_NoPyIceberg)
+
+
+def test_pyiceberg_ensure_fails_loud_when_not_installed(monkeypatch):
+    real_import = __import__
+    def _no_pyiceberg(name, *a, **k):
+        if name == "pyiceberg" or name.startswith("pyiceberg."):
+            raise ImportError(f"No module named '{name}'")
+        return real_import(name, *a, **k)
+    monkeypatch.setattr("builtins.__import__", _no_pyiceberg)
+    with pytest.raises(iceberg_mod.IcebergUnavailable):
+        iceberg_mod.ensure_pyiceberg()
+
+
 def test_catalog_verify_fails_loud_after_gc_collects_run(tmp_path):
     catalog = tmp_path / "lakehouse"
     con = _con_and_seed()

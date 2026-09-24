@@ -966,23 +966,30 @@ def cmd_replay(args: argparse.Namespace) -> int:
             return 1
         print(f"verify OK: run {e['run_id']} stable ({len(e.get('fingerprints', {}))} model(s), no re-execution)")
         if getattr(args, "iceberg_dir", None):
+            from . import iceberg as iceberg_mod
+            reader = getattr(args, "verify_reader", "duckdb")
             con = None
             try:
-                con = open_warehouse(None)
-                from . import iceberg as iceberg_mod
-                iceberg_mod.ensure_iceberg(con)
-                status = iceberg_mod.verify_catalog_run(
-                    con, Path(args.iceberg_dir), e["run_id"])
+                if reader == "pyiceberg":
+                    status = iceberg_mod.verify_catalog_run_pyiceberg(
+                        Path(args.iceberg_dir), e["run_id"])
+                    label = "pyiceberg"
+                else:
+                    con = open_warehouse(None)
+                    iceberg_mod.ensure_iceberg(con)
+                    status = iceberg_mod.verify_catalog_run(
+                        con, Path(args.iceberg_dir), e["run_id"])
+                    label = "duckdb iceberg_scan"
             except Exception as ex:
                 print(f"error: E083: iceberg catalog verify failed for run "
-                      f"{e['run_id']}: {ex}", file=sys.stderr)
+                      f"{e['run_id']} via {reader}: {ex}", file=sys.stderr)
                 return 1
             finally:
                 if con is not None:
                     con.close()
             total = sum(status["rows"].values())
-            print(f"  catalog OK: {len(status['models'])} table(s) in "
-                  f"{args.iceberg_dir} readable ({total} rows)")
+            print(f"  catalog OK via {label}: {len(status['models'])} table(s) "
+                  f"in {args.iceberg_dir} readable ({total} rows)")
         return 0
     if getattr(args, "execute", False):
         if not args.run_id:
@@ -1394,6 +1401,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--iceberg-dir", default=None,
                    help="with --verify: also verify the run's tables in this Iceberg "
                         "catalog (read-only, no re-execution)")
+    p.add_argument("--verify-reader", choices=("duckdb", "pyiceberg"),
+                   default="duckdb",
+                   help="reader engine for the catalog check: duckdb iceberg_scan "
+                        "(default) or pyiceberg (independent of the writer; "
+                        "'pyiceberg[pyarrow]' must be installed)")
     p.set_defaults(fn=cmd_replay)
 
     p = sub.add_parser("backfill", help="corrected rerun journaled against a past run (duckdb required)")
