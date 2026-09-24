@@ -414,6 +414,222 @@ def _strip_sql_comments(sql: str) -> str:
     return "".join(out)
 
 
+_DML_TARGET = re.compile(r"(?:\{\{\s*this\s*\}\}|[A-Za-z_][A-Za-z0-9_]*)")
+_INSERT_OVERWRITE = re.compile(
+    r"(?i)^\s*INSERT\s+(OVERWRITE\s+)?(INTO\s+|TABLE\s+)?"
+    r"(?P<target>" + _DML_TARGET.pattern + r")\s*(?P<body>[\s\S]*)$")
+_MERGE_INTO = re.compile(
+    r"(?i)^\s*MERGE\s+INTO\s+(?P<target>" + _DML_TARGET.pattern + r")"
+    r"(?:\s+AS\s+[A-Za-z_][A-Za-z0-9_]*)?\s+USING\s*")
+
+
+def _balanced_paren(sql: str, start: int) -> int:
+    """Return the index just past the `)` matching the `(` at `start`."""
+    depth = 0
+    for i in range(start, len(sql)):
+        if sql[i] == "(":
+            depth += 1
+        elif sql[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
+def _split_config_args(text: str) -> List[Tuple[str, str]]:
+    """Split `{{ config(k1 = v1, k2 = v2, ...) }}` inner text into kwargs.
+
+    Tolerates single/double-quoted values, `[...]` lists and nesting up to a
+    balanced bracket depth; anything a Strata import cannot attribute to a
+    known dbt-iceberg key is simply ignored (config is advisory for a
+    translation, never a gate)."""
+    out: List[Tuple[str, str]] = []
+    parts: List[str] = []
+    cur: List[str] = []
+    depth = 0
+    quote: Optional[str] = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            cur.append(ch)
+            if ch == "\\" and i + 1 < len(text):
+                cur.append(text[i + 1]); i += 2; continue
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+            cur.append(ch)
+        elif ch in "[({":
+            depth += 1
+            cur.append(ch)
+        elif ch in "])}":
+            depth -= 1
+            cur.append(ch)
+        elif ch == "," and depth == 0:
+            parts.append("".join(cur)); cur = []
+        else:
+            cur.append(ch)
+        i += 1
+    parts.append("".join(cur))
+    for part in parts:
+        pair = part.split("=", 1)
+        if len(pair) != 2:
+            continue
+        key = pair[0].strip().lower()
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*", key):
+            continue
+        out.append((key, pair[1].strip()))
+    return out
+
+
+def _extract_config_kwargs(sql: str) -> Dict[str, str]:
+    """Pull dbt-iceberg `{{ config(...) }}` kwargs out of the raw model SQL.
+
+    Keys are lowercased; values are kept as raw strings (quotes/brackets
+    preserved) so the annotation lines below can quote them verbatim."""
+    kwargs: Dict[str, str] = {}
+    for m in re.finditer(r"\{\{\s*config\s*\((.*?)\)\s*\}\}", sql, flags=re.S):
+        for key, value in _split_config_args(m.group(1)):
+            kwargs[key] = value
+    return kwargs
+
+
+def _iceberg_config_notes(sql: str) -> List[str]:
+    """Deterministic `//` notes for dbt-iceberg config directives the import
+    cannot (or must not) carry into the Strata model: hive partitioning and
+    TTL are physical/retention concerns (§4.2 v1 publishes unpartitioned), and
+    incremental materialization collapses to a full deterministic recompute.
+    Recording them keeps the translation honest without failing the whole
+    import (§4: never silently drop a semantics the author declared)."""
+    notes: List[str] = []
+    kw = _extract_config_kwargs(sql)
+    for key, value in kw.items():
+        if key == "partition_by":
+            notes.append(
+                f"// dbt-iceberg partition_by={value} (hive) -> v1 Strata writes "
+                f"unpartitioned tables; intent recorded, not applied (§4.2).")
+        elif "ttl" in key:
+            notes.append(
+                f"// dbt-iceberg {key}={value} (retention) -> apply in the catalog "
+                f"with `strata gc --iceberg-dir --keep-days`, not in the model.")
+        elif key in ("materialized", "unique_key", "merge_strategy",
+                     "incremental_strategy", "merge_exclude_columns"):
+            notes.append(
+                f"// dbt-iceberg {key}={value} -> Strata reruns are full "
+                f"deterministic recomputes; this materialization/upsert hint does "
+                f"not carry over to the model.")
+    return notes
+
+
+def _rewrite_dml_annotation(sql: str, model: str) -> Tuple[str, List[str], List[str]]:
+    """Rewrite a dbt-iceberg DML statement at the top of a model .sql into the
+    plain SELECT that Strata can translate, returning (body_sql, dedup_keys,
+    annotation_lines).
+
+    Supported (translated to a full deterministic recompute — which is what a
+    Strata model IS):
+      - `INSERT [OVERWRITE] INTO <target> <select>` — body = the select.
+      - `MERGE INTO <target> [AS t] USING (<select>) [AS s] ON <equi-keys>
+        WHEN MATCHED THEN UPDATE SET ... WHEN NOT MATCHED THEN INSERT ...` —
+        body = the USING select, deduped by the ON keys.
+
+    Anything Strata cannot express deterministically (a WHERE referencing
+    `{{ this }}`, DELETE clauses, non-equi ON) fails loud E042 — the dbt DML
+    semantics would otherwise be silently guessed (§4)."""
+    notes: List[str] = []
+    clean = _strip_sql_comments(sql.strip())
+    # Skip leading jinja blocks (e.g. `{{ config(...) }}`) so the DML statement
+    # starts the match — a dbt file is config-first, DML-second.
+    pos = 0
+    while True:
+        m = re.match(r"(?s)^\s*\{\{.*?\}\}\s*", clean[pos:]) or \
+            re.match(r"(?s)^\s*(--[^\n]*|/\*.*?\*/)\s*", clean[pos:])
+        if not m:
+            break
+        pos += m.end()
+    clean = clean[pos:].lstrip()
+    m = _INSERT_OVERWRITE.match(clean)
+    if m:
+        target = m.group("target")
+        body = m.group("body").strip()
+        # An INSERT column list `(a, b) SELECT` is orthogonal to the body.
+        if body.startswith("("):
+            end = _balanced_paren(clean, clean.find("("))
+            if end == -1:
+                raise TransformFailLoud(
+                    f"E042: {model}: unbalanced INSERT column list (fail-loud §4)")
+            body = clean[end:].strip()
+        resolved = model if target.startswith("{{") else target
+        notes.append(
+            f"// dbt-iceberg INSERT OVERWRITE INTO {resolved}: Strata recomputes the "
+            f"full SELECT every run — overwrite/append is the model, not a "
+            f"deduplicated DML.")
+        return body, [], notes
+    m = _MERGE_INTO.match(clean)
+    if m:
+        target = m.group("target")
+        rest = clean[m.end():].strip()
+        if not rest.startswith("("):
+            raise TransformFailLoud(
+                f"E042: {model}: MERGE INTO {target} needs a parenthesized USING "
+                f"subquery (fail-loud §4)")
+        end = _balanced_paren(rest, 0)
+        if end == -1:
+            raise TransformFailLoud(
+                f"E042: {model}: MERGE INTO {target} USING ( has an unbalanced "
+                f"subquery (fail-loud §4)")
+        body = rest[1:end - 1].strip()
+        tail = rest[end:].strip()
+        # Optional `AS alias` on the source, then `ON <keys>` then WHEN clauses.
+        talias = re.match(r"(?i)\s*AS\s+[A-Za-z_][A-Za-z0-9_]*", tail)
+        if talias:
+            tail = tail[talias.end():].strip()
+        on_m = re.match(r"(?i)\s*ON\s+([\s\S]*?)(?=(?i:\s+WHEN\s+(?:MATCHED|NOT)))\s*",
+                        tail)
+        if not on_m:
+            raise TransformFailLoud(
+                f"E042: {model}: MERGE INTO {target} needs `ON <keys> WHEN ...` "
+                f"(fail-loud §4)")
+        cond = on_m.group(1).strip()
+        whens = tail[on_m.end():].strip()
+        if re.search(r"(?i)\bDELETE\b", whens):
+            raise TransformFailLoud(
+                f"E042: {model}: MERGE INTO {target} has a DELETE action — row "
+                f"deletion is not expressible as a deterministic recompute "
+                f"(fail-loud §4).")
+        if not re.search(r"(?i)\bWHEN\s+MATCHED\b", whens) or \
+                not re.search(r"(?i)\bWHEN\s+NOT\s+MATCHED\b", whens):
+            raise TransformFailLoud(
+                f"E042: {model}: MERGE INTO {target} must have both WHEN MATCHED "
+                f"and WHEN NOT MATCHED (fail-loud §4).")
+        # ON keys: AND-separated `a.col = b.col` equi-joins only.
+        keys: List[str] = []
+        for part_toks in _split_top_level(_tokenize(cond), "AND"):
+            w = _flat_words(part_toks)
+            m2 = re.match(r"(?i)([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*"
+                          r"[=]\s*([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$",
+                          " ".join(w))
+            if not m2 or m2.group(2) != m2.group(4):
+                raise TransformFailLoud(
+                    f"E042: {model}: MERGE ON must be AND-separated equi-keys "
+                    f"`a.col = b.col` on identically named columns (fail-loud §4).")
+            keys.append(m2.group(2))
+        if not keys:
+            raise TransformFailLoud(
+                f"E042: {model}: MERGE INTO {target} ON is empty (fail-loud §4)")
+        if target.startswith("{{"):
+            resolved = model
+        else:
+            resolved = target
+        notes.append(
+            f"// dbt-iceberg MERGE INTO {resolved} upsert on keys "
+            f"{', '.join(keys)}: Strata dedups the USING source by those keys — "
+            f"a full recompute is the deterministic form of the merge.")
+        return body, list(dict.fromkeys(keys)), notes
+    return "", [], notes
+
+
 def _split_with(sql: str, model: str) -> Tuple[List[Tuple[str, str]], str]:
     """Split `WITH cte AS (...), cte2 AS (...)  SELECT ...` into:
       - (cte_name, cte_body_sql) pairs, in order
@@ -497,10 +713,29 @@ def _translate_sql(sql_text: str, model: str, models: Set[str],
     each `WITH` CTE the main query (or a later CTE) reads from. The main
     query's `from`/`join` table names are mapped onto those helpers via
     `table_map`, so a CTE becomes just another model ref — Strata's compiler
-    decides materialization. Nested/recursive CTEs fail loud E042."""
-    ctes, main_sql = _split_with(_strip_jinja(sql_text, model, models, sources), model)
+    decides materialization. Nested/recursive CTEs fail loud E042.
+
+    dbt-iceberg (L4): a top-level `INSERT [OVERWRITE] INTO ...` or `MERGE
+    INTO ... USING (...) ON ...` is rewritten to the plain SELECT (a Strata
+    model IS a full deterministic recompute), the merge keys become `dedup by`
+    on the USING source, and the physical/retention config directives
+    (`partition_by`, `ttl`) become deterministic `//` annotations (§4 never
+    silently drops a declared dbt-iceberg semantics)."""
+    notes = _iceberg_config_notes(sql_text)
+    body_sql, dedup_keys, dml_notes = _rewrite_dml_annotation(sql_text, model)
+    if dml_notes:
+        notes += dml_notes
+    # No DML rewrite: the file is (after jinja strip) a plain SELECT.
+    if not body_sql:
+        body_sql = _strip_jinja(sql_text, model, models, sources)
+    else:
+        body_sql = _strip_jinja(body_sql, model, models, sources)
+    ctes, main_sql = _split_with(body_sql, model)
     if not ctes:
-        return _parse_transform(main_sql, model, models, sources), []
+        main_body = _parse_transform(main_sql, model, models, sources)
+        if dedup_keys:
+            main_body += [f"dedup by {', '.join(dedup_keys)}"]
+        return notes + main_body, []
     # Each CTE is a contract-less helper model named `{model}__{cte}`.
     table_map: Dict[str, str] = {}
     helper_defs: List[Tuple[str, List[str]]] = []
@@ -518,7 +753,9 @@ def _translate_sql(sql_text: str, model: str, models: Set[str],
         table_map[name] = helper
     main_body = _parse_transform(main_sql, model, models | set(table_map), sources,
                                  table_map=table_map)
-    return main_body, helper_defs
+    if dedup_keys:
+        main_body += [f"dedup by {', '.join(dedup_keys)}"]
+    return notes + main_body, helper_defs
 
 
 def _parse_transform(sql_text: str, model: str, models: Set[str],

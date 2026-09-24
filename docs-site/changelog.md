@@ -72,7 +72,7 @@ Documentado `docs/binary-standalone.md:1`.
 
 ## Unreleased — próximo 0.1.6
 
-- Pendiente producto: `Iceberg` [`propuesta-iceberg.md`](../../propuesta-iceberg.md), `WASM` descartado.
+- Pendiente producto: `Iceberg` [`propuesta-iceberg.md`](../../propuesta-iceberg.md) (L1–L4 ✅, REST/L4 gated por demanda), `WASM` descartado.
 
 - **`strata run --iceberg-dir <catálogo>` → publicación Iceberg real (L1)** (`strata/cli.py:358` `cmd_run`, `strata/iceberg.py` nuevo): tras un run que congela snapshot tables (`snap_<run_id>_<model>`), cada una se copia a `<catálogo>/runs/<run_id>/<model>` como tabla Apache Iceberg real vía `COPY ... (FORMAT iceberg)` (extensión DuckDB, no un dialect SQL) y se registra en `<catálogo>/_strata_manifest.json` (`run_id → {model: dir}`, determinista byte-a-byte, acumulativo, `default` = último). Fail-loud: sin extensión iceberg → `E100` antes de ejecutar (sin side effects); snapshot ausente / export incompleto → no se escribe manifest (all-or-nothing). `--dialect` ≠ duckdb + `--iceberg-dir` → `E100`. Verificado: `iceberg_scan` externo lee la tabla publicada en una conexión ajena; `534 passed` (era `529`).
 
@@ -83,6 +83,8 @@ Documentado `docs/binary-standalone.md:1`.
 - **`import-dbt` CTEs (`WITH cte AS (...)`) → Strata helpers** (`strata/importdbt.py:417` `_split_with`, `:490` `_translate_sql`): cada `WITH` se traduce a un modelo helper sin contrato `{model}__{cte}` que el modelo principal lee vía `from` (`import_dbt_project` los antecede a su modelo). Referencias hacia delante / CTE sin usar → helper inerte, build verde (`529 passed`).
 
 - **`strata catalog` — inspección del catálogo Iceberg (L2 §10.4)** (`strata/cli.py` `cmd_catalog`): `strata catalog <dir>` lista runs publicados, modelos por run y marca el `default` (`*`); `--json` página el manifest; `--run <id> [--verify-reader duckdb|pyiceberg]` muestra filas por modelo sin re-ejecutar (sendos readers coinciden → cross-check independiente de Iceberg estándar). Fail-loud: sin manifest `E084`; run ajeno `E081`; lectura rota `E083` — `545 passed` (era `541`).
+
+- **`import-dbt` Iceberg SQL compat (L4)** (`strata/importdbt.py` `_rewrite_dml_annotation`/`_iceberg_config_notes`, `strata/lexer.py`): los constructos SQL de dbt-iceberg se traducen a Strata plano — `INSERT [OVERWRITE] INTO <t> <select>` → el select (recompute determinista, el overwrite ES el modelo); `MERGE INTO <t> [AS t] USING (<select>) [AS s] ON <equi-keys> WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ...` → el select del USING + `dedup by <keys>`; `config(materialized/unique_key/partition_by/ttl_days)` → anotaciones `// dbt-iceberg ...` (v1 escribe unpartitioned, §4.2; ttl → `strata gc --iceberg-dir --keep-days`). Fail-loud E042 (sin arrastre semántico): acciones DELETE, USING sin paréntesis, ON no equi-join, `{{ this }}` fuera de target. `{{ this }}` es legal SOLO como target DML (el dispatcher corre antes que el strip de jinja). Verificado artefacto build verde + byte-idéntico — `555 passed` + 2 skip (era `545`).
 
 ---
 

@@ -576,5 +576,220 @@ models:
             self.assertFalse((Path(d) / "imported.strata").exists())
 
 
+ICEBERG_SCHEMA = """\
+version: 2
+sources:
+  - name: crm
+    schema: prod
+    tables:
+      - name: orders
+        columns:
+          - name: order_id
+            data_type: bigint
+            tests: [not_null]
+          - name: country
+            data_type: string
+          - name: gross
+            data_type: numeric
+models:
+  - name: daily
+    description: "dbt-iceberg incremental/overwrite model"
+    depends_on: [orders]
+    columns:
+      - name: order_id
+        data_type: bigint
+        tests: [not_null]
+      - name: country
+        data_type: string
+      - name: total
+        data_type: numeric
+"""
+
+
+class TestImportDbtIceberg(unittest.TestCase):
+    """L4: dbt-iceberg SQL constructs translate to plain Strata (`propuesta-iceberg`
+    §4.2 philosophy: FULL_RECOMPUTE; the DML is the model, not a mutation).
+
+    `INSERT OVERWRITE INTO <t> <select>` and `MERGE INTO <t> USING (<select>) ON
+    <equi-keys> WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ...`
+    lower to the select plus a `dedup by <keys>` line (the USING-select is the
+    deterministic form of the upsert). The materialization/partition/ttl config
+    kwargs become `// dbt-iceberg ...` annotation notes only. Anything else in the
+    DML mutation set (DELETE, non-parenthesized USING, missing WHEN arms, non-equi
+    JOIN keys) fails loud E042 — no silent semantic drift.
+
+    Regression the class guards: the dispatcher must run BEFORE jinja stripping
+    (`{{ this }}` is a legal DML target but never legal inside a SELECT body), and
+    the artifact must build green (the `dedup by` line is real Strata, not a hint).
+    """
+
+    def test_insert_overwrite_succeeds_and_builds(self):
+        sql = ("{{ config(materialized='table') }}\n"
+               "INSERT OVERWRITE INTO {{ this }}\n"
+               "SELECT order_id, country, SUM(gross) AS total\n"
+               "FROM orders\n"
+               "GROUP BY order_id, country")
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {"int_clean": None, "daily": sql},
+                                            schema=ICEBERG_SCHEMA)
+            self.assertEqual(code, 0, err)
+            art = (Path(d) / "imported.strata").read_text()
+            self.assertIn("from orders", art)
+            self.assertIn("aggregate { total = sum(gross) }", art)
+            self.assertIn("dbt-iceberg INSERT OVERWRITE INTO daily", art)
+            self.assertNotIn("dedup by", art)
+            self.assertNotIn("{{ this }}", art)
+            self.assertNotIn("INSERT OVERWRITE INTO {{ this }}", art)
+            bcode = cli.main(["build", str(Path(d) / "imported.strata")])
+            self.assertEqual(bcode, 0, "the lower-to-select artifact must build")
+
+    def test_merge_succeeds_with_dedup_and_annotations(self):
+        sql = ("{{\n"
+               "  config(materialized='incremental', unique_key='order_id',\n"
+               "         partition_by=['country'], ttl_days=30)\n"
+               "}}\n"
+               "MERGE INTO {{ this }} AS t\n"
+               "USING (SELECT order_id, country, SUM(gross) AS total\n"
+               "       FROM orders\n"
+               "       GROUP BY order_id, country) AS s\n"
+               "ON t.order_id = s.order_id\n"
+               "WHEN MATCHED THEN UPDATE SET\n"
+               "  country = s.country, total = s.total\n"
+               "WHEN NOT MATCHED THEN INSERT (order_id, country, total)\n"
+               "  VALUES (s.order_id, s.country, s.total)")
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {"int_clean": None, "daily": sql},
+                                            schema=ICEBERG_SCHEMA)
+            self.assertEqual(code, 0, err)
+            art = (Path(d) / "imported.strata").read_text()
+            self.assertIn("dedup by order_id", art)
+            self.assertIn("aggregate { total = sum(gross) }", art)
+            self.assertIn("dbt-iceberg materialized='incremental'", art)
+            self.assertIn("dbt-iceberg unique_key='order_id'", art)
+            self.assertIn("dbt-iceberg partition_by=['country']", art)
+            self.assertIn("dbt-iceberg ttl_days=30", art)
+            self.assertNotIn("{{ this }}", art)
+            bcode = cli.main(["build", str(Path(d) / "imported.strata")])
+            self.assertEqual(bcode, 0, "dedup by order_id must be real Strata")
+
+    def test_merge_composite_key_one_line_deduplicates(self):
+        sql = ("MERGE INTO {{ this }} "
+               "USING (SELECT order_id, country, gross FROM orders) AS s "
+               "ON t.order_id = s.order_id AND t.country = s.country "
+               "WHEN MATCHED THEN UPDATE SET country = s.country "
+               "WHEN NOT MATCHED THEN INSERT (order_id, country, gross) "
+               "VALUES (s.order_id, s.country, s.gross)")
+        # one-line form; the annotation + the fact the dispatcher still wins.
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {"int_clean": None, "daily": sql},
+                                            schema=ICEBERG_SCHEMA)
+            self.assertEqual(code, 0, err)
+            art = (Path(d) / "imported.strata").read_text()
+            self.assertIn("dedup by order_id, country", art)
+
+    def test_merge_multi_key_extracts_all_dedup_keys(self):
+        sql = ("MERGE INTO {{ this }} AS t\n"
+               "USING (SELECT order_id, country, SUM(gross) AS total\n"
+               "       FROM orders GROUP BY order_id, country) AS s\n"
+               "ON t.order_id = s.order_id AND t.country = s.country\n"
+               "WHEN MATCHED THEN UPDATE SET total = s.total\n"
+               "WHEN NOT MATCHED THEN INSERT (order_id, country, total)\n"
+               "  VALUES (s.order_id, s.country, s.total)")
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {"int_clean": None, "daily": sql},
+                                            schema=ICEBERG_SCHEMA)
+            self.assertEqual(code, 0, err)
+            art = (Path(d) / "imported.strata").read_text()
+            self.assertIn("dedup by order_id, country", art)
+            bcode = cli.main(["build", str(Path(d) / "imported.strata")])
+            self.assertEqual(bcode, 0)
+
+    def test_merge_is_deterministic_byte_identical(self):
+        sql = ("MERGE INTO {{ this }} AS t\n"
+               "USING (SELECT order_id, country, SUM(gross) AS total\n"
+               "       FROM orders GROUP BY order_id, country) AS s\n"
+               "ON t.order_id = s.order_id\n"
+               "WHEN MATCHED THEN UPDATE SET total = s.total\n"
+               "WHEN NOT MATCHED THEN INSERT (order_id, country, total)\n"
+               "  VALUES (s.order_id, s.country, s.total)")
+        with __import__("tempfile").TemporaryDirectory() as d:
+            c1, _ = _run_project_import(Path(d), {"int_clean": None, "daily": sql},
+                                        schema=ICEBERG_SCHEMA, output="a.strata")
+            c2, _ = _run_project_import(Path(d), {"int_clean": None, "daily": sql},
+                                        schema=ICEBERG_SCHEMA, output="b.strata")
+            self.assertEqual((c1, c2), (0, 0))
+            self.assertEqual((Path(d) / "a.strata").read_text(),
+                             (Path(d) / "b.strata").read_text())
+
+    def test_fail_loud_merge_delete(self):
+        sql = ("MERGE INTO {{ this }} AS t\n"
+               "USING (SELECT order_id, country FROM orders) AS s\n"
+               "ON t.order_id = s.order_id\n"
+               "WHEN MATCHED THEN DELETE")
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {"int_clean": None, "daily": sql},
+                                            schema=ICEBERG_SCHEMA)
+            self.assertEqual(code, 1)
+            self.assertIn("E042", err)
+            self.assertIn("DELETE", err)
+            self.assertFalse((Path(d) / "imported.strata").exists())
+
+    def test_fail_loud_merge_using_not_parenthesized(self):
+        sql = ("MERGE INTO {{ this }} AS t\n"
+               "USING orders AS s\n"
+               "ON t.order_id = s.order_id\n"
+               "WHEN MATCHED THEN UPDATE SET country = s.country\n"
+               "WHEN NOT MATCHED THEN INSERT (order_id, country)\n"
+               "  VALUES (s.order_id, s.country)")
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {"int_clean": None, "daily": sql},
+                                            schema=ICEBERG_SCHEMA)
+            self.assertEqual(code, 1)
+            self.assertIn("E042", err)
+            self.assertIn("USING", err)
+            self.assertFalse((Path(d) / "imported.strata").exists())
+
+    def test_fail_loud_merge_missing_when_arm(self):
+        sql = ("MERGE INTO {{ this }} AS t\n"
+               "USING (SELECT order_id, country FROM orders) AS s\n"
+               "ON t.order_id = s.order_id\n"
+               "WHEN MATCHED THEN UPDATE SET country = s.country")
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {"int_clean": None, "daily": sql},
+                                            schema=ICEBERG_SCHEMA)
+            self.assertEqual(code, 1)
+            self.assertIn("E042", err)
+            self.assertIn("WHEN NOT MATCHED", err)
+            self.assertFalse((Path(d) / "imported.strata").exists())
+
+    def test_fail_loud_merge_on_non_equi_join(self):
+        sql = ("MERGE INTO {{ this }} AS t\n"
+               "USING (SELECT order_id, country FROM orders) AS s\n"
+               "ON t.order_id > s.order_id\n"
+               "WHEN MATCHED THEN UPDATE SET country = s.country\n"
+               "WHEN NOT MATCHED THEN INSERT (order_id, country)\n"
+               "  VALUES (s.order_id, s.country)")
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {"int_clean": None, "daily": sql},
+                                            schema=ICEBERG_SCHEMA)
+            self.assertEqual(code, 1)
+            self.assertIn("E042", err)
+            self.assertIn("equi", err)
+            self.assertFalse((Path(d) / "imported.strata").exists())
+
+    def test_fail_loud_this_outside_dml_still_rejected(self):
+        # `{{ this }}` is legal only as a DML target; inside a plain SELECT it
+        # remains an unsupported jinja form — the dispatcher wins, then the
+        # strip still fails on the body.
+        sql = ("SELECT order_id FROM orders "
+               "WHERE country = {{ this }}")
+        with __import__("tempfile").TemporaryDirectory() as d:
+            code, err = _run_project_import(Path(d), {"int_clean": None, "daily": sql},
+                                            schema=ICEBERG_SCHEMA)
+            self.assertEqual(code, 1)
+            self.assertIn("E042", err)
+            self.assertFalse((Path(d) / "imported.strata").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
