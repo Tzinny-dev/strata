@@ -72,7 +72,7 @@ Documentado `docs/binary-standalone.md:1`.
 
 ## Unreleased — próximo 0.1.6
 
-- Pendiente producto: `Iceberg` [`propuesta-iceberg.md`](../../propuesta-iceberg.md) (L1–L4 ✅, REST/L4 gated por demanda), `WASM` descartado.
+- Pendiente producto: `Iceberg` [`propuesta-iceberg.md`](../../propuesta-iceberg.md) (L1–L4 ✅, Catálogo REST no-go documentado §10.5), `WASM` descartado.
 
 - **`strata run --iceberg-dir <catálogo>` → publicación Iceberg real (L1)** (`strata/cli.py:358` `cmd_run`, `strata/iceberg.py` nuevo): tras un run que congela snapshot tables (`snap_<run_id>_<model>`), cada una se copia a `<catálogo>/runs/<run_id>/<model>` como tabla Apache Iceberg real vía `COPY ... (FORMAT iceberg)` (extensión DuckDB, no un dialect SQL) y se registra en `<catálogo>/_strata_manifest.json` (`run_id → {model: dir}`, determinista byte-a-byte, acumulativo, `default` = último). Fail-loud: sin extensión iceberg → `E100` antes de ejecutar (sin side effects); snapshot ausente / export incompleto → no se escribe manifest (all-or-nothing). `--dialect` ≠ duckdb + `--iceberg-dir` → `E100`. Verificado: `iceberg_scan` externo lee la tabla publicada en una conexión ajena; `534 passed` (era `529`).
 
