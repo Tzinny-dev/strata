@@ -72,7 +72,9 @@ Documentado `docs/binary-standalone.md:1`.
 
 ## Unreleased — próximo 0.1.6
 
-- Pendiente producto: `Iceberg` `propuesta §6`, `WASM` descartado.
+- Pendiente producto: `Iceberg` [`propuesta-iceberg.md`](../../propuesta-iceberg.md), `WASM` descartado.
+
+- **`strata run --iceberg-dir <catálogo>` → publicación Iceberg real (L1)** (`strata/cli.py:358` `cmd_run`, `strata/iceberg.py` nuevo): tras un run que congela snapshot tables (`snap_<run_id>_<model>`), cada una se copia a `<catálogo>/<model>` como tabla Apache Iceberg real vía `COPY ... (FORMAT iceberg)` (extensión DuckDB, no un dialect SQL) y se registra en `<catálogo>/_strata_manifest.json` (`run_id → {model: dir}`, determinista, acumulativo, `default` = último). Fail-loud: sin extensión iceberg → `E100` antes de ejecutar (sin side effects); snapshot ausente / export incompleto → no se escribe manifest. `--dialect` ≠ duckdb + `--iceberg-dir` → `E100`. Verificado: `iceberg_scan` externo lee la tabla publicada en una conexión ajena; `534 passed` (era `529`).
 
 - **`import-dbt` CTEs (`WITH cte AS (...)`) → Strata helpers** (`strata/importdbt.py:417` `_split_with`, `:490` `_translate_sql`): cada `WITH` se traduce a un modelo helper sin contrato `{model}__{cte}` que el modelo principal lee vía `from` (`import_dbt_project` los antecede a su modelo). Referencias hacia delante / CTE sin usar → helper inerte, build verde (`529 passed`).
 

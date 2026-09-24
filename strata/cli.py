@@ -355,6 +355,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     except RuntimeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    if getattr(args, "iceberg_dir", None):
+        if dialect_name != "duckdb":
+            print(f"error: E100: --iceberg-dir requires duckdb SQL dialect, got "
+                  f"{dialect_name!r} (Iceberg is a physical destination, not a "
+                  f"SQL dialect)", file=sys.stderr)
+            return 2
+        from . import iceberg as iceberg_mod
+        try:
+            iceberg_mod.ensure_iceberg(con)
+        except iceberg_mod.IcebergUnavailable as e:
+            print(f"error: E100: {e}", file=sys.stderr)
+            return 2
     if args.seed:
         _run_seed(con, args.file)
     applied, pins, note = exec_mod.run(con, proj, tms, args.file,
@@ -384,6 +396,25 @@ def cmd_run(args: argparse.Namespace) -> int:
             print("    " + ", ".join(cols))
             for row in con.execute(f"SELECT * FROM {view} LIMIT 3").fetchall():
                 print("    " + ", ".join(str(v) for v in row))
+    if getattr(args, "iceberg_dir", None):
+        if applied:
+            try:
+                from . import iceberg as iceberg_mod
+                entry = exec_mod.load_history(args.file)[-1]
+                rid = entry["run_id"]
+                snapshots = dict(entry.get("snapshots") or {})
+                manifest = iceberg_mod.export_run(
+                    con, rid, snapshots, Path(args.iceberg_dir))
+                exported = manifest["runs"][rid]
+                print(f"  iceberg: exported {len(exported)} table(s) to "
+                      f"{args.iceberg_dir} (run {rid})")
+            except iceberg_mod.IcebergExportError as e:
+                print(f"error: E100: {e}", file=sys.stderr)
+                if getattr(args, "output", None):
+                    con.close()
+                return 2
+        else:
+            print("  iceberg: nothing new to export (run applied no models)")
     if getattr(args, "gc", False) and not getattr(args, "stage_only", False):
         try:
             exec_mod.recover_metadata(con, args.file)
@@ -1244,6 +1275,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="extra dir resolving `import a.b` -> a/b.strata")
     p.add_argument("--dialect", default="duckdb",
                    help="target warehouse: duckdb | postgres | bigquery | snowflake")
+    p.add_argument("--iceberg-dir", default=None,
+                   help="also publish this run's snapshots as real Iceberg "
+                        "tables under this lakehouse catalog dir (duckdb dialect "
+                        "required; writes <dir>/_strata_manifest.json)")
     p.add_argument("--output", "-o",
                    help="persist the warehouse to this .duckdb file "
                         "(default: in-memory, discarded on exit)")
