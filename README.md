@@ -1,6 +1,6 @@
 # Strata — prototype
 
-[![CI](https://github.com/Tzinny-dev/strata/actions/workflows/ci.yml/badge.svg)](https://github.com/Tzinny-dev/strata/actions/workflows/ci.yml) [![Binary](https://github.com/Tzinny-dev/strata/actions/workflows/binary.yml/badge.svg)](https://github.com/Tzinny-dev/strata/actions/workflows/binary.yml) [![Publish](https://github.com/Tzinny-dev/strata/actions/workflows/publish.yml/badge.svg)](https://github.com/Tzinny-dev/strata/actions/workflows/publish.yml) [![PyPI](https://img.shields.io/pypi/v/strata-lang)](https://pypi.org/project/strata-lang/) [![Python](https://img.shields.io/pypi/pyversions/strata-lang)](https://pypi.org/project/strata-lang/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Coverage 81%](https://img.shields.io/badge/coverage-81%25-brightgreen)](htmlcov/index.html)
+[![CI](https://github.com/Tzinny-dev/strata/actions/workflows/ci.yml/badge.svg)](https://github.com/Tzinny-dev/strata/actions/workflows/ci.yml) [![Binary](https://github.com/Tzinny-dev/strata/actions/workflows/binary.yml/badge.svg)](https://github.com/Tzinny-dev/strata/actions/workflows/binary.yml) [![Publish](https://github.com/Tzinny-dev/strata/actions/workflows/publish.yml/badge.svg)](https://github.com/Tzinny-dev/strata/actions/workflows/publish.yml) [![PyPI](https://img.shields.io/pypi/v/strata-lang)](https://pypi.org/project/strata-lang/) [![Python](https://img.shields.io/pypi/pyversions/strata-lang)](https://pypi.org/project/strata-lang/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Coverage 80%](https://img.shields.io/badge/coverage-80%25-brightgreen)](htmlcov/index.html)
 
 Declarative, versioned, immutable data transformations. Compiles to SQL (DuckDB/Postgres/BigQuery/Snowflake), with column-level lineage and 3-phase contract pins.
 
@@ -100,6 +100,20 @@ docker run --rm -v $PWD:/work -w /work ghcr.io/tzinny-dev/strata:0.1.5 run examp
 # local build (no docker daemon required on host for CI build via GHA)
 docker build -t ghcr.io/tzinny-dev/strata:0.1.5 -f Dockerfile .
 ```
+
+## VS Code extension
+
+```bash
+# marketplace (id: Tzinny-dev.strata-tzinny, versión alineada con strata-lang)
+code --install-extension Tzinny-dev.strata-tzinny
+```
+
+Syntax highlighting para `.strata` + cliente LSP sobre `strata lsp`:
+diagnostics (el mismo `Checker` de `strata check`), completion de
+modelos/fuentes/columnas, hover de tipos y salto a definición de
+columnas. Requiere `strata` en el `PATH` o la setting
+`strata.binaryPath`. Rebuild local: `cd vscode && npm install &&
+npm run compile && npx vsce package`. Ver `docs-site/guide/vscode.md`.
 
 ## Development
 

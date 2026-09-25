@@ -43,6 +43,13 @@
         "scopeName": "source.strata",
         "path": "./syntaxes/strata.tmLanguage.json"
       }
+    ],
+    "commands": [
+      {
+        "command": "strata.showVersion",
+        "title": "Strata: Show Version",
+        "category": "Strata"
+      }
     ]
   },
   "main": "./out/extension.js",

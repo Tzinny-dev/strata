@@ -31,6 +31,7 @@ export default withMermaid({
         { text: "Tutorial", link: "/guide/tutorial" },
         { text: "Warehouse Semantics", link: "/guide/warehouse-semantics" },
         { text: "Warehouse Adapters", link: "/guide/warehouse-adapters" },
+        { text: "VS Code", link: "/guide/vscode" },
         { text: "Binary Standalone", link: "/guide/binary-standalone" }
       ],
       "/reference/": [

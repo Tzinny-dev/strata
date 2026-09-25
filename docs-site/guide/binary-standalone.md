@@ -84,6 +84,17 @@ Tiempo CI `90s` → `~270s` (×3 OS).
   Añadir como `if: startsWith(github.ref,'refs/tags/v')` steps en `binary.yml` con `secrets.APPLE_CERT`/`secrets.WINDOWS_CERT`.
 - `strata/lsp.py:18` ya expuesto como `strata lsp` (`cli.py:50`) y empaquetado via `collect_data_files`.
 
+### Extensión VS Code ✅ 0.1.5 (`prototype/vscode/`)
+
+- Marketplace **`Tzinny-dev.strata-tzinny`**: grammar TextMate `.strata`,
+  language-config (`//` comentarios) y cliente LSP sobre `strata lsp`
+  (diagnostics del `Checker`, completion, hover, salto a definición).
+- Setting `strata.binaryPath` para binarios fuera del `PATH` (venvs);
+  comando **Strata: Show Version** verifica el binario configurado.
+- Rebuild local: `cd vscode && npm install && npm run compile && npx
+  vsce package` → `.vsix` → `code --install-extension <archivo>`.
+  Guía completa: `docs-site/guide/vscode.md`.
+
 ---
 
 ## 4. Costos y riesgos — actualizados
@@ -108,4 +119,4 @@ Tiempo CI `90s` → `~270s` (×3 OS).
 
 ---
 
-*Actualizado 2026-09-23. Fuente: `prototype/` `CHANGELOG.md:35` Fase 0-4 → 0.1.5, `dist/strata 34M` + `vscode`, `pytest 528 tests 83%` en `3.12`.*
+*Actualizado 2026-09-24. Fuente: `prototype/` `CHANGELOG.md` Fase 0-4 → 0.1.5 + Unreleased 0.1.6, `dist/strata 34M` + `vscode 0.1.5`, `pytest 619 tests, 80% coverage` en `3.12`.*

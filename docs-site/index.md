@@ -4,7 +4,7 @@ layout: home
 hero:
   name: Strata
   text: Declarative, versioned data pipelines
-  tagline: Compiles to SQL — DuckDB/Postgres/BigQuery/Snowflake. Lineage + contracts as types, immutable snapshots, agent-safe.
+  tagline: Compiles to SQL — DuckDB/Postgres/BigQuery/Snowflake, publishes Iceberg catalogs. Lineage + contracts as types, immutable snapshots, agent-safe.
   image:
     src: /logo.svg
     alt: Strata
@@ -72,12 +72,13 @@ docker run --rm ghcr.io/tzinny-dev/strata:0.1.5 --help
 - **Tutorial** — end-to-end verified walkthrough
 - **Reference** — syntax, contracts, incremental, setops, JSON/arrays, dates, joins
 - **Spec** — grammar + types (normative)
-- **Changelog** — 0.1.0, 0.1.1, 0.1.2, 0.1.3, 0.1.4, 0.1.5, binary Fase 0-4
+- **VS Code** — syntax highlighting + LSP (diagnostics, completion, hover) from the marketplace extension
+- **Changelog** — 0.1.0 … 0.1.5, binary Fase 0-4, unreleased 0.1.6 (Iceberg L1–L4, `import-dbt`, `strata catalog`)
 
 ## Status
 
-[![CI](https://github.com/Tzinny-dev/strata/actions/workflows/ci.yml/badge.svg)](https://github.com/Tzinny-dev/strata/actions/workflows/ci.yml) [![Binary](https://github.com/Tzinny-dev/strata/actions/workflows/binary.yml/badge.svg)](https://github.com/Tzinny-dev/strata/actions/workflows/binary.yml) [![PyPI](https://img.shields.io/pypi/v/strata-lang)](https://pypi.org/project/strata-lang/) [![Coverage 81%](https://img.shields.io/badge/coverage-81%25-brightgreen)](https://github.com/Tzinny-dev/strata/blob/main/prototype/htmlcov/index.html)
+[![CI](https://github.com/Tzinny-dev/strata/actions/workflows/ci.yml/badge.svg)](https://github.com/Tzinny-dev/strata/actions/workflows/ci.yml) [![Binary](https://github.com/Tzinny-dev/strata/actions/workflows/binary.yml/badge.svg)](https://github.com/Tzinny-dev/strata/actions/workflows/binary.yml) [![PyPI](https://img.shields.io/pypi/v/strata-lang)](https://pypi.org/project/strata-lang/) [![Coverage 80%](https://img.shields.io/badge/coverage-80%25-brightgreen)](https://github.com/Tzinny-dev/strata/blob/main/prototype/htmlcov/index.html)
 
-Prototype: `537 tests, 81% coverage`, `strata.spec` onefile `34M`, `bench all green`.
+Prototype: `619 tests, 80% coverage`, `strata.spec` onefile `34M`, `bench all green`.
 
 > Working title v0.1 — `strata-lang 0.1.5` on PyPI · `strata 34M` standalone · `ghcr.io/tzinny-dev/strata`
