@@ -1,9 +1,9 @@
-# Operaciones de conjuntos y deduplicación
+# Set operations and deduplication
 
-Un modelo combina sus filas actuales con las de otros modelos del mismo
-proyecto (`union`, `intersect`, `except`), o elimina duplicados (`dedup`).
-Las ramas deben tener las mismas columnas en el mismo orden con tipos
-compatibles; la nulabilidad del resultado es la OR de todas las ramas.
+A model combines its current rows with those of other models in the same
+project (`union`, `intersect`, `except`), or removes duplicates (`dedup`).
+The branches must have the same columns in the same order with compatible
+types; the result's nullability is the OR of all the branches.
 
 ```strata
 source s(ns: "app", dataset: "s") { columns: { x: int64, y: string } }
@@ -17,15 +17,15 @@ model only_a { from a except b }
 model unique_a { from a dedup }
 ```
 
-## Semántica de pipeline
+## Pipeline semantics
 
-Los set-ops son **consecutivos**: `from a union b union c` encadena
-(`(a union b) union c`, mismo precedencia que los motores). Las sentencias
-**antes del primer set-op** dan forma a la **rama izquierda** (`filter` y
-`let` aplican solo a ella); las sentencias **después de la cadena** ven las
-**filas combinadas** (`filter`, `select`, `derive`, `group`, `sort`,
-`take`) e incluso **joins** (anexan columnas prefijadas `__j{k}_{col}` a las
-filas combinadas):
+Set-ops are **consecutive**: `from a union b union c` chains
+(`(a union b) union c`, same precedence as the engines). The statements
+**before the first set-op** shape the **left branch** (`filter` and
+`let` apply only to it); the statements **after the chain** see the
+**combined rows** (`filter`, `select`, `derive`, `group`, `sort`,
+`take`) and even **joins** (they append columns prefixed `__j{k}_{col}` to
+the combined rows):
 
 ```strata
 model recent { from a filter x > 1 union b }
@@ -34,106 +34,108 @@ model per_y { from a union b group { y } ( aggregate { c = count() } ) }
 model enriched { from a union b join_left c on x == c.x }
 ```
 
-Reglas (E076 si se incumplen): un `let`/`filter`/`join` **entre** dos set-ops
-rompe la cadena (los hermanos deben ser consecutivos); un `join` **antes**
-del primer set-op es ilegal (se une post-set-op o downstream); sin segundo
-`from`; el lado derecho es un **modelo**, no una source (envolver la source
-en un modelo); el set-op precede a cualquier
-`select`/`derive`/`aggregate`/`group`/`sort`/`take`. `expand` puede ir antes
-(corre dentro de la rama izquierda) pero no después. Una auto-referencia es
-un ciclo de dependencias (F001) y un modelo inexistente es E020.
+Rules (E076 if violated): a `let`/`filter`/`join` **between** two set-ops
+breaks the chain (siblings must be consecutive); a `join` **before** the
+first set-op is illegal (join post-set-op or downstream); no second `from`;
+the right-hand side is a **model**, not a source (wrap the source
+in a model); the set-op precedes any
+`select`/`derive`/`aggregate`/`group`/`sort`/`take`. `expand` can go before
+(it runs inside the left branch) but not after. A self-reference is
+a dependency cycle (F001) and a nonexistent model is E020.
 
-## Referencias calificadas al modelo derecho
+## Qualified references to the right model
 
-Como cada set-op registra a su modelo derecho, una referencia calificada a él
-(`b.x`) se resuelve contra la columna **combinada** de ese nombre — útil en
-expresiones posteriores a la cadena:
+Since each set-op records its right-hand model, a qualified reference to it
+(`b.x`) resolves against the **combined** column of that name — useful in
+expressions after the chain:
 
 ```strata
 model doubled { from a union b select { z = b.x * 10, y = y } }
 ```
 
-En SQL la referencias colapsan a la columna combinada sin cualificador en la
-consulta exterior (y a `t0.{col}` dentro del cuerpo, para que un post-join no
-la vuelva ambigua).
+In SQL the references collapse to the unqualified combined column in the
+outer query (and to `t0.{col}` inside the body, so that a post-join does not
+make it ambiguous).
 
-## Compatibilidad de esquemas
+## Schema compatibility
 
-Cada columna se registra con los tipos de **todas** las ramas, en orden de
-cadena; el tipo del modelo es su unificación (`int64` + `float64` →
-`float64`, como en `coalesce`). Nombres u orden distintos, o tipos no
-unificables (`string` con `int64`), se rechazan con E077. Todas las ramas
-emiten los mismos alias en el mismo orden con casts explícitos al tipo
-unificado en las ramas que difieren: DuckDB casa las ramas de un `UNION`
-**por nombre** (comprobado: `SELECT y,x ... UNION SELECT x,y` mezcla columnas)
-mientras el resto casa por posición, así que solo los alias idénticos son
-portables.
+Each column records the types of **all** the branches, in chain order; the
+model's type is their unification (`int64` + `float64` →
+`float64`, as in `coalesce`). Different names or order, or types that cannot
+be unified (`string` with `int64`), are rejected with E077. All the branches
+emit the same aliases in the same order with explicit casts to the unified
+type in the branches that differ: DuckDB matches the branches of a `UNION`
+**by name** (checked: `SELECT y,x ... UNION SELECT x,y` mixes up columns)
+while the rest match by position, so only identical aliases are
+portable.
 
-## Los cuatro operadores
+## The four operators
 
-| Sentencia | SQL | Duplicados |
+| Statement | SQL | Duplicates |
 | --- | --- | --- |
-| `union m` | `UNION` | Elimina duplicados |
-| `union all m` | `UNION ALL` | Los conserva |
-| `intersect m` | `INTERSECT` | Siempre distintos |
-| `except m` | `EXCEPT` | Siempre distintos |
+| `union m` | `UNION` | Removes duplicates |
+| `union all m` | `UNION ALL` | Keeps them |
+| `intersect m` | `INTERSECT` | Always distinct |
+| `except m` | `EXCEPT` | Always distinct |
 
-`intersect`/`except` no aceptan `all`: BigQuery y Snowflake no tienen las
-variantes `INTERSECT ALL`/`EXCEPT ALL`, así que el lenguaje no las ofrece en
-ningún dialecto. El lineage registra todas las ramas (orígenes de la
-izquierda más `(nodo, col, "set")` de cada derecha) y los `reads` incluyen
-las columnas consumidas de cada lado.
+`intersect`/`except` do not accept `all`: BigQuery and Snowflake do not have
+the `INTERSECT ALL`/`EXCEPT ALL` variants, so the language does not offer them
+in any dialect. The lineage records all the branches (the left's origins
+plus `(node, col, "set")` from each right) and the `reads` include
+the columns consumed from each side.
 
 ## `dedup`
 
-`dedup` es `SELECT DISTINCT` sobre el conjunto final de filas (antes de
-`sort`/`take`): sin argumentos elimina filas idénticas; `dedup by k1, k2`
-conserva una fila por clave de forma **determinista** y portable:
+`dedup` is `SELECT DISTINCT` over the final set of rows (before
+`sort`/`take`): with no arguments it removes identical rows;
+`dedup by k1, k2` keeps one row per key in a **deterministic** and portable
+way:
 
 ```strata
 model latest { from a union all b dedup by y }
 model keyed { from a union all b select { x = x, y = y } dedup by x }
 ```
 
-`dedup by` se implementa como `ROW_NUMBER() OVER (PARTITION BY claves ORDER BY
-resto de las columnas de salida)` y queda con `rn = 1`: mismo desempate en
-cualquier motor (NULLs al orden de cada warehouse; para un orden explícito,
-un `sort` posterior referenciando columnas de salida). Las claves deben ser
-columnas de salida sin cualificar; `select`/`sort` tras `dedup by` solo ven
-las columnas seleccionadas (E076 si una clave o un `sort` referencia algo
-fuera de la salida). `dedup` y `dedup by` son mutuamente excluyentes. `DISTINCT`
-funciona sobre `json` y arrays en los cuatro motores (verificado en DuckDB,
-incluido `null` JSON y arrays NULL). `union all ... dedup` equivale a `union`.
+`dedup by` is implemented as `ROW_NUMBER() OVER (PARTITION BY keys ORDER BY
+the rest of the output columns)` keeping `rn = 1`: same tie-breaking on any
+engine (NULLs follow each warehouse's order; for an explicit order,
+a later `sort` referencing output columns). The keys must be unqualified
+output columns; `select`/`sort` after `dedup by` only see the selected
+columns (E076 if a key or a `sort` references something
+outside the output). `dedup` and `dedup by` are mutually exclusive.
+`DISTINCT` works on `json` and arrays in the four engines (verified on
+DuckDB, including JSON `null` and NULL arrays). `union all ... dedup` is
+equivalent to `union`.
 
 ## `count(distinct x)`
 
-`count(distinct expr)` es la única forma DISTINCT de agregación: emite
-`COUNT(DISTINCT expr)` y está disponible en agregación y en `group`:
+`count(distinct expr)` is the only DISTINCT form of aggregation: it emits
+`COUNT(DISTINCT expr)` and is available in aggregation and in `group`:
 
 ```strata
 model per_y { from a group { y } ( aggregate { n = count(distinct x) } ) }
 ```
 
-`distinct` en cualquier otra función, en `count(distinct *)` o dentro de un
-`over (...)` es E096.
+`distinct` in any other function, in `count(distinct *)`, or inside an
+`over (...)` is E096.
 
-## Dialectos y límites
+## Dialects and limits
 
-- DuckDB/PostgreSQL/BigQuery/Snowflake: los cuatro operadores existen con la
-  misma semántica DISTINCT/ALL descrita y la cadena se emite como
-  paréntesis anidados (`((a op b) op c)`). El `ROW_NUMBER` de `dedup by` es
-  estándar en los cuatro motores. Ejecución real solo en DuckDB; los otros
-  tres verificados por patrón de emisión.
-- Ramas con tipos ensanchados emiten `CAST(... AS <tipo>)` en los lados que
-  difieren (`CAST(x AS DOUBLE)` en DuckDB/Postgres, `FLOAT64` en BigQuery).
-- El `money` solo se alinea consigo mismo exacto: mezclar `money` con otro
-  tipo numérico es E077 en lugar de un cast de divisa silencioso.
+- DuckDB/PostgreSQL/BigQuery/Snowflake: the four operators exist with the
+  same DISTINCT/ALL semantics described and the chain is emitted as nested
+  parentheses (`((a op b) op c)`). The `ROW_NUMBER` of `dedup by` is
+  standard in the four engines. Real execution only on DuckDB; the other
+  three verified by emission pattern.
+- Branches with widened types emit `CAST(... AS <type>)` on the sides that
+  differ (`CAST(x AS DOUBLE)` in DuckDB/Postgres, `FLOAT64` in BigQuery).
+- `money` only unifies with exact `money`: mixing `money` with another
+  numeric type is E077 instead of a silent currency cast.
 
-Errores: E076 forma/colocación del set-op (cadena rota por
-`let`/`filter`/`join`, joins antes del primer set-op, segundo `from`, source
-como rama derecha, set-op tras salidas/orden/límite/grupo, `expand`
-posterior, claves o `sort` de `dedup by` fuera de la salida), E077 ramas
-incompatibles, E096 `distinct` en una forma no count/ventana, F001 ciclo,
-E020 modelo inexistente. Los contratos y el lineage pasan por el checker;
-`fmt` hace round-trip de todas las formas (incluidas cadenas, `dedup by` y
-`count(distinct x)`) y el fingerprint es estable.
+Errors: E076 set-op form/placement (chain broken by
+`let`/`filter`/`join`, joins before the first set-op, second `from`, source
+as the right branch, set-op after outputs/order/limit/group, later `expand`,
+keys or `sort` of `dedup by` outside the output), E077 incompatible
+branches, E096 `distinct` in a non-count/window form, F001 cycle,
+E020 nonexistent model. Contracts and lineage pass through the checker;
+`fmt` round-trips all the forms (including chains, `dedup by` and
+`count(distinct x)`) and the fingerprint is stable.

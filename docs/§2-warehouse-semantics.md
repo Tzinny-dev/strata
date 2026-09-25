@@ -1,55 +1,55 @@
-# §2 Warehouse Semantics: Partition_by y Freshness
+# §2 Warehouse Semantics: Partition_by and Freshness
 
-**Fecha**: 2026-09-18
-**Estado**: Implementación base completa, tests passing (336/336)
+**Date**: 2026-09-18
+**Status**: Base implementation complete, tests passing (336/336)
 **Commit**: fa2bf29
 
 ---
 
-## Resumen Ejecutivo
+## Executive Summary
 
-Se implementó el framework de `partition_by` y `freshness` para modelos Strata, proporcionando semánticas de warehouse que permiten:
+The `partition_by` and `freshness` framework was implemented for Strata models, providing warehouse semantics that enable:
 
-1. **Particionamiento de datos**: Los modelos pueden declarar columnas de partición que fluyen a través del SQL y están disponibles en el warehouse
-2. **Detección de freshness**: Los modelos pueden especificar umbrales de tiempo para detectar datos stale
-3. **Validación de contratos**: La integración con `runtime_pins` valida que las columnas de partición existan en el esquema físico
-4. **Detección de staleness basada en tiempo**: El motor reconstruye automáticamente modelos cuando los datos exceden el threshold de freshness
+1. **Data partitioning**: Models can declare partition columns that flow through the SQL and are available in the warehouse
+2. **Freshness detection**: Models can specify time thresholds to detect stale data
+3. **Contract validation**: Integration with `runtime_pins` validates that partition columns exist in the physical schema
+4. **Time-based staleness detection**: The engine automatically rebuilds models when data exceeds the freshness threshold
 
 ---
 
-## Alcance de la Implementación
+## Implementation Scope
 
-### Componentes Implementados
+### Implemented Components
 
-| Componente | Archivo | Estado |
+| Component | File | Status |
 |------------|---------|--------|
 | AST | `strata/ast.py` | `ModelDecl.partition_by`, `freshness` |
 | Parser | `strata/parser.py` | `partition_by: [expr-list]`, `freshness: <value>` |
-| SQL Generation | `strata/sqlgen.py` | `partition_by` en `_base_select()` |
-| Analysis | `strata/analysis.py` | Flujo `ModelDecl` -> `Plan` -> `TypedModel` |
+| SQL Generation | `strata/sqlgen.py` | `partition_by` in `_base_select()` |
+| Analysis | `strata/analysis.py` | `ModelDecl` -> `Plan` -> `TypedModel` flow |
 | Executor | `strata/exec.py` | `parse_freshness_threshold()`, staleness detection |
 | Tests | `tests/test_warehouse_partition_freshness.py` | 12 tests, 587 subtests |
 
-### Sintaxis Soportada
+### Supported Syntax
 
 ```strata
--- Particionamiento basico
+-- Basic partitioning
 model m { from s partition_by [ds] }
 
--- Freshness basico
+-- Basic freshness
 model m { from s freshness incremental }
 
--- Combinacion
+-- Combination
 model m { from s partition_by [ds] freshness incremental }
 
--- Freshness con specs de tiempo
-model m { from s freshness daily }      # Stale si > 24 horas
-model m { from s freshness weekly }     # Stale si > 7 dias
-model m { from s freshness 1h }         # Stale si > 1 hora
-model m { from s freshness 7d }         # Stale si > 7 dias
-model m { from s freshness 2w }         # Stale si > 14 dias
+-- Freshness with time specs
+model m { from s freshness daily }      # Stale if > 24 hours
+model m { from s freshness weekly }     # Stale if > 7 days
+model m { from s freshness 1h }         # Stale if > 1 hour
+model m { from s freshness 7d }         # Stale if > 7 days
+model m { from s freshness 2w }         # Stale if > 14 days
 
--- Con contratos
+-- With contracts
 contract c { x: int64, ds: string }
 model m -> contract c {
   from s
@@ -58,23 +58,23 @@ model m -> contract c {
 }
 ```
 
-### Freshness Specs Soportados
+### Supported Freshness Specs
 
-| Spec | Descripcion | Threshold |
+| Spec | Description | Threshold |
 |------|-------------|-----------|
-| `incremental` | Solo cuando upstream cambia | `None` (no tiempo-based) |
-| `daily` | Datos deben ser de hoy | 24 horas |
-| `weekly` | Datos deben ser de esta semana | 7 dias |
-| `monthly` | Datos deben ser de este mes | 30 dias |
-| `Nh` (ej: `1h`, `24h`) | N horas | N horas |
-| `Nd` (ej: `7d`, `30d`) | N dias | N dias |
-| `Nw` (ej: `2w`) | N semanas | N*7 dias |
+| `incremental` | Only when upstream changes | `None` (not time-based) |
+| `daily` | Data must be from today | 24 hours |
+| `weekly` | Data must be from this week | 7 days |
+| `monthly` | Data must be from this month | 30 days |
+| `Nh` (e.g. `1h`, `24h`) | N hours | N hours |
+| `Nd` (e.g. `7d`, `30d`) | N days | N days |
+| `Nw` (e.g. `2w`) | N weeks | N*7 days |
 
 ---
 
-## Arquitectura y Decisiones de Diseno
+## Architecture and Design Decisions
 
-### Flujo de Datos
+### Data Flow
 
 ```
 Parser --> AST (ModelDecl) --> Analysis (Plan) --> TypedModel
@@ -85,32 +85,32 @@ Executor <-- SQL Gen <-- plan.partition_by
   - runtime_pins
 ```
 
-### Decisiones Clave
+### Key Decisions
 
-1. **partition_by como columnas en SELECT**: En lugar de usar `DISTRIBUTE BY` (no soportado por DuckDB en vistas), se proyectan como `ds AS __partition_col` en la subquery base
+1. **partition_by as columns in SELECT**: Instead of using `DISTRIBUTE BY` (not supported by DuckDB in views), they are projected as `ds AS __partition_col` in the base subquery
 
-2. **freshness como string**: Se mantiene como string para flexibilidad, con parsing lazy via `parse_freshness_threshold()`
+2. **freshness as string**: Kept as a string for flexibility, with lazy parsing via `parse_freshness_threshold()`
 
-3. **Validacion en runtime_pins**: Solo valida cuando hay contract (comportamiento consistente con el resto del sistema)
+3. **Validation in runtime_pins**: Only validates when there is a contract (behavior consistent with the rest of the system)
 
-4. **Staleness basada en tiempo**: Se integra en `run()` despues de la deteccion de staleness por codigo/fuentes
+4. **Time-based staleness**: Integrated into `run()` after staleness detection by code/sources
 
 ---
 
-## Estado Actual
+## Current State
 
-### Lo que Funciona
+### What Works
 
-- Parser soporta `partition_by [expr-list]` y `freshness: <value>`
-- SQL generation incluye `__partition_col` en subquery base
-- Runtime pins valida que columnas de particion existan
-- Staleness detection verifica freshness thresholds
+- Parser supports `partition_by [expr-list]` and `freshness: <value>`
+- SQL generation includes `__partition_col` in the base subquery
+- Runtime pins validate that partition columns exist
+- Staleness detection verifies freshness thresholds
 - 336 tests passing, 587 subtests
-- Integracion con contratos funciona correctamente
+- Integration with contracts works correctly
 
-### Tests de Cobertura
+### Coverage Tests
 
-| Categoria | Tests | Estado |
+| Category | Tests | Status |
 |-----------|-------|--------|
 | SQL Generation | 3 | Passing |
 | Execution | 4 | Passing |
@@ -121,217 +121,217 @@ Executor <-- SQL Gen <-- plan.partition_by
 
 ---
 
-## Huecos y Limitaciones
+## Gaps and Limitations
 
-### 1. DuckDB no soporta DISTRIBUTE BY
+### 1. DuckDB does not support DISTRIBUTE BY
 
-**Problema**: DuckDB no tiene `DISTRIBUTE BY` o `CLUSTER BY` en `CREATE TABLE AS` para particionamiento fisico.
+**Problem**: DuckDB does not have `DISTRIBUTE BY` or `CLUSTER BY` in `CREATE TABLE AS` for physical partitioning.
 
-**Solucion actual**: Se proyecta la columna como `__partition_col` pero no hay particionamiento fisico.
+**Current solution**: The column is projected as `__partition_col` but there is no physical partitioning.
 
-**Impacto**: Alto para workloads con grandes volumenes de datos. Los warehouses como Snowflake, BigQuery, Redshift si soportan particionamiento fisico por partition key.
+**Impact**: High for workloads with large data volumes. Warehouses such as Snowflake, BigQuery, and Redshift do support physical partitioning by partition key.
 
-**Mejora sugerida**: Agregar soporte para warehouses que si soportan particionamiento fisico via el mecanismo de adaptadores de dialecto.
+**Suggested improvement**: Add support for warehouses that do support physical partitioning via the dialect adapter mechanism.
 
-### 2. Freshness basado en committed_at del ultimo run
+### 2. Freshness based on committed_at of the last run
 
-**Problema**: La deteccion de freshness usa `committed_at` del run anterior, no el timestamp de los datos mismos.
+**Problem**: Freshness detection uses `committed_at` from the previous run, not the timestamp of the data itself.
 
-**Solucion actual**: Asume que los datos llegan al mismo tiempo que el run.
+**Current solution**: Assumes that data arrives at the same time as the run.
 
-**Impacto**: Medio para pipelines con datos late-arriving o que procesan datos historicos.
+**Impact**: Medium for pipelines with late-arriving data or that process historical data.
 
-**Mejora sugerida**: Soportar un campo `freshness_column` que indique que columna del dataset contiene el timestamp de los datos para comparar contra el threshold.
+**Suggested improvement**: Support a `freshness_column` field that indicates which column of the dataset contains the data timestamp to compare against the threshold.
 
-### 3. No hay validacion de freshness en tiempo real
+### 3. No real-time freshness validation
 
-**Problema**: La validacion de freshness solo ocurre durante `run()`, no en queries.
+**Problem**: Freshness validation only occurs during `run()`, not in queries.
 
-**Solucion actual**: Solo validacion batch.
+**Current solution**: Batch validation only.
 
-**Impacto**: Bajo para la mayoria de use cases. Los usuarios tipicamente ejecutan `run()` periodicamente.
+**Impact**: Low for most use cases. Users typically run `run()` periodically.
 
-**Mejora sugerida**: Agregar hint `@staleness_ok` para queries ad-hoc donde el usuario acepta datos stale.
+**Suggested improvement**: Add an `@staleness_ok` hint for ad-hoc queries where the user accepts stale data.
 
-### 4. No hay soporte para freshness basado en watermark
+### 4. No support for watermark-based freshness
 
-**Problema**: No hay soporte para especificar un watermark o event-time column para comparar contra el threshold.
+**Problem**: There is no support for specifying a watermark or event-time column to compare against the threshold.
 
-**Solucion actual**: Solo compara tiempo desde el ultimo run.
+**Current solution**: Only compares time since the last run.
 
-**Impacto**: Medio para streaming o event-time based pipelines.
+**Impact**: Medium for streaming or event-time based pipelines.
 
-**Mejora sugerida**: Agregar `freshness_column: <col>` que specifique la columna de event-time para la comparacion.
+**Suggested improvement**: Add `freshness_column: <col>` that specifies the event-time column for the comparison.
 
-### 5. Particionamiento no propagado a CTAS
+### 5. Partitioning not propagated to CTAS
 
-**Problema**: `partition_by` solo afecta la subquery base, no la sentencia CTAS final.
+**Problem**: `partition_by` only affects the base subquery, not the final CTAS statement.
 
-**Solucion actual**: La columna `__partition_col` esta disponible para queries pero no afecta como DuckDB almacena los datos.
+**Current solution**: The `__partition_col` column is available for queries but does not affect how DuckDB stores the data.
 
-**Impacto**: Medio. Los usuarios no pueden usar `SELECT * EXCLUDE (__partition_col)` facilmente.
+**Impact**: Medium. Users cannot easily use `SELECT * EXCLUDE (__partition_col)`.
 
-**Mejora sugerida**: Filtrar automaticamente `__partition_col` del SELECT final o documentar como usarlo.
-
----
-
-## Mejoras y Siguientes Pasos
-
-### Prioridad Alta
-
-| Mejora | Descripcion | Esfuerzo |
-|--------|-------------|----------|
-| `freshness_column` | Soportar columna de event-time para staleness mas preciso | Medio |
-| Warehouse partitioning | Agregar soporte para particionamiento fisico en warehouses que lo soportan | Alto |
-| Filtrar `__partition_col` | Excluir automaticamente del SELECT final | Bajo |
-
-### Prioridad Media
-
-| Mejora | Descripcion | Esfuerzo |
-|--------|-------------|----------|
-| Watermark support | Soportar watermarks para datos late-arriving | Medio |
-| Freshness en queries | Agregar hint `@staleness_ok` para queries ad-hoc | Bajo |
-| `partition_by` compuesto | Soportar multiples columnas de particion con jerarquia | Bajo |
-| `freshness` compuesto | Soportar multiples umbrales (ej: `freshness: 1h, daily`) | Medio |
-
-### Prioridad Baja
-
-| Mejora | Descripcion | Esfuerzo |
-|--------|-------------|----------|
-| Freshness custom | Soportar expressions complejas (ej: `freshness: now() - interval '1 day'`) | Alto |
-| Staleness cascade | Propagar staleness a modelos downstream automaticamente | Medio |
-| Freshness override | Permitir override de freshness en tiempo de ejecucion | Bajo |
+**Suggested improvement**: Automatically filter `__partition_col` from the final SELECT or document how to use it.
 
 ---
 
-## Oportunidades de Extension
+## Improvements and Next Steps
 
-### 1. Integracon con Airflow/Prefect
+### High Priority
 
-El framework de partition_by y freshness puede integrarse con orquestadores para:
-- Trigger automatico de re-materializacion cuando freshness expira
-- Dependencias basadas en particiones
-- Monitoreo de staleness via metrics
+| Improvement | Description | Effort |
+|--------|-------------|----------|
+| `freshness_column` | Support event-time column for more accurate staleness | Medium |
+| Warehouse partitioning | Add support for physical partitioning in warehouses that support it | High |
+| Filter `__partition_col` | Automatically exclude from the final SELECT | Low |
 
-### 2. Soporte para Incremental Models
+### Medium Priority
 
-El parser ya soporta `freshness incremental`, lo cual es la base para modelos incrementales. Extensiones naturales:
+| Improvement | Description | Effort |
+|--------|-------------|----------|
+| Watermark support | Support watermarks for late-arriving data | Medium |
+| Freshness in queries | Add `@staleness_ok` hint for ad-hoc queries | Low |
+| Composite `partition_by` | Support multiple partition columns with hierarchy | Low |
+| Composite `freshness` | Support multiple thresholds (e.g. `freshness: 1h, daily`) | Medium |
+
+### Low Priority
+
+| Improvement | Description | Effort |
+|--------|-------------|----------|
+| Custom freshness | Support complex expressions (e.g. `freshness: now() - interval '1 day'`) | High |
+| Staleness cascade | Automatically propagate staleness to downstream models | Medium |
+| Freshness override | Allow freshness override at execution time | Low |
+
+---
+
+## Extension Opportunities
+
+### 1. Integration with Airflow/Prefect
+
+The partition_by and freshness framework can integrate with orchestrators for:
+- Automatic re-materialization trigger when freshness expires
+- Partition-based dependencies
+- Staleness monitoring via metrics
+
+### 2. Support for Incremental Models
+
+The parser already supports `freshness incremental`, which is the foundation for incremental models. Natural extensions:
 - Merge strategies (upsert, append, replace)
 - Change Data Capture (CDC)
 - Watermark-based processing
 
 ### 3. Multi-warehouse Support
 
-El mecanismo de dialectos permite extender a:
-- Snowflake: `CLUSTER BY` para particionamiento
-- BigQuery: `PARTITION BY` nativo
-- Redshift: `DISTKEY` y `SORTKEY`
+The dialect mechanism allows extending to:
+- Snowflake: `CLUSTER BY` for partitioning
+- BigQuery: native `PARTITION BY`
+- Redshift: `DISTKEY` and `SORTKEY`
 - Databricks: `PARTITIONED BY`
 
-### 4. Observabilidad
+### 4. Observability
 
-Agregar metricas de:
-- Tiempo de staleness por modelo
-- Historial de freshness checks
-- Alertas cuando freshness expira
-- Dashboard de salud del pipeline
+Add metrics for:
+- Staleness time per model
+- History of freshness checks
+- Alerts when freshness expires
+- Pipeline health dashboard
 
-### 5. Testing de Freshness
+### 5. Freshness Testing
 
-Herramientas para:
-- Simular datos stale para testing
-- Verificar que freshness thresholds funcionan correctamente
-- Benchmark de performance con diferentes particionamientos
+Tools for:
+- Simulate stale data for testing
+- Verify that freshness thresholds work correctly
+- Performance benchmarks with different partitioning
 
 ---
 
-## Metricas de la Implementacion
+## Implementation Metrics
 
-| Metrica | Valor |
+| Metric | Value |
 |---------|-------|
-| Lineas de codigo (strata/) | ~9,000 |
-| Tests totales | 336 |
+| Lines of code (strata/) | ~9,000 |
+| Total tests | 336 |
 | Subtests | 587 |
-| Tests de partition_by/freshness | 12 |
-| Archivos modificados | 6 |
-| Nuevos archivos | 1 |
-| Cobertura de freshness specs | 95% (falta custom expressions) |
+| partition_by/freshness tests | 12 |
+| Modified files | 6 |
+| New files | 1 |
+| Freshness spec coverage | 95% (custom expressions missing) |
 
 ---
 
-## Referencias
+## References
 
-- **§2 Spec**: `docs/strata-plan.md` - Definicion original de partition_by y freshness
-- **§5 Warehouse Adapters**: `docs/warehouse-adapters-plan.md` - Soporte multi-warehouse
-- **Commit**: `fa2bf29` - Implementacion base completa
+- **§2 Spec**: `docs/strata-plan.md` - Original definition of partition_by and freshness
+- **§5 Warehouse Adapters**: `docs/warehouse-adapters-plan.md` - Multi-warehouse support
+- **Commit**: `fa2bf29` - Complete base implementation
 
 ---
 
-## Cambios Recientes (2026-09-18)
+## Recent Changes (2026-09-18)
 
-### 1. Fix: partition_col aliases unicos
+### 1. Fix: unique partition_col aliases
 
-**Problema**: Cuando se usaban multiples columnas en `partition_by`, todas obtenian el mismo alias `__partition_col`, causando conflictos en SQL.
+**Problem**: When multiple columns were used in `partition_by`, they all got the same `__partition_col` alias, causing SQL conflicts.
 
-**Solucion**: Cada columna ahora tiene un alias unico: `__partition_col_0`, `__partition_col_1`, etc.
+**Solution**: Each column now has a unique alias: `__partition_col_0`, `__partition_col_1`, etc.
 
 ```strata
--- Antes (con bug)
+-- Before (with bug)
 model m { from s partition_by [ds, region] }
--- SQL: ds AS __partition_col, region AS __partition_col  -- CONFLICTO!
+-- SQL: ds AS __partition_col, region AS __partition_col  -- CONFLICT!
 
--- Despues (corregido)
+-- After (fixed)
 model m { from s partition_by [ds, region] }
 -- SQL: ds AS __partition_col_0, region AS __partition_col_1  -- OK
 ```
 
-### 2. freshness_column: Staleness basado en event-time
+### 2. freshness_column: Staleness based on event-time
 
-**Nuevo syntax**:
+**New syntax**:
 ```strata
 model m { from s freshness 1h freshness_column: ts }
 ```
 
-**Comportamiento**:
-- Si se especifica `freshness_column`, se verifica `SELECT MAX(column) FROM view`
-- Si el maximo es mayor que el threshold, el modelo se marca como stale
-- Si no se especifica, se usa el tiempo desde el ultimo run (comportamiento anterior)
+**Behavior**:
+- If `freshness_column` is specified, `SELECT MAX(column) FROM view` is checked
+- If the max is greater than the threshold, the model is marked as stale
+- If not specified, the time since the last run is used (previous behavior)
 
-**Casos de uso**:
-- Datos con event-time diferente del processing-time
-- Pipelines donde los datos llegan con delay
-- Monitoreo de calidad de datos
+**Use cases**:
+- Data with event-time different from processing-time
+- Pipelines where data arrives with delay
+- Data quality monitoring
 
-### 3. Warehouse partitioning (infraestructura)
+### 3. Warehouse partitioning (infrastructure)
 
-**Cambios en Dialect**:
+**Changes to Dialect**:
 ```python
 class Dialect:
-    supports_partitioning: bool  # True si el warehouse soporta particionamiento
-    partition_clause(columns)    # Genera la clausula de particionamiento
+    supports_partitioning: bool  # True if the warehouse supports partitioning
+    partition_clause(columns)    # Generates the partitioning clause
 ```
 
-**Cambios en Warehouse**:
+**Changes to Warehouse**:
 ```python
 class Warehouse:
     def materialize(self, name, sql, partition_by=None):
-        # partition_by: lista de columnas para particionar
+        # partition_by: list of columns to partition by
         ...
 ```
 
-**Estado actual**:
-- DuckDB: No soporta particionamiento (ignorado)
-- Snowflake: Soportaria `CLUSTER BY`
-- BigQuery: Soportaria `PARTITION BY`
-- Redshift: Soportaria `DISTKEY` / `SORTKEY`
+**Current state**:
+- DuckDB: Does not support partitioning (ignored)
+- Snowflake: Would support `CLUSTER BY`
+- BigQuery: Would support `PARTITION BY`
+- Redshift: Would support `DISTKEY` / `SORTKEY`
 
-**Nota**: La implementacion completa de particionamiento fisico requiere
-modificar `publish_snapshots()` para incluir la clausula de particionamiento
-al crear las tablas snapshot.
+**Note**: The full implementation of physical partitioning requires
+modifying `publish_snapshots()` to include the partitioning clause
+when creating the snapshot tables.
 
 ---
 
-## Cambios Recientes (2026-09-18) - Prioridad Media
+## Recent Changes (2026-09-18) - Medium Priority
 
 ### 1. staleness_ok attribute
 
@@ -343,17 +343,17 @@ model m {
 }
 ```
 
-**Comportamiento**:
-- Los modelos con `staleness_ok: "true"` se excluyen del stale set
-- Util para queries ad-hoc donde el usuario acepta datos stale
-- Compatibles con `freshness` y otros atributos
+**Behavior**:
+- Models with `staleness_ok: "true"` are excluded from the stale set
+- Useful for ad-hoc queries where the user accepts stale data
+- Compatible with `freshness` and other attributes
 
-**Casos de uso**:
-- Modelos de desarrollo o testing
-- Queries exploratorias
-- Modelos con datos estaticos
+**Use cases**:
+- Development or testing models
+- Exploratory queries
+- Models with static data
 
-### 2. Multiples freshness thresholds
+### 2. Multiple freshness thresholds
 
 **Syntax**:
 ```strata
@@ -363,20 +363,20 @@ model m {
 }
 ```
 
-**Comportamiento**:
-- Soporta valores separados por comas
-- El modelo se marca como stale si CUALQUIER umbral es excedido
-- Util para pipelines con multiples SLAs
+**Behavior**:
+- Supports comma-separated values
+- The model is marked as stale if ANY threshold is exceeded
+- Useful for pipelines with multiple SLAs
 
-**Ejemplos**:
+**Examples**:
 ```strata
-# Stale si datos tienen > 1 hora O > 24 horas
+# Stale if data is > 1 hour OR > 24 hours
 freshness 1h, daily
 
-# Stale si datos tienen > 7 dias
+# Stale if data is > 7 days
 freshness weekly
 
-# Combinacion con partition_by
+# Combination with partition_by
 model m {
   from s
   partition_by [ds]
@@ -384,7 +384,7 @@ model m {
 }
 ```
 
-### 3. partition_by compuesto (ya soportado)
+### 3. Composite partition_by (already supported)
 
 **Syntax**:
 ```strata
@@ -394,28 +394,28 @@ model m {
 }
 ```
 
-**Comportamiento**:
-- Cada columna genera un alias unico: `__partition_col_0`, `__partition_col_1`, etc.
-- Soporta expresiones: `partition_by [substring(ds, 1, 4)]`
-- Soporta jerarquia de particionamiento
+**Behavior**:
+- Each column generates a unique alias: `__partition_col_0`, `__partition_col_1`, etc.
+- Supports expressions: `partition_by [substring(ds, 1, 4)]`
+- Supports partitioning hierarchy
 
-**Ejemplos**:
+**Examples**:
 ```strata
-# Particionamiento por tiempo
+# Partitioning by time
 partition_by [year, month, day]
 
-# Particionamiento por expresion
+# Partitioning by expression
 partition_by [to_date(ds)]
 
-# Particionamiento por region y tiempo
+# Partitioning by region and time
 partition_by [region, year, month]
 ```
 
 ---
 
-## Cambios Recientes (2026-09-18) - Prioridad Baja
+## Recent Changes (2026-09-18) - Low Priority
 
-### 1. Freshness custom con expressions complejas
+### 1. Custom freshness with complex expressions
 
 **Syntax**:
 ```strata
@@ -425,12 +425,12 @@ model m {
 }
 ```
 
-**Comportamiento**:
-- Soporta expressions SQL como strings
+**Behavior**:
+- Supports SQL expressions as strings
 - Evaluated by warehouse at runtime
 - Can be mixed with standard freshness specs
 
-**Ejemplos**:
+**Examples**:
 ```strata
 # Custom expression
 freshness "now() - interval '1 day'"
@@ -442,35 +442,35 @@ freshness 1h, "now() - interval '7 days'"
 freshness "now() - interval '1 hour'", "now() - interval '1 day'"
 ```
 
-### 2. Staleness cascade a modelos downstream
+### 2. Staleness cascade to downstream models
 
-**Comportamiento**:
-- Si un modelo es stale, todos los modelos que dependen de el tambien se marcan como stale
-- Utiliza la funcion existente `_downstream_models()`
-- Asegura que los pipelines se mantengan consistentes
+**Behavior**:
+- If a model is stale, all models that depend on it are also marked as stale
+- Uses the existing `_downstream_models()` function
+- Ensures that pipelines remain consistent
 
-**Ejemplo**:
+**Example**:
 ```strata
-model m1 { from s freshness 1h }  # Si m1 es stale...
-model m2 { from m1 }              # ...m2 tambien sera stale
-model m3 { from m2 }              # ...y m3 tambien
+model m1 { from s freshness 1h }  # If m1 is stale...
+model m2 { from m1 }              # ...m2 will also be stale
+model m3 { from m2 }              # ...and m3 too
 ```
 
-### 3. Freshness override en tiempo de ejecucion
+### 3. Freshness override at execution time
 
-**Syntax CLI**:
+**CLI syntax**:
 ```bash
 strata run module.strata --freshness 2h
 strata run module.strata --freshness daily
 strata run module.strata --freshness 7d
 ```
 
-**Comportamiento**:
-- Override el freshness threshold para todos los modelos en el pipeline
-- Util para testing o emergencias
-- No modifica el archivo .strata original
+**Behavior**:
+- Overrides the freshness threshold for all models in the pipeline
+- Useful for testing or emergencies
+- Does not modify the original .strata file
 
-**Casos de uso**:
-- Testing: Forzar reconstruccion de modelos
-- Emeracias: Override freshness para datos criticos
-- Debugging: Investigar issues de staleness
+**Use cases**:
+- Testing: Force rebuilding of models
+- Emergencies: Override freshness for critical data
+- Debugging: Investigate staleness issues

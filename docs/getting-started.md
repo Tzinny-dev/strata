@@ -1,13 +1,13 @@
 # Getting started
 
-Todo el código de esta guía se corrió de verdad contra el CLI (`strata
-check`/`build`/`run`) antes de escribirse aquí; los números que aparecen
-son la salida real, no un ejemplo inventado.
+All the code in this guide was actually run against the CLI (`strata
+check`/`build`/`run`) before being written here; the numbers that appear
+are the real output, not an invented example.
 
-## Instalación
+## Installation
 
-El prototipo vive en `prototype/` y usa un `.venv` propio con `duckdb`
-instalado:
+The prototype lives in `prototype/` and uses its own `.venv` with `duckdb`
+installed:
 
 ```
 cd prototype
@@ -15,13 +15,13 @@ python3 -m venv .venv
 .venv/bin/pip install duckdb
 ```
 
-A partir de aquí, `strata` es `python -m strata` con ese intérprete.
+From here on, `strata` is `python -m strata` with that interpreter.
 
-## Un pipeline mínimo
+## A minimal pipeline
 
-Strata declara **fuentes** (tablas que ya existen en el warehouse),
-**modelos** (transformaciones) y, opcionalmente, un **contrato** que fija
-el esquema de salida de un modelo. Guarda esto como `hello.strata`:
+Strata declares **sources** (tables that already exist in the warehouse),
+**models** (transformations) and, optionally, a **contract** that pins
+the output schema of a model. Save this as `hello.strata`:
 
 ```strata
 source orders(ns: "crm", dataset: "orders") {
@@ -52,12 +52,12 @@ model paid_orders -> contract PaidOrders {
 }
 ```
 
-`ns`/`dataset` son metadatos de catálogo; la tabla SQL real que se lee es
-el nombre de la declaración (`orders`), sin importar lo que digan esas
-claves (`strata/seed.py`, que carga los datos de esta guía, lo documenta
-así explícitamente).
+`ns`/`dataset` are catalog metadata; the actual SQL table that gets read is
+the name of the declaration (`orders`), no matter what those keys say
+(`strata/seed.py`, which loads this guide's data, documents it that way
+explicitly).
 
-### `strata check`: typecheck + contrato, sin tocar ningún warehouse
+### `strata check`: typecheck + contract, without touching any warehouse
 
 ```
 $ python -m strata check hello.strata
@@ -67,7 +67,7 @@ $ python -m strata check hello.strata
   check OK: 1 model(s) green, dialect duckdb, nothing materialized
 ```
 
-### `strata build`: tipos, fingerprint y lineage
+### `strata build`: types, fingerprint and lineage
 
 ```
 $ python -m strata build hello.strata
@@ -80,10 +80,10 @@ model paid_orders -> contract PaidOrders
   reads        [('orders', 'country'), ('orders', 'gross_amount_usd'), ('orders', 'is_test'), ('orders', 'order_id')]
 ```
 
-### `strata run --seed`: ejecutar de verdad en DuckDB
+### `strata run --seed`: actually run in DuckDB
 
-`--seed` carga datos de demostración (`strata/seed.py`: una tabla `orders`
-con 5 filas, una de ellas marcada `is_test: true`) en un warehouse nuevo:
+`--seed` loads demo data (`strata/seed.py`: an `orders` table with 5 rows,
+one of them marked `is_test: true`) into a new warehouse:
 
 ```
 $ python -m strata run hello.strata --seed -o hello.duckdb
@@ -102,9 +102,9 @@ $ python -m strata run hello.strata --seed -o hello.duckdb
     3, MX, 200.00
 ```
 
-Nota las 4 filas, no 5: la fila `is_test: true` la descarta el `filter`.
-El resultado queda en `hello.duckdb` como una vista `v_paid_orders`; una
-conexión nueva a ese archivo lo confirma:
+Note the 4 rows, not 5: the `filter` discards the `is_test: true` row.
+The result stays in `hello.duckdb` as a `v_paid_orders` view; a new
+connection to that file confirms it:
 
 ```python
 import duckdb
@@ -114,18 +114,18 @@ con.execute("SELECT * FROM v_paid_orders ORDER BY order_id").fetchall()
 #  (3, 'MX', Decimal('200.00')), (4, 'BR', Decimal('75.50'))]
 ```
 
-"Nada se publica hasta que el pin pasa": si una fila no cumpliera
-`nonnull` o el tipo físico de una columna no coincidiera con el contrato,
-`run` fallaría fuerte (`PinError`) y `v_paid_orders` no se tocaría — ver
+"Nothing gets published until the pin passes": if a row didn't satisfy
+`nonnull` or a column's physical type didn't match the contract,
+`run` would fail loud (`PinError`) and `v_paid_orders` would be untouched — see
 `docs/strict-contracts.md`.
 
-## Siguientes pasos
+## Next steps
 
-- `docs/syntax-reference.md`: cada construcción del lenguaje implementada
-  hoy, con su propio ejemplo verificado.
-- `docs/tutorial.md`: un pipeline más completo construido paso a paso
-  (join, agregación, condicionales, ventanas, tests declarativos).
-- `spec/grammar.md`: la gramática formal.
-- `docs/*.md` restantes: profundizan en features específicas (JSON/arrays,
-  incremental, cardinalidad de joins, tipos anidados, semántica de
-  warehouse, adaptadores).
+- `docs/syntax-reference.md`: each language construct implemented
+  today, with its own verified example.
+- `docs/tutorial.md`: a more complete pipeline built step by step
+  (join, aggregation, conditionals, windows, declarative tests).
+- `spec/grammar.md`: the formal grammar.
+- remaining `docs/*.md`: deep dives into specific features (JSON/arrays,
+  incremental, join cardinality, nested types, warehouse
+  semantics, adapters).

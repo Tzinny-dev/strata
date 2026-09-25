@@ -1,34 +1,33 @@
-# Incrementalidad y backfills
+# Incrementality and backfills
 
-Sin sintaxis nueva del autor: la incrementalidad la decide el motor, sobre
-capas versionadas, nunca con `INSERT` que mute lo publicado (propuesta §43 y
-§179). Esta entrega cierra §4 con dos piezas:
+No new syntax for the author: incrementality is decided by the engine, over
+versioned layers, never with an `INSERT` that mutates what was published
+(proposal §43 and §179). This delivery closes §4 with two pieces:
 
-1. `run --only-stale` reconstruye el conjunto mínimo por código **y** por
-   datos (antes, cualquier cambio de datos reconstruía todo).
-2. `strata backfill` re-ejecuta con datos corregidos bajo una razón
-   explícita, auditada en el historial junto al run corregido.
+1. `run --only-stale` rebuilds the minimal set by code **and** by data
+   (previously, any data change rebuilt everything).
+2. `strata backfill` re-runs with corrected data under an explicit reason,
+   audited in the history next to the corrected run.
 
-## Staleness por fuente
+## Staleness per source
 
-Cada run congela `source_fingerprints` (hash de esquema + filas por source).
-En `--only-stale`, el run actual compara fuente a fuente contra el último
-run con snapshots de la rama:
+Each run freezes `source_fingerprints` (schema hash + rows per source).
+Under `--only-stale`, the current run compares source by source against the
+latest run with snapshots of the branch:
 
-- Solo los modelos downstream de las fuentes cambiadas se reconstruyen,
-  más los que cambiaron de código (transitivo vía fingerprints, como antes).
-- Las ramas intactas conservan sus snapshots sin tocarse.
-- Sin cambios: `everything up to date (nothing to do)`, sin escribir nada.
-- El parche de rollback/warehouse distinto se mantiene: si la vista live no
-  expone el snapshot del último run, el modelo se reconstruye.
+- Only the models downstream of the changed sources are rebuilt,
+  plus those whose code changed (transitive via fingerprints, as before).
+- Intact branches keep their snapshots untouched.
+- No changes: `everything up to date (nothing to do)`, nothing written.
+- The rollback/different-warehouse patch is kept: if the live view does
+  not expose the latest run's snapshot, the model is rebuilt.
 
-El conjunto reconstruido incluye las dependencias de los stale (el
-materializador siempre construye dependencias transitivas: leer una vista
-live rancia sería peor que recomputar; si el contenido coincide, el snapshot
-existente se reutiliza por identidad, nunca se sobrescribe). Cambiar un
-override a una tabla de contenido idéntico no reconstruye: los hashes se
-resuelven a través de los overrides, así que el contenido manda, no los
-nombres.
+The rebuilt set includes the stale's dependencies (the
+materializer always builds transitive dependencies: reading a stale live
+view would be worse than recomputing; if the content matches, the existing
+snapshot is reused by identity, never overwritten). Changing an
+override to a table with identical content does not rebuild: hashes are
+resolved through the overrides, so content rules, not names.
 
 ## Backfill
 
@@ -37,104 +36,108 @@ strata backfill module.strata <run_id> --source orders=orders_fixed \
     --reason "corrected upstream extract" -o warehouse.duckdb
 ```
 
-- Parte del contexto del run indicado (modelos, rama, overrides) y lo
-  corrige: `--models m1,m2` recorta la selección, `--source s=t` repetible
-  apunta fuentes a tablas corregidas (gana al override del run).
-- `--reason` es obligatorio: sin razón no hay backfill, solo un run.
-- Registra `backfill_of` + `reason` en la entrada del historial; `strata
-  replay <id>` los muestra. La selección se reconstruye en mínimo (stale),
-  así que corregir una fuente solo toca su downstream.
-- Errores E085: run desconocido, modelo desconocido, `--source` mal
-  formado o con source desconocida, y cualquier `PinError` de la
-  materialización (incluidas violaciones de cardinalidad o de contrato).
+- It starts from the context of the given run (models, branch, overrides) and
+  corrects it: `--models m1,m2` trims the selection, the repeatable
+  `--source s=t` points sources at corrected tables (it wins over the run's
+  override).
+- `--reason` is mandatory: without a reason there is no backfill, just a
+  run.
+- It records `backfill_of` + `reason` in the history entry; `strata
+  replay <id>` shows them. The selection is rebuilt as minimal (stale),
+  so correcting a source only touches its downstream.
+- Errors E085: unknown run, unknown model, malformed `--source`
+  or with an unknown source, and any materialization `PinError`
+  (including cardinality or contract violations).
 
-Un backfill no reescribe historia: el run corregido sigue intacto para
-`rollback`/`replay`/`verify`, y el nuevo run tiene su propio id de
-contenido (mismos datos + misma selección = mismo id, idempotente).
+A backfill does not rewrite history: the corrected run stays intact for
+`rollback`/`replay`/`verify`, and the new run has its own content id
+(same data + same selection = same id, idempotent).
 
-## Merge por fila (`incremental merge_strategy`)
+## Row-level merge (`incremental merge_strategy`)
 
-Distinto del punto anterior (que decide qué **modelos** reconstruir):
-`merge_strategy: append`/`upsert` decide qué **filas**, dentro de un modelo,
-entran a la nueva snapshot sin releer todo lo ya procesado.
+Distinct from the previous point (which decides which **models** to
+rebuild): `merge_strategy: append`/`upsert` decides which **rows**, within a
+model, enter the new snapshot without rereading everything already
+processed.
 
 ```strata
 model m {
   from orders
   incremental
-  merge_strategy: upsert      -- o "append"; "replace" (default) es full rebuild
-  merge_keys: [id]            -- solo para upsert
-  cdc_column: updated_at      -- obligatorio para append/upsert
+  merge_strategy: upsert      -- or "append"; "replace" (default) is full rebuild
+  merge_keys: [id]            -- only for upsert
+  cdc_column: updated_at      -- required for append/upsert
 }
 ```
 
-En cada run que no sea el primero para ese modelo, `exec.materialize` ubica
-la snapshot previa (`snap_<run_id>_<modelo>` detrás de la vista `v_<modelo>`
-actual) y calcula el delta como las filas del recómputo completo con
-`cdc_column > MAX(cdc_column)` de esa snapshot:
+On every run that is not the first for that model, `exec.materialize`
+locates the previous snapshot (`snap_<run_id>_<model>` behind the current
+`v_<model>` view) and computes the delta as the rows of the full
+recomputation with `cdc_column > MAX(cdc_column)` from that snapshot:
 
-- `append`: `snapshot_previa UNION ALL delta`. No deduplica: una fila con la
-  misma `merge_keys` que una anterior queda duplicada a propósito.
-- `upsert`: filas de la snapshot previa cuyas `merge_keys` **no** aparecen en
-  el delta, más el delta completo (antijoin + union, nunca `NOT IN` para
-  evitar la semántica de `NULL`). Una fila del delta reemplaza cualquier fila
-  previa con las mismas claves.
+- `append`: `previous_snapshot UNION ALL delta`. No dedup: a row with the
+  same `merge_keys` as a previous one stays duplicated on purpose.
+- `upsert`: rows from the previous snapshot whose `merge_keys` do **not**
+  appear in the delta, plus the full delta (antijoin + union, never `NOT IN`
+  to avoid `NULL` semantics). A delta row replaces any previous row with the
+  same keys.
 
-Restricciones verificadas en compilación (no en ejecución):
-`merge_strategy` desconocido (E086), `upsert`/`append` sobre un modelo con
-`group`/`aggregate` (E087 — reagregar solo el delta sin releer todo lo ya
-fusionado no es sonante, así que se rechaza en vez de producir un agregado
-incorrecto en silencio), falta de `cdc_column` como columna de salida real
-(E088), y `upsert` sin `merge_keys` válidas (E089). `replace` (o ningún
-`merge_strategy`) no tiene requisitos extra: sigue siendo el rebuild
-completo de siempre.
+Constraints checked at compile time (not at execution):
+unknown `merge_strategy` (E086), `upsert`/`append` on a model with
+`group`/`aggregate` (E087 — re-aggregating only the delta without rereading
+everything already merged is not sound, so it is rejected instead of
+silently producing an incorrect aggregate), missing `cdc_column` as an actual
+output column (E088), and `upsert` without valid `merge_keys` (E089).
+`replace` (or no `merge_strategy`) has no extra
+requirements: it remains the full rebuild as always.
 
-**Pushdown a la fuente (cerrado 2026-09-19)**: cuando `cdc_column` es
-resoluble dentro del scope de la propia subconsulta base —un passthrough
-directo de la fuente, o un `let` ya computado ahí— y el modelo no tiene
-`join`/set-op/`expand`, el filtro `cdc_column > watermark` se agrega a
-`plan.preds` **antes** de compilar el SQL (el mismo mecanismo que ya usa
-`filter`), así que el propio `WHERE` de la subconsulta base recorta lo que
-se lee, no un filtro posterior sobre el recómputo completo:
-`_pushdown_base_expr` en `strata/exec.py` decide la elegibilidad;
-`sqlgen._lit()` ganó soporte para literales `datetime.date`/
-`datetime.datetime` (el watermark se lee con `MAX(cdc_column)` contra la
-snapshot anterior, no se parsea de texto Strata) para poder embeber el
-valor. Verificado inspeccionando el SQL generado, no solo el resultado:
-el `WHERE` aparece dentro del CTE `base`, y `__full` (la envoltura del
-camino anterior) no aparece en absoluto para este caso.
+**Source pushdown (closed 2026-09-19)**: when `cdc_column` is
+resolvable within the scope of the base subquery itself —a direct
+passthrough of the source, or a `let` already computed there— and the model
+has no `join`/set-op/`expand`, the filter `cdc_column > watermark` is added
+to `plan.preds` **before** compiling the SQL (the same mechanism `filter`
+already uses), so the base subquery's own `WHERE` trims what
+is read, not a later filter over the full recomputation:
+`_pushdown_base_expr` in `strata/exec.py` decides eligibility;
+`sqlgen._lit()` gained support for `datetime.date`/
+`datetime.datetime` literals (the watermark is read with `MAX(cdc_column)`
+against the previous snapshot, not parsed from Strata text) to be able to embed the
+value. Verified by inspecting the generated SQL, not just the result:
+the `WHERE` appears inside the `base` CTE, and `__full` (the wrapper from
+the previous path) does not appear at all in this case.
 
-Fuera de ese caso —`cdc_column` depende de un join, un set-op, un
-`expand`, o solo existe como expresión del `select`/`derive` exterior—
-el comportamiento es exactamente el de antes: se recomputa todo y se
-filtra después (`__full`/`__delta`), correcto pero sin el ahorro de
-escaneo. Nunca falla por esto; es una optimización oportunista, no un
-requisito. La primera ejecución de un modelo (sin snapshot previa)
-siempre es un recómputo completo, sea cual sea `merge_strategy`.
+Outside that case —`cdc_column` depends on a join, a set-op, an
+`expand`, or only exists as an expression of the outer `select`/`derive`—
+the behavior is exactly as before: everything is recomputed and
+filtered afterwards (`__full`/`__delta`), correct but without the
+scan savings. It never fails because of this; it is an opportunistic
+optimization, not a requirement. The first execution of a model (no previous
+snapshot) is always a full recomputation, whatever `merge_strategy` is.
 
-Tests: `tests/test_incremental.py` (validación) y
-`tests/test_incremental_merge.py` (ejecución real en DuckDB): la prueba
-que distingue esto de un rebuild completo (mutar una fila ya fusionada sin
-tocar `cdc_column` no debe verse en el siguiente run), más
-`TestIncrementalPushdown` (el `WHERE` cae dentro del CTE base para
-passthrough/`let`; un `join_left` cae al camino de antes y sigue
-correcto; `cdc_column` de tipo `date` también hace pushdown) y
-`TestDateTimeLiterals` (`_lit()` con `datetime.date`/`datetime.datetime`).
+Tests: `tests/test_incremental.py` (validation) and
+`tests/test_incremental_merge.py` (real execution on DuckDB): the test
+that distinguishes this from a full rebuild (mutating an already-merged row
+without touching `cdc_column` must not show up in the next run), plus
+`TestIncrementalPushdown` (the `WHERE` falls inside the base CTE for
+passthrough/`let`; a `join_left` falls back to the previous path and is
+still correct; a `date`-typed `cdc_column` also does pushdown) and
+`TestDateTimeLiterals` (`_lit()` with `datetime.date`/`datetime.datetime`).
 
-## Límites
+## Limits
 
-- Granularidad mínima efectiva de la staleness por modelo (`run --only-stale`):
-  el **modelo** completo, salvo que declare `incremental merge_strategy:
-  append|upsert` (ver arriba), en cuyo caso el propio modelo decide por fila
-  vía `cdc_column`.
-- `check`/`build`/`plan` no ejecutan: la staleness por datos solo decide en
-  `run --only-stale` y `backfill`. `test` y `replay --execute` materializan
-  completo (verificación, no ahorro).
-- Los runs sin snapshots en el historial (p. ej. `run --stage-only`)
-  no sirven de base para staleness: el primer run con snapshots lo
-  reconstruye todo.
+- Minimum effective granularity of staleness per model (`run --only-stale`):
+  the full **model**, unless it declares `incremental merge_strategy:
+  append|upsert` (see above), in which case the model itself decides per row
+  via `cdc_column`.
+- `check`/`build`/`plan` do not execute: data staleness only decides in
+  `run --only-stale` and `backfill`. `test` and `replay --execute`
+  materialize in full (verification, not savings).
+- Runs without snapshots in the history (e.g. `run --stage-only`)
+  do not serve as a basis for staleness: the first run with snapshots
+  rebuilds everything.
 
-Errores: E085 backfill (ver arriba), E086-E089 `merge_strategy` (ver arriba);
-el resto del vocabulario de runs no cambia. Pendiente: empujar el filtro de
-`cdc_column` a las fuentes (hoy solo recorta el resultado ya recomputado),
-eximir prueba de cardinalidad con unicidad ya pineada, y GC por antigüedad.
+Errors: E085 backfill (see above), E086-E089 `merge_strategy` (see above);
+the rest of the run vocabulary does not change. Pending: push the
+`cdc_column` filter down to the sources (today it only trims the already
+recomputed result), exempt the cardinality test when uniqueness is already
+pinned, and GC by age.

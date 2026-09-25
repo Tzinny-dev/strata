@@ -1,35 +1,35 @@
-# Modo estricto de contratos
+# Strict contract mode
 
-`strata build` conserva su comportamiento permisivo por defecto. Con `--strict`,
-exige que cada modelo comprobado declare `-> contract N`:
+`strata build` keeps its permissive behavior by default. With `--strict`,
+it requires that every checked model declare `-> contract N`:
 
 ```sh
 strata build /home/carlos/Documentos/projects/code/prototype/examples/daily_orders.strata --strict
 strata build /home/carlos/Documentos/projects/code/prototype/examples/daily_orders.strata daily_orders --strict
 ```
 
-Coloca los nombres de modelo antes de `--strict`: el parser actual no admite
-intercalar este flag entre el archivo y los nombres de modelo.
+Put the model names before `--strict`: the current parser does not allow
+interleaving this flag between the file and the model names.
 
-## Alcance y errores
+## Scope and errors
 
-- Sin selección, comprueba todos los modelos del proyecto cargado.
-- Con selección, exige contrato a los modelos seleccionados **y a todas sus
-  dependencias transitivas** comprobadas por el typechecker. Los modelos ajenos
-  a ese grafo no bloquean el build.
-- No exige contratos a las fuentes: estas declaran su propio esquema.
-- Tras el typecheck, si faltan contratos, escribe `E014` en stderr, lista los
-  modelos afectados en orden alfabético y retorna **2**, sin informe de éxito.
-- Los contratos declarados siguen verificándose como siempre: columnas ausentes
-  (E010), tipos incompatibles (E011), nulabilidad (E012), restricciones sobre
-  strings (E013) y contratos desconocidos (E061). Un error previo de análisis
-  conserva su diagnóstico y código de salida **1**.
-- Un build correcto retorna **0** y conserva el informe habitual.
+- With no selection, it checks all models in the loaded project.
+- With a selection, it requires a contract on the selected models **and all
+  their transitive dependencies** checked by the typechecker. Models outside
+  that graph do not block the build.
+- It does not require contracts on sources: these declare their own schema.
+- After the typecheck, if contracts are missing, it writes `E014` to stderr,
+  lists affected models alphabetically and returns **2**, without a success report.
+- Declared contracts keep being verified as always: missing columns (E010),
+  incompatible types (E011), nullability (E012), constraints on strings
+  (E013) and unknown contracts (E061). A prior analysis error keeps its
+  diagnostic and exit code **1**.
+- A successful build returns **0** and keeps the usual report.
 
-Esto es una garantía estática y optativa del comando `build`, no una validación
-física del warehouse ni un modo global para `run`, `compile` o `check`.
-No exige igualdad exacta de columnas: conserva la compatibilidad de contratos
-existente. `lint --strict` permanece independiente: convierte sus advertencias
-en salida 2, mientras que `build --strict` exige contratos, no ausencia de lint.
+This is a static, opt-in guarantee of the `build` command, not a physical
+validation of the warehouse nor a global mode for `run`, `compile` or `check`.
+It does not require exact column equality: it preserves the existing contract
+compatibility. `lint --strict` remains independent: it turns its warnings into
+exit code 2, whereas `build --strict` requires contracts, not the absence of lint.
 
-En CI, usa `build --strict` como paso bloqueante antes de compilar o ejecutar.
+In CI, use `build --strict` as a blocking step before compiling or running.

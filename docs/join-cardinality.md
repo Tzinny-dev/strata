@@ -1,9 +1,9 @@
-# Cardinalidad de joins
+# Join cardinality
 
-Un join puede anotarse con la cardinalidad que promete (`expect many_to_one`
-o `expect one_to_one`). La forma se valida en compilación (E079) y los datos
-la verifican al materializar: contar grupos de claves duplicadas en las
-tablas upstream, y abortar como un pin si aparecen.
+A join can be annotated with the cardinality it promises (`expect many_to_one`
+or `expect one_to_one`). The shape is validated at compile time (E079) and the
+data verifies it when materializing: count groups of duplicate keys in the
+upstream tables, and abort like a pin if any appear.
 
 ```strata
 source orders(ns: "app", dataset: "orders") {
@@ -23,75 +23,74 @@ model profiles {
 }
 ```
 
-## Semántica
+## Semantics
 
-- `many_to_one`: cada fila izquierda casa como mucho con una derecha. Se
-  verifica probando que las claves de la derecha son únicas; los duplicados
-  de la izquierda son "los muchos" y están permitidos.
-- `one_to_one`: además, las claves de la izquierda son únicas.
-- Solo `join_left` y `join_inner`: `anti`/`semi` nunca multiplican filas y
-  la anotación allí es E079. La expectativa limita la *multiplicidad* de los
-  matches, no la preservación (eso lo hace el tipo de join: un `inner`
-  puede seguir descartando filas).
-- Sin anotación no hay comprobación: los joins existentes compilan y se
-  ejecutan exactamente igual que antes.
+- `many_to_one`: each left row matches at most one right row. It is verified
+  by checking that the right keys are unique; the duplicates on the left are
+  "the manys" and are allowed.
+- `one_to_one`: additionally, the left keys are unique.
+- Only `join_left` and `join_inner`: `anti`/`semi` never multiply rows and
+  the annotation there is E079. The expectation limits the *multiplicity* of
+  the matches, not the preservation (that is done by the join type: an
+  `inner` can still drop rows).
+- With no annotation there is no check: existing joins compile and run
+  exactly as before.
 
-## Qué claves valen
+## Which keys count
 
-La condición `on` debe ser un AND de `==` entre columnas base planas (o una
-columna y un literal). Conjunciones que solo filtran filas izquierdas se
-ignoran con seguridad (quitan matches, no los crean); cualquier referencia
-a la tabla derecha fuera de una clave ecuacional limpia es E079, igual que
-las condiciones no-ecuacionales (`>`, `or`, llamadas sobre columnas
-derechas), las comparaciones del mismo lado y la falta de claves. Las claves
-pueden ser compuestas (`on a.x == b.x and a.y == b.y` agrupa por ambas).
+The `on` condition must be an AND of `==` between flat base columns (or a
+column and a literal). Conjunctions that only filter left rows are safely
+ignored (they remove matches, they don't create them); any reference to the
+right table outside of a clean equi-key is E079, as are non-equational
+conditions (`>`, `or`, calls over right columns), same-side comparisons, and
+missing keys. Keys can be composite (`on a.x == b.x and a.y == b.y` groups
+by both).
 
-Las claves de una expresión del lado izquierdo (`upper(email)`, un `let`)
-valen para `many_to_one` — la unicidad de la derecha sigue acotando los
-matches — pero `one_to_one` exige al menos un par que relacione una columna
-izquierda plana con una derecha plana. Lo que no se puede probar contando
-claves se reescribe upstream, en voz alta.
+Keys from a left-side expression (`upper(email)`, a `let`) count for
+`many_to_one` — the uniqueness of the right still bounds the matches — but
+`one_to_one` requires at least one pair relating a flat left column to a flat
+right one. What cannot be proven by counting keys gets rewritten upstream,
+out loud.
 
-## Verificación runtime
+## Runtime verification
 
-Al materializar, por cada join anotado se ejecuta contra las mismas tablas
-que ve el modelo (vistas staged/live según el run, con `source_overrides`
-aplicados):
+When materializing, for each annotated join a query runs against the same
+tables the model sees (staged/live views depending on the run, with
+`source_overrides` applied):
 
 ```sql
 SELECT COUNT(*) FROM (
-  SELECT 1 FROM <tabla> WHERE <k> IS NOT NULL [AND ...]
-  GROUP BY <claves> HAVING COUNT(*) > 1
+  SELECT 1 FROM <table> WHERE <k> IS NOT NULL [AND ...]
+  GROUP BY <keys> HAVING COUNT(*) > 1
 ) t
 ```
 
-Cero es pasar; cualquier otra cosa aborta con `PinError` (`join cardinality
-FAILED [modelo join tabla]: expected many_to_one but ... duplicate key
-groups (...)`) y deja vivo el último dato bueno, como los pins. Las claves
-todas-NULL se excluyen: en un equi-join nunca casan y no pueden explotar
-filas. El éxito se reporta en el informe de pins (`ok m left customers:
+Zero means pass; anything else aborts with `PinError` (`join cardinality
+FAILED [model join table]: expected many_to_one but ... duplicate key
+groups (...)`) and leaves the last good data alive, like pins. All-NULL keys
+are excluded: in an equi-join they never match and cannot explode rows. The
+success is reported in the pins report (`ok m left customers:
 many_to_one (...)`).
 
-La comprobación corre en `materialize` (cubre `run`, `test` y `replay`
-si re-ejecutan); `check`/`build` solo validan la forma (E079). Ejecución
-real solo en DuckDB, como el resto de `exec`.
+The check runs in `materialize` (covering `run`, `test` and `replay`
+if they re-execute); `check`/`build` only validate the shape (E079). Real
+execution only in DuckDB, like the rest of `exec`.
 
-## Dialectos y límites
+## Dialects and limits
 
-- La sintaxis no añade palabras clave: `expect` ya existía y
-  `many_to_one`/`one_to_one` son identificadores contextuales (una errata
-  es `ParseError`). La gramática GBNF los acepta y el muestreador sigue
-  verde.
-- No hay `many_to_many`/`one_to_many`: describirían fanout, no lo
-  impedirían.
-- Un `unique`/`primary_key` declarado no exime la prueba: los flags son
-  declaraciones y los datos pueden violarlos (por eso los pins re chequean
-  `unique` en runtime); la anotación siempre ejecuta su conteo.
-- Coste: una agregación por lado chequeado y por materialización sobre la
-  tabla upstream completa.
+- The syntax adds no keywords: `expect` already existed and
+  `many_to_one`/`one_to_one` are contextual identifiers (a typo is
+  `ParseError`). The GBNF grammar accepts them and the sampler stays green.
+- There is no `many_to_many`/`one_to_many`: they would describe fanout, not
+  prevent it.
+- A declared `unique`/`primary_key` does not exempt the test: the flags are
+  declarations and the data can violate them (that is why pins re-check
+  `unique` at runtime); the annotation always runs its count.
+- Cost: one aggregation per checked side and per materialization over the
+  full upstream table.
 
-Errores: E079 forma/colocación (anti/semi, condición no-ecuacional,
-referencias exóticas a la derecha, sin claves, `one_to_one` sin par
-izquierda-derecha), `ParseError` en la palabra de cardinalidad, `PinError`
-en la violación de datos. Pendiente: eximir la prueba cuando la unicidad ya
-está pineada en el mismo run, y muestreo acotado para dimensiones enormes.
+Errors: E079 shape/placement (anti/semi, non-equational condition, exotic
+right references, no keys, `one_to_one` without a left-right pair),
+`ParseError` on the cardinality word, `PinError` on the data violation.
+Pending: exempt the test when uniqueness is already pinned in the same run,
+and bounded sampling for huge dimensions.

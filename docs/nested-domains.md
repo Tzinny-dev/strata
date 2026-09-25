@@ -1,9 +1,9 @@
-# Tipos anidados y aliases de dominio
+# Nested types and domain aliases
 
-Los arrays anidan a cualquier profundidad sobre escalares, `decimal`/`money`
-y otros arrays, y `domain` declara un alias transparente usable donde se
-escriba un tipo. La compatibilidad sigue siendo estructural e invariante
-(`array(T)` solo casa con `array(T)` exacto, como ya exigía `array_concat`).
+Arrays nest to any depth over scalars, `decimal`/`money`
+and other arrays, and `domain` declares a transparent alias usable wherever a
+type is written. Compatibility remains structural and invariant
+(`array(T)` only matches an exact `array(T)`, as `array_concat` already required).
 
 ```strata
 domain user_id = int64
@@ -23,76 +23,76 @@ model nested {
 }
 ```
 
-## Arrays anidados y parametrizados
+## Nested and parameterized arrays
 
-- Declaración: `array(array(int64))`, `array(decimal(10, 2))`,
-  `array(money(USD))`, a cualquier profundidad. El parser lo acepta de forma
-  recursiva y el checker lo resuelve igual (`type_from_spec`).
-- Construcción homogénea: `array_construct` acepta elementos de cualquier
-  tipo soportado (incluidos arrays, que deben ser idénticos entre sí);
-  al menos un elemento con tipo conocido, como antes. Cada elemento se emite
-  con `CAST` a su tipo (`BIGINT[][]` en DuckDB/Postgres,
-  `ARRAY<ARRAY<INT64>>` en BigQuery, `ARRAY` en Snowflake).
-- Acceso y medida: `array_get(xss, 0)` devuelve el elemento (incluido un
-  array) y `array_length` cuenta posiciones en cualquier array.
-- Concatenación: `array_concat` exige tipos idénticos, anidados incluidos.
-- `union`/`dedup`/`group` y los contratos funcionan sobre columnas anidadas
-  sin cambios (la unificación solo casa tipos iguales; `DISTINCT` verificado
-  en DuckDB sobre arrays anidados).
+- Declaration: `array(array(int64))`, `array(decimal(10, 2))`,
+  `array(money(USD))`, to any depth. The parser accepts it recursively and
+  the checker resolves it the same way (`type_from_spec`).
+- Homogeneous construction: `array_construct` accepts elements of any
+  supported type (including arrays, which must be identical to each other);
+  at least one element with a known type, as before. Each element is emitted
+  with a `CAST` to its type (`BIGINT[][]` in DuckDB/Postgres,
+  `ARRAY<ARRAY<INT64>>` in BigQuery, `ARRAY` in Snowflake).
+- Access and measurement: `array_get(xss, 0)` returns the element (including an
+  array) and `array_length` counts positions in any array.
+- Concatenation: `array_concat` requires identical types, nested ones included.
+- `union`/`dedup`/`group` and contracts work on nested columns
+  without changes (unification only matches equal types; `DISTINCT` verified
+  in DuckDB on nested arrays).
 
-Lo que sigue rechazándose, ruidosamente y a propósito:
+What keeps being rejected, loudly and on purpose:
 
 - `array_contains`, `array_sort`, `array_append`/`prepend`/`remove`/`index_of`
-  sobre elementos no escalares simples (E063): la igualdad y el orden de
-  elementos compuestos, y los arrays multidimensionales rectangulares que
-  Postgres exige, no son portables sin verificación por motor.
-- `array_agg` de un array (E063): agregaría arrays irregulares que Postgres
-  no puede representar.
-- `expand` de un array anidado (E075): la expansión declara columnas de
-  elementos escalares.
-- `array(array)` o `array(decimal)` sin parámetros no son tipos: error de
-  parseo, no de chequeo.
+  on non-simple-scalar elements (E063): equality and ordering of
+  composite elements, and the rectangular multi-dimensional arrays that
+  Postgres requires, are not portable without per-engine verification.
+- `array_agg` of an array (E063): it would aggregate ragged arrays that Postgres
+  cannot represent.
+- `expand` of a nested array (E075): expansion declares columns of
+  scalar elements.
+- `array(array)` or `array(decimal)` without parameters are not types: a parse
+  error, not a checking error.
 
-## Dominios
+## Domains
 
 ```strata
 domain user_id = int64
 domain ids = array(user_id)
 ```
 
-- `domain <nombre> = <tipo>` de primer nivel; el tipo puede ser cualquiera
-  (incluido otro dominio). Uso en `source`, `contract`, `cast` y elementos
-  de array. Transparente: la compatibilidad de contratos, los `reads`/lineage
-  y los tipos físicos siguen al tipo subyacente (`user_id` es `int64` a
-  todos los efectos a partir del chequeo).
-- Los dominios se resuelven al cargar el proyecto, fallen pronto: un ciclo
-  (`a = b`, `b = a`, o auto-referencia) y un nombre no declarado son E078,
-  aunque el alias no llegue a usarse. Una `source` sin modelos que la lean
-  no se chequea (lazy, como antes), así que su E078 aparece al usarla.
-- `fmt` hace round-trip (`domain user_id = int64`) y el fingerprint es
-  estable. La gramática GBNF acepta la declaración y las referencias (un
-  identificador en posición de tipo); el muestreador determinista sigue
-  verde porque todo lo que genera parsea.
+- `domain <name> = <type>` at the top level; the type can be anything
+  (including another domain). Used in `source`, `contract`, `cast` and array
+  elements. Transparent: contract compatibility, the `reads`/lineage
+  and the physical types follow the underlying type (`user_id` is `int64` for
+  all purposes from checking onward).
+- Domains are resolved when the project loads, failing early: a cycle
+  (`a = b`, `b = a`, or self-reference) and an undeclared name are E078,
+  even if the alias is never used. A `source` with no models reading it is
+  not checked (lazy, as before), so its E078 shows up when it is used.
+- `fmt` round-trips (`domain user_id = int64`) and the fingerprint is
+  stable. The GBNF grammar accepts the declaration and the references (an
+  identifier in type position); the deterministic sampler stays
+  green because everything it generates parses.
 
-## Dialectos y límites
+## Dialects and limits
 
-- Ejecución real solo en DuckDB (literales `[[1,2],[3]]`, `UNNEST` de un
-  nivel, `DISTINCT`/`UNION` sobre anidados, casts `BIGINT[][]` y
-  `DECIMAL(10,2)[]`, todo verificado); los otros tres motores verificados
-  por patrón de emisión.
-- Los tipos físicos de pins (`exec`) reutilizan el mapeo recursivo
-  (`BIGINT[][]`, `DECIMAL(10,2)[]`); `money` es `DECIMAL(38,2)` también
-  anidado.
-- `decimal`/`money` como elementos de array se pueden declarar, medir,
-  acceder y concatenar, pero las operaciones elemento a elemento los
-  rechazan igual que a los anidados (E063): quedan para una entrega con
-  verificación por motor.
-- Los tipos de firma de `fn` (`List<...>`) siguen siendo opacos y no
-  resuelven dominios; tampoco hay validación por predicado (eso es
-  territorio de constraints/masking, no de aliases).
+- Real execution only in DuckDB (literals `[[1,2],[3]]`, one-level
+  `UNNEST`, `DISTINCT`/`UNION` on nested values, `BIGINT[][]` and
+  `DECIMAL(10,2)[]` casts, all verified); the other three engines verified by
+  emission pattern.
+- The physical types of pins (`exec`) reuse the recursive
+  mapping (`BIGINT[][]`, `DECIMAL(10,2)[]`); `money` is `DECIMAL(38,2)` also
+  when nested.
+- `decimal`/`money` as array elements can be declared, measured,
+  accessed and concatenated, but element-wise operations
+  reject them just like nested ones (E063): they are left for a delivery with
+  per-engine verification.
+- `fn` signature types (`List<...>`) remain opaque and do not
+  resolve domains; nor is there predicate validation (that is
+  constraints/masking territory, not aliases).
 
-Errores: E063 elementos de array no soportados, E078 dominio desconocido o
-cíclico, más los existentes de cada función. Pendiente: `struct`/`map`
-(solo mencionados en la propuesta, sin diseño), operaciones elemento a
-elemento sobre `decimal`/`money`/anidados con verificación por motor,
-`expand`/`array_agg` anidados y validación por predicado en dominios.
+Errors: E063 unsupported array elements, E078 unknown or
+cyclic domain, plus the existing ones of each function. Pending: `struct`/`map`
+(only mentioned in the proposal, no design), element-wise
+operations over `decimal`/`money`/nested values with per-engine verification,
+nested `expand`/`array_agg` and predicate validation on domains.

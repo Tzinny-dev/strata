@@ -1,57 +1,58 @@
 # VS Code extension
 
-La extensión **Strata — Tzinny** (`Tzinny-dev.strata-tzinny`) da soporte
-a archivos `.strata` en VS Code: resaltado de sintaxis y un cliente LSP
-construido sobre `strata lsp`.
+The **Strata — Tzinny** extension (`Tzinny-dev.strata-tzinny`) supports
+`.strata` files in VS Code: syntax highlighting and an LSP client
+built on `strata lsp`.
 
-## Instalar
+## Install
 
-Desde la [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=Tzinny-dev.strata-tzinny)
-o por CLI:
+From the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=Tzinny-dev.strata-tzinny)
+or via CLI:
 
 ```bash
 code --install-extension Tzinny-dev.strata-tzinny
 ```
 
-## Requisitos
+## Requirements
 
-- `strata` en el `PATH` (`pip install strata-lang`, `uv tool install
-  strata-lang` o el binario standalone), **o** bien la setting
-  `strata.binaryPath` apuntando al binario
-  (`"/ruta/a/.venv/bin/strata"` para entornos venv).
-- El servidor LSP es el propio CLI: `strata lsp` (stdio JSON-RPC, sin
-  dependencias extra).
+- `strata` on the `PATH` (`pip install strata-lang`, `uv tool install
+  strata-lang` or the standalone binary), **or** the setting
+  `strata.binaryPath` pointing to the binary
+  (`"/path/to/.venv/bin/strata"` for venv environments).
+- The LSP server is the CLI itself: `strata lsp` (stdio JSON-RPC, no
+  extra dependencies).
 
-Si el binario no se encuentra, la extensión lo reporta — la acción
-**Strata: Show Version** (`strata.showVersion`) comprueba el binario
-configurado y muestra el error con el hint de `strata.binaryPath`.
+If the binary is not found, the extension reports it — the
+**Strata: Show Version** action (`strata.showVersion`) checks the
+configured binary and shows the error with the `strata.binaryPath`
+hint.
 
-## Qué aporta
+## What it provides
 
-- **Resaltado de sintaxis** (grammar TextMate `source.strata`) y
-  configuración de lenguaje (`//` comentarios, cierre de pares).
-- **Diagnostics** en vivo — el mismo `Checker` que ejecuta
-  `strata check`: tipos, contratos y lineage (E070, E030…).
-- **Completion** — modelos, sources, funciones del catálogo y columnas.
-- **Hover** — tipo de la columna bajo el cursor.
-- **Definition** — salto al modelo de origen de una columna.
+- **Syntax highlighting** (TextMate grammar `source.strata`) and
+  language configuration (`//` comments, auto-closing pairs).
+- **Diagnostics** live — the same `Checker` that runs
+  `strata check`: types, contracts and lineage (E070, E030…).
+- **Completion** — models, sources, catalog functions and columns.
+- **Hover** — type of the column under the cursor.
+- **Definition** — jump to the source model of a column.
 
-## Ajustes
+## Settings
 
-| Setting | Default | Descripción |
+| Setting | Default | Description |
 |---|---|---|
-| `strata.binaryPath` | `"strata"` | Ruta al binario `strata` que se lanza como servidor LSP |
+| `strata.binaryPath` | `"strata"` | Path to the `strata` binary that is launched as the LSP server |
 
-## Desarrollo (rebuild local)
+## Development (local rebuild)
 
 ```bash
 cd vscode
 npm install
 npm run compile          # tsc → out/extension.js
-npx vsce package         # → strata-tzinny-<versión>.vsix
-code --install-extension strata-tzinny-<versión>.vsix
+npx vsce package         # → strata-tzinny-<version>.vsix
+code --install-extension strata-tzinny-<version>.vsix
 ```
 
-La versión de la extensión sigue la de `strata-lang` (hoy `0.1.5`).
-Ver también `guide/binary-standalone.md` (entrada `strata lsp` en el
-binario standalone) y el `README` de `vscode/` en el repositorio.
+The extension version follows that of `strata-lang` (currently `0.1.5`).
+See also `guide/binary-standalone.md` (`strata lsp` entry in the
+standalone binary) and the `README` of `vscode/` in the repository.

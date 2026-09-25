@@ -1,4 +1,4 @@
-# Tutorial: de una fuente a un resumen con ventana
+# Tutorial: from a source to a windowed summary
 
 ```mermaid
 flowchart LR
@@ -10,14 +10,14 @@ flowchart LR
   style V1 fill:#10b981,stroke:#fff,color:#fff
 ```
 
-Construimos un pipeline real, paso a paso, sobre los mismos datos de
-`strata/seed.py` (`--seed`): una tabla `orders` con 5 filas (una marcada
-`is_test`) y `refunds` con 2 reembolsos. Cada paso agrega código al mismo
-archivo; el archivo acumulado se verificó completo contra el CLI real en
-cada paso, no solo el fragmento nuevo. Los números que aparecen son la
-salida real de `strata run`/`strata test`, no un cálculo hecho a mano.
+We build a real pipeline, step by step, over the same data from
+`strata/seed.py` (`--seed`): an `orders` table with 5 rows (one marked
+`is_test`) and `refunds` with 2 refunds. Each step adds code to the same
+file; the accumulated file was verified in full against the real CLI at
+each step, not just the new fragment. The numbers that appear are the
+actual output of `strata run`/`strata test`, not a hand calculation.
 
-## Paso 1 — una fuente, un modelo, un filtro
+## Step 1 — one source, one model, one filter
 
 ```strata
 source orders(ns: "crm", dataset: "orders") {
@@ -44,10 +44,10 @@ model paid_orders {
 }
 ```
 
-`strata check` en este punto: 1 modelo verde, sin contrato todavía
+`strata check` at this point: 1 green model, no contract yet
 (`pins (none)`).
 
-## Paso 2 — sumar `refunds` con un join
+## Step 2 — add `refunds` with a join
 
 ```strata
 source refunds(ns: "crm", dataset: "refunds") {
@@ -74,10 +74,10 @@ model paid_orders {
 }
 ```
 
-`join_left` deja pasar los pedidos sin reembolso (`discount` cae a `0` vía
-`coalesce`); un `join_inner` los habría descartado.
+`join_left` lets orders without a refund through (`discount` falls back
+to `0` via `coalesce`); a `join_inner` would have discarded them.
 
-## Paso 3 — fijar el contrato
+## Step 3 — pin the contract
 
 ```strata
 contract PaidOrder {
@@ -89,29 +89,29 @@ contract PaidOrder {
 }
 
 model paid_orders -> contract PaidOrder {
-  # ... mismo cuerpo del paso 2 ...
+  # ... same body as step 2 ...
 }
 ```
 
-`strata check` ahora reporta los pins del contrato:
-`paid_orders.country:nonnull+enum{ES,MX,CO,BR}`, etc. Si una fila trajera
-un país fuera de `{ES, MX, CO, BR}`, `run` fallaría con `PinError` sin
-publicar nada.
+`strata check` now reports the contract's pins:
+`paid_orders.country:nonnull+enum{ES,MX,CO,BR}`, etc. If a row brought
+in a country outside `{ES, MX, CO, BR}`, `run` would fail with `PinError`
+without publishing anything.
 
-## Paso 4 — agregación en un segundo modelo
+## Step 4 — aggregation in a second model
 
-**Nota importante, encontrada verificando este mismo tutorial**: dentro de
-`aggregate { }`, cada salida debe ser o una clave del `group` o una
-llamada directa a una función agregada (`sum(...)`, `count(...)`, ...) —
-`case(sum(x) >= 100, ...)` NO vale ahí (`E050`), porque no es en sí misma
-una llamada agregada aunque contenga una. Y si agregas un `select { }`
-*después* de `aggregate { }` en el mismo modelo, con nombres de columna
-repetidos, ambos bloques emiten sus columnas — el modelo termina con las
-columnas duplicadas en el `SELECT` final y DuckDB lo rechaza
-(`Column "orders" ... cannot be referenced before it is defined`). La
-forma correcta: la agregación pura en su propio modelo, y cualquier
-columna derivada de la agregación (`case`, `over(...)`) en un modelo
-siguiente que lee al primero.
+**Important note, found by verifying this very tutorial**: inside
+`aggregate { }`, each output must be either a key of the `group` or a
+direct call to an aggregate function (`sum(...)`, `count(...)`, ...) —
+`case(sum(x) >= 100, ...)` is NOT allowed there (`E050`), because it is
+not itself an aggregate call even though it contains one. And if you add
+a `select { }` *after* `aggregate { }` in the same model, with repeated
+column names, both blocks emit their columns — the model ends up with
+duplicated columns in the final `SELECT` and DuckDB rejects it
+(`Column "orders" ... cannot be referenced before it is defined`). The
+correct shape: pure aggregation in its own model, and any column derived
+from the aggregation (`case`, `over(...)`) in a following model that
+reads the first one.
 
 ```strata
 contract DailyRevenue {
@@ -130,7 +130,7 @@ model daily_revenue -> contract DailyRevenue {
 }
 ```
 
-## Paso 5 — clasificar y comparar contra el total del país
+## Step 5 — classify and compare against the country total
 
 ```strata
 contract RevenueSummary {
@@ -156,12 +156,12 @@ model revenue_summary -> contract RevenueSummary {
 }
 ```
 
-`money` no es un tipo "numérico" a efectos de comparación (a diferencia de
-`int64`/`float64`/`decimal`) — de ahí el `cast(150, "money")` en vez de
-comparar contra `150` directo (que da `E051 cannot compare money(USD)
+`money` is not a "numeric" type for comparison purposes (unlike
+`int64`/`float64`/`decimal`) — hence the `cast(150, "money")` instead of
+comparing against `150` directly (which gives `E051 cannot compare money(USD)
 with int64`).
 
-## Paso 6 — un test declarativo
+## Step 6 — a declarative test
 
 ```strata
 test revenue_summary {
@@ -169,7 +169,7 @@ test revenue_summary {
 }
 ```
 
-## El pipeline completo
+## The complete pipeline
 
 ```strata
 source orders(ns: "crm", dataset: "orders") {
@@ -256,7 +256,7 @@ test revenue_summary {
 }
 ```
 
-## Corrida real
+## Real run
 
 ```
 $ python -m strata run tutorial.strata --seed -o tutorial.duckdb
@@ -277,33 +277,33 @@ con.execute("SELECT * FROM v_revenue_summary ORDER BY order_day, country").fetch
 #  ('MX', date(2026, 9, 2), Decimal('200.00'), 'large', Decimal('200.00'))]
 ```
 
-Verificación a mano: el pedido 5 (CO, `is_test: true`) queda fuera desde
-el paso 1. ES del 2026-09-01 son los pedidos 1 (120.00, sin reembolso) y 2
-(90.00, reembolso 10.00 → neto 80.00): `net_total = 200.00`, `"large"`.
-BR del 2026-09-02 es el pedido 4 (75.50, reembolso 5.50 → neto 70.00):
-`"small"`. MX del 2026-09-02 es el pedido 3 (200.00, sin reembolso):
-`"large"`. `country_share` de ES y MX coincide con su propio `net_total`
-porque cada país solo tiene una fila en este dataset de demostración — con
-más días por país se vería la suma acumulada real.
+Manual verification: order 5 (CO, `is_test: true`) has been out since
+step 1. ES on 2026-09-01 is orders 1 (120.00, no refund) and 2
+(90.00, refund 10.00 → net 80.00): `net_total = 200.00`, `"large"`.
+BR on 2026-09-02 is order 4 (75.50, refund 5.50 → net 70.00):
+`"small"`. MX on 2026-09-02 is order 3 (200.00, no refund):
+`"large"`. ES's and MX's `country_share` matches its own `net_total`
+because each country only has one row in this demo dataset — with
+more days per country you would see the real accumulated sum.
 
-## De paso: dos bugs reales que esto destapó
+## Incidentally: two real bugs this uncovered
 
-Escribir y correr este tutorial de punta a punta (no solo `strata check`)
-encontró dos bugs reales en `strata test`, ya corregidos:
+Writing and running this tutorial end to end (not just `strata check`)
+found two real bugs in `strata test`, already fixed:
 
-1. `strata test` fallaba siempre con `NameError: name 'duckdb' is not
-   defined` (import faltante en `cmd_test`, `strata/cli.py`).
-2. `expect row_count >= N` (cualquier operador que no fuera `==`) se
-   evaluaba como igualdad exacta, ignorando el operador escrito
+1. `strata test` always failed with `NameError: name 'duckdb' is not
+   defined` (missing import in `cmd_test`, `strata/cli.py`).
+2. `expect row_count >= N` (any operator other than `==`) was
+   evaluated as exact equality, ignoring the written operator
    (`strata/exec.py::run_tests`).
 
-Cobertura de regresión: `tests/test_declarative_tests.py`.
+Regression coverage: `tests/test_declarative_tests.py`.
 
-## Siguientes pasos
+## Next steps
 
-- `docs/syntax-reference.md`: cada construcción del lenguaje, por separado.
+- `docs/syntax-reference.md`: each language construct, one at a time.
 - `docs/join-cardinality.md`, `docs/incremental.md`,
   `docs/json-arrays.md`, `docs/setops.md`, `docs/nested-domains.md`,
-  `docs/§2-warehouse-semantics.md`: features que este tutorial no cubrió
-  (cardinalidad de joins, incrementalidad real, JSON/arrays, set-ops,
-  tipos anidados, freshness/partitioning).
+  `docs/§2-warehouse-semantics.md`: features this tutorial didn't cover
+  (join cardinality, real incremental processing, JSON/arrays, set-ops,
+  nested types, freshness/partitioning).

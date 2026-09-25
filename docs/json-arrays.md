@@ -1,8 +1,8 @@
-# JSON y arrays: acceso básico
+# JSON and arrays: basic access
 
-Primera entrega del catálogo de colecciones. No requiere sintaxis nueva de
-llamadas; los esquemas del prototipo escriben `array(int64)`, no `array<int64>`
-(esta última es la representación del tipo en los informes).
+First delivery of the collection catalog. It requires no new call syntax; the
+prototype schemas write `array(int64)`, not `array<int64>` (the latter is the
+type representation in the reports).
 
 ```strata
 source events(ns: "app", dataset: "events") {
@@ -25,70 +25,71 @@ model summary -> contract Result {
 }
 ```
 
-## Semántica
+## Semantics
 
-| Función | Retorno | Reglas |
+| Function | Return | Rules |
 | --- | --- | --- |
-| `json_get(doc, key)` | `json` nullable | Miembro de objeto por clave literal o por clave dinámica (expresión de texto). Conserva JSON null y contenedores. Miembro ausente, base SQL NULL o base no-objeto → SQL NULL. |
-| `json_value(doc, key)` | `string` nullable | Escalar como texto sin comillas JSON, por clave literal o dinámica. Miembro ausente, JSON null, objeto o array → SQL NULL. |
-| `json_path(doc, "$...")` | `json` nullable | Consulta por ruta `$...` con pasos de miembro e índice (`$.a.b`, `$.xs[0]`, `$` solo). Base JSON null, ruta inexistente o estructura no coincidente → SQL NULL. La ruta debe ser un literal string: los filtros, el descenso recursivo `$..`, los comodines y las claves entrecomilladas se rechazan en compilación con E074. |
-| `array_length(xs)` | `int64` | Cuenta posiciones, incluidos elementos NULL. Array vacío → 0; array SQL NULL → SQL NULL. Hereda nulabilidad del array. |
-| `array_get(xs, index)` | tipo del elemento, nullable | Índice entero desde **cero**, también dinámico. Índice NULL, negativo o fuera de rango → SQL NULL. |
+| `json_get(doc, key)` | `json` nullable | Object member by literal key or by dynamic key (text expression). Preserves JSON null and containers. Missing member, SQL NULL base, or non-object base → SQL NULL. |
+| `json_value(doc, key)` | `string` nullable | Scalar as text without JSON quotes, by literal or dynamic key. Missing member, JSON null, object, or array → SQL NULL. |
+| `json_path(doc, "$...")` | `json` nullable | Query by path `$...` with member and index steps (`$.a.b`, `$.xs[0]`, `$` alone). JSON null base, nonexistent path, or non-matching structure → SQL NULL. The path must be a string literal: filters, recursive descent `$..`, wildcards, and quoted keys are rejected at compile time with E074. |
+| `array_length(xs)` | `int64` | Counts positions, including NULL elements. Empty array → 0; SQL NULL array → SQL NULL. Inherits nullability from the array. |
+| `array_get(xs, index)` | element type, nullable | Integer index starting at **zero**, also dynamic. NULL, negative, or out-of-range index → SQL NULL. |
 
-Las claves literales de `json_get`/`json_value` son ASCII que coinciden con
-`[A-Za-z_][A-Za-z0-9_]*`, con distinción de mayúsculas. No son rutas: `"$.x"`,
-`"x.y"` y `""` se rechazan con E074 (para rutas está `json_path`). Se puede
-componer `json_value(json_get(payload, "detail"), "name")`.
+The literal keys of `json_get`/`json_value` are ASCII matching
+`[A-Za-z_][A-Za-z0-9_]*`, case-sensitive. They are not paths: `"$.x"`,
+`"x.y"` and `""` are rejected with E074 (for paths there is `json_path`). You
+can compose `json_value(json_get(payload, "detail"), "name")`.
 
-Una clave **no literal** (columna `string` o expresión de texto) es una clave
-dinámica: se resuelve en runtime y siempre es una búsqueda de miembro **exacta**,
-nunca una ruta. Con `key = "a.b"` se lee el miembro llamado `a.b`, no el anidado
-`a → b`; `key` vacío o SQL NULL devuelve SQL NULL.
+A **non-literal** key (`string` column or text expression) is a dynamic key:
+it is resolved at runtime and is always an **exact** member lookup, never a
+path. With `key = "a.b"` the member named `a.b` is read, not the nested
+`a → b`; an empty `key` or SQL NULL returns SQL NULL.
 
 ```strata
 model by_field { from events select { pick = json_get(payload, field) } }
 ```
 
-Solo se emite donde el dialecto puede expresar esa búsqueda exacta (DuckDB,
-PostgreSQL y Snowflake); en BigQuery la compilación falla loud (ver dialectos).
-No se valida en runtime que la clave sea un nombre de miembro simple: una clave
-que empiece por `$` conserva el comportamiento de ruta de DuckDB, y
-`json_get(doc, key)` con la clave `'$'` devuelve el documento completo en ese motor.
+It is only emitted where the dialect can express that exact lookup (DuckDB,
+PostgreSQL and Snowflake); in BigQuery compilation fails loud (see dialects).
+It is not validated at runtime that the key is a simple member name: a key
+starting with `$` keeps DuckDB's path behavior, and
+`json_get(doc, key)` with the key `'$'` returns the full document in that engine.
 
-`json_path` emite siempre la ruta **entrecomillada** como literal de string (o de
-`jsonpath` en PostgreSQL): emitirla sin comillas es SQL inválido en los cuatro
-motores. La ruta se valida en compilación con `functions.json_path_problem`, la
-misma definición que usa el generador: solo se admite el subconjunto que se
-comporta igual en los cuatro motores (raíz `$` más pasos de miembro e índice).
-Se rechazan con E074 los filtros, el descenso recursivo `$..`, los comodines
-(`$[*]`) y las claves entrecomilladas (`$['a.b']`, `$."a.b"`): comprobado contra
-DuckDB y PostgreSQL reales, `$['a.b']` es un error de sintaxis en ambos (solo
-BigQuery lo admite), `$."a.b"` es solo SQL/JSON (DuckDB y PostgreSQL) y `$[*]`
-devuelve un array de coincidencias en DuckDB pero la primera coincidencia en
-PostgreSQL, así que no puede declarar `json` en ambos.
+`json_path` always emits the path **quoted** as a string literal (or as a
+`jsonpath` literal in PostgreSQL): emitting it unquoted is invalid SQL in the
+four engines. The path is validated at compile time with
+`functions.json_path_problem`, the same definition the generator uses: only
+the subset that behaves the same in the four engines is allowed (root `$`
+plus member and index steps).
+Filters, recursive descent `$..`, wildcards
+(`$[*]`) and quoted keys (`$['a.b']`, `$."a.b"`) are rejected with E074:
+checked against real DuckDB and PostgreSQL, `$['a.b']` is a syntax error in
+both (only BigQuery accepts it), `$."a.b"` is SQL/JSON only (DuckDB and
+PostgreSQL) and `$[*]` returns an array of matches in DuckDB but the first
+match in PostgreSQL, so it cannot be declared `json` in both.
 
-El contenedor debe tener tipo conocido: `array_get(null, 0)` se rechaza; una
-columna nullable `array(int64)` sí es válida. Los elementos del array pueden
-ser NULL aunque el array sea `nonnull`. Se aceptan los tipos escalares simples
-actuales: int64, float64, string, bool, date, timestamp, uuid y json.
+The container must have a known type: `array_get(null, 0)` is rejected; a
+nullable `array(int64)` column is valid. Array elements can be NULL even if
+the array is `nonnull`. The current simple scalar types are accepted: int64,
+float64, string, bool, date, timestamp, uuid and json.
 
-Errores: E062 aridad, E063 tipos (incluido contenedor NULL sin tipo y clave
-dinámica que no sea de tipo string), E064 asterisco indebido, E065 uso como
-función de ventana, E074 clave literal que no es un nombre de miembro simple y
-ruta de `json_path` no expresable (no literal, sin raíz `$`, filtros, `$..`,
-comodines o pasos entrecomillados).
-Las restricciones de contratos y el lineage siguen pasando por el checker.
-Se corrigió además el NameError que impedía tipar `array(int64)`.
+Errors: E062 arity, E063 types (including untyped NULL container and a
+dynamic key that is not of type string), E064 improper asterisk, E065 use as
+a window function, E074 literal key that is not a simple member name and
+inexpressible `json_path` path (non-literal, no root `$`, filters, `$..`,
+wildcards or quoted steps).
+Contract constraints and lineage continue to go through the checker.
+The NameError that prevented typing `array(int64)` was also fixed.
 
-## Agregación y expansión a filas (segunda entrega)
+## Aggregation and row expansion (second delivery)
 
-Dos operaciones que sí necesitan sintaxis/funciones nuevas sobre arrays:
+Two operations that do require new syntax/functions over arrays:
 
-### `array_agg(expr)` — agregación dentro de `group`
+### `array_agg(expr)` — aggregation inside `group`
 
-Función agregada (`aggregate = true`, `collection = true`, fuera de un cuerpo de
-`group` es E056) que devuelve **un array con los valores NO NULL del grupo**, en
-orden de encuentro:
+An aggregate function (`aggregate = true`, `collection = true`; outside a
+`group` body it is E056) that returns **an array with the group's NON-NULL
+values**, in encounter order:
 
 ```strata
 model history {
@@ -97,17 +98,19 @@ model history {
 }
 ```
 
-- Elemento = tipo del argumento (escalar simple, incluido `json`). Un argumento
-  que ya sea array produciría un array anidado y se rechaza con E063; un `null`
-  sin tipo tampoco tiene elemento. Resultado: `array(elem)` **nullable**.
-- Un grupo sin filas, o con todos los valores NULL, devuelve **NULL** en los
-  cuatro motores, y los NULL se excluyen para que la semántica no dependa del
-  motor: DuckDB/PostgreSQL `ARRAY_AGG(x) FILTER (WHERE x IS NOT NULL)`, BigQuery
-  `ARRAY_AGG(x IGNORE NULLS)`, Snowflake `ARRAY_AGG(x)` (descarta los NULL).
-  Verificado en DuckDB 1.5.5: el `ARRAY_AGG` nativo conserva los NULL, por eso se
-  filtra explícitamente.
+- Element = the type of the argument (simple scalar, including `json`). An
+  argument that is already an array would produce a nested array and is
+  rejected with E063; an untyped `null` has no element either.
+  Result: `array(elem)` **nullable**.
+- A group with no rows, or with all values NULL, returns **NULL** in the
+  four engines, and NULLs are excluded so that the semantics do not depend on
+  the engine: DuckDB/PostgreSQL `ARRAY_AGG(x) FILTER (WHERE x IS NOT NULL)`,
+  BigQuery `ARRAY_AGG(x IGNORE NULLS)`, Snowflake `ARRAY_AGG(x)` (discards
+  the NULLs).
+  Verified on DuckDB 1.5.5: the native `ARRAY_AGG` keeps the NULLs, which is
+  why they are filtered explicitly.
 
-### `expand` — una fila por elemento de un array
+### `expand` — one row per array element
 
 ```strata
 model per_score {
@@ -122,75 +125,80 @@ model per_score_e {
 }
 ```
 
-- Sintaxis: `expand <col> [as <name>]`. Solo `expand` se añade al vocabulario
-  (grammar + lexer, con regla `expand-stmt`); `as` se parsea contextualmente como
-  identificador, así que no rompe esquemas existentes.
-- `expand xs` hace sombra: la columna array desaparece del esquema y `xs` pasa a
-  ser la columna de elemento (nullable, tipo del elemento). `expand xs as e`
-  conserva `xs` y añade `e`.
-- La fuente debe ser una columna **del `from`** de tipo `array(elem)` con elemento
-  escalar (sin arrays anidados). Una columna de `let`/`derive` o de join no vale
-  como fuente (perdió el contexto de fila). Máximo un `expand` por modelo — un
-  segundo unnest lateral multiplicaría filas. Errores: E075.
-- La expansión se emite en la subconsulta base, antes de cualquier agrupación,
-  como unnest lateral: DuckDB/PostgreSQL `CROSS JOIN LATERAL UNNEST(t0.xs) AS u0(e)`,
+- Syntax: `expand <col> [as <name>]`. Only `expand` is added to the
+  vocabulary (grammar + lexer, with an `expand-stmt` rule); `as` is parsed
+  contextually as an identifier, so it does not break existing schemas.
+- `expand xs` shadows: the array column disappears from the schema and `xs`
+  becomes the element column (nullable, element type). `expand xs as e`
+  keeps `xs` and adds `e`.
+- The source must be a column **of the `from`** of type `array(elem)` with a
+  scalar element (no nested arrays). A `let`/`derive` or join column does not
+  work as a source (it lost the row context). At most one `expand` per model
+  — a second lateral unnest would multiply rows. Errors: E075.
+- The expansion is emitted in the base subquery, before any grouping, as a
+  lateral unnest: DuckDB/PostgreSQL
+  `CROSS JOIN LATERAL UNNEST(t0.xs) AS u0(e)`,
   BigQuery `CROSS JOIN UNNEST(t0.xs) AS e`, Snowflake
-  `CROSS JOIN LATERAL FLATTEN(input => t0.xs) AS u0` con
-  `CAST(u0.VALUE AS <tipo>)` para elementos escalares (los `json` quedan como
-  VARIANT, el json nativo de Snowflake). Fila con array NULL o vacío → 0 filas.
-  El alias `AS u0(e)` es necesario en DuckDB/PostgreSQL: `unnest(xs) AS e`
-  expondría el elemento como STRUCT. Verificado en DuckDB 1.5.5.
-- Después de `expand` se puede agrupar (el elemento ya es un valor escalar) y
-  derivar/filtrar como cualquier columna.
+  `CROSS JOIN LATERAL FLATTEN(input => t0.xs) AS u0` with
+  `CAST(u0.VALUE AS <type>)` for scalar elements (the `json` ones stay as
+  VARIANT, Snowflake's native json). Row with a NULL or empty array → 0 rows.
+  The `AS u0(e)` alias is required in DuckDB/PostgreSQL: `unnest(xs) AS e`
+  would expose the element as a STRUCT. Verified on DuckDB 1.5.5.
+- After `expand` you can group (the element is already a scalar value) and
+  derive/filter like any column.
 
-## Dialectos y límites
+## Dialects and limits
 
-- DuckDB: `JSON_EXTRACT(doc, '<path>')`; se admite el subconjunto de rutas
-  expresable (miembro e índice). Clave dinámica:
-  `JSON_EXTRACT(doc, NULLIF(key, ''))`. Comprobado contra DuckDB: una ruta sin `$`
-  es una clave exacta (ni `'a.b'` traversa ni `'x[0]'` indexa), la ruta vacía se
-  pliega a NULL porque DuckDB la resuelve al documento completo, y `$..` y `$[*]`
-  devuelven arrays de coincidencias (por eso se rechazan antes de emitir).
+- DuckDB: `JSON_EXTRACT(doc, '<path>')`; the expressible path subset (member
+  and index) is allowed. Dynamic key:
+  `JSON_EXTRACT(doc, NULLIF(key, ''))`. Checked against DuckDB: a path without
+  `$` is an exact key (neither does `'a.b'` traverse nor `'x[0]'` index), the
+  empty path folds to NULL because DuckDB resolves it to the full document,
+  and `$..` and `$[*]` return arrays of matches (hence they are rejected
+  before emitting).
 - PostgreSQL: `jsonb_path_query_first(doc::jsonb, '<path>', '{}'::jsonb, TRUE)` —
-  **verificado contra un servidor PostgreSQL 16 real**: el mismo modelo ejecutado
-  en DuckDB y en PostgreSQL devuelve los mismos valores para todo el catálogo
-  JSON/arrays (22 expresiones, incluyendo claves dinámicas, `json_path`,
-  `json_build` y todos los `array_*`). El objeto `vars` vacío se pasa
-  explícitamente porque un `vars` NULL hace que la función devuelva NULL siempre
-  (comprobado), y `silent = TRUE` suprime los errores estructurales (documentado
-  y comprobado: sin `silent`, `$.key.deep` sobre un escalar eleva error) para
-  devolver NULL como los demás dialectos. Clave dinámica: `(doc -> NULLIF(key, ''))`
-  para `json_get` y `->>` dentro del `CASE` de `json_value`; `jsonb -> text` acepta
-  cualquier expresión de texto y siempre es una clave exacta. Representación:
-  `jsonb` ordena las claves al serializar (no se preserva el orden de inserción)
-  y añade espacios, así que la igualdad portable de JSON es por valor, no por texto.
-- BigQuery: `JSON_QUERY(doc, '<path>')`. Clave dinámica: **no se emite**.
-  `JSON_QUERY`/`JSON_VALUE` exigen que el `json_path` sea un literal de string (o
-  un parámetro de consulta), así que la compilación falla loud con el motivo en
-  lugar de emitir SQL que el motor rechaza.
-- Snowflake: `GET_PATH(doc, '<ruta sin $>')` — su notación es JavaScript sin raíz
-  (`'a.b'`, `'xs[0]'`, documentado; no existe `$`). Un `$` solo no tiene
-  traducción (`GET_PATH` exige un paso de miembro o índice) y falla loud.
-  Clave dinámica: `GET(doc, NULLIF(key, ''))` — `GET` es una **búsqueda de clave**,
-  no una ruta, y para VARIANT `field_name` acepta una expresión VARCHAR
-  (la exigencia de constante es solo para OBJECT estructurados); la clave vacía
-  devuelve NULL por especificación. Solo BigQuery queda sin clave dinámica.
+  **verified against a real PostgreSQL 16 server**: the same model run in
+  DuckDB and in PostgreSQL returns the same values for the whole JSON/arrays
+  catalog (22 expressions, including dynamic keys, `json_path`,
+  `json_build` and all the `array_*`). The empty `vars` object is passed
+  explicitly because a NULL `vars` makes the function always return NULL
+  (checked), and `silent = TRUE` suppresses structural errors (documented
+  and checked: without `silent`, `$.key.deep` on a scalar raises an error) so
+  it returns NULL like the other dialects. Dynamic key:
+  `(doc -> NULLIF(key, ''))`
+  for `json_get` and `->>` inside the `CASE` of `json_value`; `jsonb -> text`
+  accepts any text expression and is always an exact key. Representation:
+  `jsonb` sorts the keys when serializing (insertion order is not preserved)
+  and adds spaces, so portable JSON equality is by value, not by text.
+- BigQuery: `JSON_QUERY(doc, '<path>')`. Dynamic key: **not emitted**.
+  `JSON_QUERY`/`JSON_VALUE` require the `json_path` to be a string literal (or
+  a query parameter), so compilation fails loud with the reason instead of
+  emitting SQL the engine rejects.
+- Snowflake: `GET_PATH(doc, '<path without $>')` — its notation is JavaScript
+  without a root (`'a.b'`, `'xs[0]'`, documented; `$` does not exist). A lone
+  `$` has no translation (`GET_PATH` requires a member or index step) and
+  fails loud.
+  Dynamic key: `GET(doc, NULLIF(key, ''))` — `GET` is a **key lookup**,
+  not a path, and for VARIANT `field_name` accepts a VARCHAR expression
+  (the constant requirement is only for structured OBJECT); an empty key
+  returns NULL by specification. Only BigQuery is left without a dynamic key.
 
-Ejecución real y tipos físicos comprobados en DuckDB, y ejecución real del
-catálogo JSON/arrays contra un servidor PostgreSQL 16 local (paridad de valores
-con DuckDB en las 22 expresiones cubiertas). BigQuery y Snowflake tienen pruebas
-de emisión, no ejecución contra servicios reales. No se garantiza idéntica
-representación textual entre motores (`jsonb` reordena claves y añade espacios;
-los números JSON pueden serializarse distinto).
-Las fuentes deben respetar el esquema declarado: arrays unidimensionales,
-homogéneos y densos. No se valida todavía esa garantía física fuera de DuckDB;
-BigQuery tiene además restricciones propias al almacenar arrays con elementos NULL.
+Real execution and physical types checked on DuckDB, and real execution of
+the JSON/arrays catalog against a local PostgreSQL 16 server (value parity
+with DuckDB on the 22 covered expressions). BigQuery and Snowflake have
+emission tests, not execution against real services. Identical textual
+representation across engines is not guaranteed (`jsonb` reorders keys and
+adds spaces; JSON numbers may serialize differently).
+Sources must respect the declared schema: one-dimensional, homogeneous and
+dense arrays. That physical guarantee is not yet validated outside DuckDB;
+BigQuery additionally has its own restrictions when storing arrays with NULL
+elements.
 
-Pendiente: arrays anidados o de tipos parametrizados; expansión de columnas `json`
-que contienen un array (requiere verificar `unnest`/array-elements por engine);
-filtros y descenso recursivo en `json_path` correlacionados con la forma de
-resultado de cada warehouse (y, si corresponde, una sintaxis de ruta en el
-lenguaje que incluya claves entrecomilladas); clave dinámica en BigQuery
-(el motor exige literal o parámetro de consulta) y validación en runtime de que
-la clave dinámica no sea sintaxis de ruta (lo único que DuckDB sigue
-interpretando como tal). No se agregan stubs para estas funciones.
+Pending: nested arrays or parameterized types; expansion of `json` columns
+that contain an array (requires verifying `unnest`/array-elements per engine);
+filters and recursive descent in `json_path` correlated with the result
+shape of each warehouse (and, if applicable, a path syntax in the language
+that includes quoted keys); dynamic key in BigQuery
+(the engine requires a literal or query parameter) and runtime validation
+that a dynamic key is not path syntax (the only thing DuckDB still
+interprets as such). No stubs are added for these functions.

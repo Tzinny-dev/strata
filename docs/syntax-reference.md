@@ -1,12 +1,12 @@
-# Referencia de sintaxis
+# Syntax reference
 
-Cada bloque de este documento se corrió contra `strata check` (o `build`)
-antes de escribirse — el código que ves aquí es el mismo que se verificó,
-no una reconstrucción a partir de la especificación. Donde el compilador
-rechazó algo que parecía razonable, se anota explícitamente: son los
-límites reales del lenguaje hoy, no una omisión del documento.
+Every block in this document was run against `strata check` (or `build`)
+before being written — the code you see here is the one that was verified,
+not a reconstruction from the specification. Where the compiler rejected
+something that seemed reasonable, it is noted explicitly: those are the
+real limits of the language today, not an omission from the document.
 
-## 1. Estructura del módulo
+## 1. Module structure
 
 ```strata
 source orders(ns: "crm", dataset: "orders") {
@@ -38,16 +38,16 @@ pipeline prod {
 }
 ```
 
-- `source`: declara una tabla del warehouse. `ns`/`dataset` son metadatos
-  de catálogo; la tabla SQL real leída es el nombre de la declaración
-  (`orders` arriba), no esas claves.
-- `contract`: fija el esquema de salida esperado de un modelo. Es
-  opcional (`model m { ... }` sin `-> contract X` compila igual).
-- `model`: la unidad de transformación.
-- `pipeline`: agrupa modelos para un entorno (`env:`) y overrides de
-  fuente por ambiente.
+- `source`: declares a warehouse table. `ns`/`dataset` are catalog
+  metadata; the actual SQL table read is the name of the declaration
+  (`orders` above), not those keys.
+- `contract`: fixes the expected output schema of a model. It is optional
+  (`model m { ... }` without `-> contract X` compiles the same).
+- `model`: the unit of transformation.
+- `pipeline`: groups models for an environment (`env:`) and source
+  overrides per environment.
 
-## 2. Cuerpo del modelo
+## 2. Model body
 
 ### `from` / `join_*` / `expect`
 
@@ -66,11 +66,11 @@ model with_refund {
 }
 ```
 
-`join_left` / `join_inner` / `join_anti` / `join_semi` están implementados.
-`join_anti` (filas del lado izquierdo sin match) y `join_semi` (filas del
-lado izquierdo CON match, sin duplicar por multi-match) no tienen
-palabra clave de valor a la derecha del `on`, solo la condición. Ejemplo
-con `join_anti`:
+`join_left` / `join_inner` / `join_anti` / `join_semi` are implemented.
+`join_anti` (rows from the left side with no match) and `join_semi` (rows
+from the left side WITH a match, without duplicating on multi-match) have
+no value keyword to the right of the `on`, only the condition. Example
+with `join_anti`:
 
 ```strata
 source orders(ns: "crm", dataset: "orders") { columns: { order_id: int64 nonnull, customer_id: int64 nonnull } }
@@ -83,9 +83,9 @@ model orders_without_refund {
 }
 ```
 
-`expect many_to_one`/`one_to_one` valida en `materialize()` (contra datos
-reales, no solo en `check`) que el lado marcado sea único en las claves
-del `on`; una violación aborta la publicación (`docs/join-cardinality.md`):
+`expect many_to_one`/`one_to_one` validates in `materialize()` (against
+real data, not just in `check`) that the marked side is unique on the
+`on` keys; a violation aborts the publication (`docs/join-cardinality.md`):
 
 ```strata
 source orders(ns: "crm", dataset: "orders") { columns: { order_id: int64 nonnull, customer_id: int64 nonnull } }
@@ -117,21 +117,21 @@ model daily {
 }
 ```
 
-`let` define una columna intermedia (no aparece en la salida a menos que
-se re-liste en `select`/`derive`/`aggregate`); `group { keys } (aggregate
-{ ... })` agrupa; `sort`/`take` ordenan y limitan.
+`let` defines an intermediate column (it does not appear in the output
+unless re-listed in `select`/`derive`/`aggregate`); `group { keys }
+(aggregate { ... })` groups; `sort`/`take` sort and limit.
 
 ### `select` / `derive`
 
-**`select` y `derive` son hoy exactamente el mismo mecanismo** —ambos
-llaman a la misma rutina interna que registra columnas de salida
-explícitas—, así que no hay ninguna diferencia de comportamiento entre
-usar uno u otro; son dos nombres para la misma cosa. **Importante**: en
-cuanto CUALQUIERA de los dos aparece (con al menos una asignación), el
-passthrough implícito de todas las columnas base se apaga — la salida
-del modelo pasa a ser exactamente lo que `select`/`derive` listó, ni una
-columna más. Si quieres una columna nueva Y conservar las originales,
-tienes que re-listarlas explícitamente:
+**`select` and `derive` are exactly the same mechanism today** —both call
+the same internal routine that registers explicit output columns—, so
+there is no behavioral difference at all between using one or the other;
+they are two names for the same thing. **Important**: as soon as EITHER
+of the two appears (with at least one assignment), the implicit
+passthrough of all base columns switches off — the model's output becomes
+exactly what `select`/`derive` listed, not one column more. If you want
+a new column AND keep the originals, you have to re-list them
+explicitly:
 
 ```strata
 source orders(ns: "crm", dataset: "orders") {
@@ -144,13 +144,13 @@ model m {
 }
 ```
 
-(Sin el `order_id = order_id`, la salida de este modelo sería solo
-`doubled` — verificado: es lo que da `strata check` si se omite.)
+(Without the `order_id = order_id`, the output of this model would be only
+`doubled` — verified: that is what `strata check` gives if it is omitted.)
 
 ### `expand`
 
-Una fila por elemento de una columna `array(T)` del `from` (no de una
-derivada):
+One row per element of an `array(T)` column of the `from` (not from a
+derived one):
 
 ```strata
 source events(ns: "crm", dataset: "events") {
@@ -164,14 +164,14 @@ model tags_exploded {
 }
 ```
 
-Detalles y límites (arrays anidados, columnas JSON) en
+Details and limits (nested arrays, JSON columns) in
 `docs/json-arrays.md`.
 
-## 3. Operaciones de conjunto
+## 3. Set operations
 
-`union [all]` / `intersect` / `except` combinan modelos, **no fuentes
-directamente** — el lado derecho de un set-op debe ser un `model`, aunque
-sea uno trivial que solo hace `from`:
+`union [all]` / `intersect` / `except` combine models, **not sources
+directly** — the right-hand side of a set-op must be a `model`, even a
+trivial one that only does `from`:
 
 ```strata
 source es_orders(ns: "crm", dataset: "es_orders") { columns: { order_id: int64 nonnull, country: string nonnull } }
@@ -180,36 +180,36 @@ source mx_orders(ns: "crm", dataset: "mx_orders") { columns: { order_id: int64 n
 model mx { from mx_orders }
 model all_orders {
   from es_orders
-  union mx      // o: union all mx / intersect mx / except mx
-  union more    // set-ops consecutivos encadenan
+  union mx      // or: union all mx / intersect mx / except mx
+  union more    // consecutive set-ops chain
   dedup
-  // o: dedup by order_id → conserva una fila por clave, determinista
+  // or: dedup by order_id → keeps one row per key, deterministic
 }
 ```
 
-Los set-ops son consecutivos (`from a union b union c`); lo que haya antes
-del primero da forma a la rama izquierda y lo que haya después ve las filas
-combinadas (`filter`, `select`, `derive`, `group`, `sort`, `take` y también
-`join_*`). Una referencia calificada al modelo derecho (`b.x`) se resuelve
-contra la columna combinada. El esquema de todas las ramas debe alinear por
-nombre y tipo (unificado, como `coalesce`). `dedup` es `SELECT DISTINCT`
-sobre las columnas de salida; `dedup by k1, k2` conserva una fila por clave
-vía `ROW_NUMBER` determinista. En agregación, `count(distinct x)` emite
-`COUNT(DISTINCT x)`; `distinct` en otra función o en ventanas es E096
-(ver `docs/setops.md`).
+Set-ops are consecutive (`from a union b union c`); whatever comes before
+the first one shapes the left branch and whatever comes after sees the
+combined rows (`filter`, `select`, `derive`, `group`, `sort`, `take` and
+also `join_*`). A qualified reference to the right model (`b.x`) resolves
+against the combined column. The schema of all branches must align by
+name and type (unified, like `coalesce`). `dedup` is `SELECT DISTINCT`
+over the output columns; `dedup by k1, k2` keeps one row per key via
+deterministic `ROW_NUMBER`. In aggregation, `count(distinct x)` emits
+`COUNT(DISTINCT x)`; `distinct` in another function or in windows is E096
+(see `docs/setops.md`).
 
-## 4. Tipos
+## 4. Types
 
-Escalares: `int64`, `float64`, `string`, `bool`, `date`, `timestamp`,
-`uuid`, `json`. Además:
+Scalars: `int64`, `float64`, `string`, `bool`, `date`, `timestamp`,
+`uuid`, `json`. In addition:
 
 - `decimal(precision, scale)`: `decimal(10, 2)`.
-- `money`: `money`, o `money(EUR)`/`money(USD)` fijando la divisa (por
-  defecto `USD`).
-- `array(T)`: recursivo, `array(array(string))` es válido.
-- `domain nombre = <tipo>`: alias transparente, resuelto al cargar el
-  proyecto — un `domain country_code = string` se comporta exactamente
-  como `string` en contratos, casts y elementos de array.
+- `money`: `money`, or `money(EUR)`/`money(USD)` to fix the currency
+  (default `USD`).
+- `array(T)`: recursive, `array(array(string))` is valid.
+- `domain name = <type>`: transparent alias, resolved when the project
+  loads — a `domain country_code = string` behaves exactly like `string`
+  in contracts, casts and array elements.
 
 ```strata
 domain country_code = string
@@ -224,22 +224,22 @@ model m {
 }
 ```
 
-**Límite no obvio verificado**: `money` NO es un tipo "numérico" a efectos
-de comparación (`is_numeric()` en `strata/types.py` solo incluye
-`int64`/`float64`/`decimal`) — comparar una columna `money` contra un
-literal entero falla con `E051 cannot compare money(USD) with int64`. Hay
-que envolver el literal: `cast(100, "money")` (el segundo argumento de
-`cast` es siempre un literal string con el nombre del tipo, nunca un tipo
-sin comillas).
+**Non-obvious verified limit**: `money` is NOT a "numeric" type for
+comparison purposes (`is_numeric()` in `strata/types.py` only includes
+`int64`/`float64`/`decimal`) — comparing a `money` column against an
+integer literal fails with `E051 cannot compare money(USD) with int64`.
+You have to wrap the literal: `cast(100, "money")` (the second argument
+of `cast` is always a string literal with the type name, never an
+unquoted type).
 
-## 5. Funciones (catálogo único, `strata/functions.py`)
+## 5. Functions (single catalog, `strata/functions.py`)
 
-### Agregadas
+### Aggregates
 
-`count`, `sum`, `avg`, `max`, `min`, `array_agg` — legales solo dentro de
-`aggregate { }` (E056 si no).
+`count`, `sum`, `avg`, `max`, `min`, `array_agg` — legal only inside
+`aggregate { }` (E056 otherwise).
 
-### Ventanas: `fn(args) over (partition_by: [...], sort: [...])`
+### Windows: `fn(args) over (partition_by: [...], sort: [...])`
 
 ```strata
 source orders(ns: "crm", dataset: "orders") {
@@ -258,10 +258,10 @@ model m {
 ```
 
 `row_number`, `rank`, `dense_rank`, `lag`, `lead`, `first_value`,
-`last_value`, y cualquier agregado (`sum`, `avg`, ...) son ventaneables.
-Colocación (E065): solo en salidas de `select`/`derive`/`aggregate`, nunca
-en `let`/`filter`/`sort`/claves de `group`/condiciones de `join`, y sin
-anidar ventanas.
+`last_value`, and any aggregate (`sum`, `avg`, ...) are windowable.
+Placement (E065): only in `select`/`derive`/`aggregate` outputs, never
+in `let`/`filter`/`sort`/`group` keys/`join` conditions, and with no
+nested windows.
 
 ### String
 
@@ -269,19 +269,19 @@ anidar ventanas.
 `replace`, `lpad`/`rpad`, `startswith`, `split_part`, `regexp_replace`,
 `left`, `right`, `like`/`rlike`.
 
-`like(s, pattern)` es el `LIKE` de SQL (sensible a mayúsculas; `%` y `_`
-como comodines). `rlike(s, pattern)` es coincidencia con expresión
-regular (el subconjunto que documenta cada almacén). Ambas devuelven
-`bool` y devuelven `NULL` si alguno de los dos argumentos es `NULL`.
-Las dos existen también como **operadores infix** de la misma semántica
-(empatan con `==` en precedencia; son contextuales, no reservadas):
+`like(s, pattern)` is SQL's `LIKE` (case-sensitive; `%` and `_` as
+wildcards). `rlike(s, pattern)` is regular-expression matching (the
+subset each warehouse documents). Both return `bool` and return `NULL`
+if either argument is `NULL`. The two also exist as **infix operators**
+with the same semantics (they tie with `==` in precedence; they are
+contextual, not reserved):
 
 ```strata
     select {
-      eur      = country,                    # columna normal
-      names_es = country like "E%",          # operador
-      rx_es    = country rlike "^E",         # operador
-      fn_es    = like(country, "E%"),        # misma semántica como función
+      eur      = country,                    # normal column
+      names_es = country like "E%",          # operator
+      rx_es    = country rlike "^E",         # operator
+      fn_es    = like(country, "E%"),        # same semantics as a function
     }
 ```
 
@@ -301,10 +301,10 @@ model m {
 }
 ```
 
-### Fecha
+### Date
 
-`date_add`/`date_sub` (unidad como kwarg: `years:`/`months:`/`weeks:`/
-`days:`), `date_trunc`/`date_diff` (unidad como símbolo o string):
+`date_add`/`date_sub` (unit as kwarg: `years:`/`months:`/`weeks:`/
+`days:`), `date_trunc`/`date_diff` (unit as a symbol or string):
 
 ```strata
 source orders(ns: "crm", dataset: "orders") {
@@ -323,14 +323,14 @@ model m {
 
 ### JSON / arrays
 
-`json_get`/`json_value` (clave literal simple o dinámica; búsqueda exacta
-de miembro, nunca ruta), `json_path` (JSONPath acotado a raíz `$` + pasos
-de miembro/índice), `json_build`, `array_length`, `array_get` (índice
-desde cero), `array_construct`, `list` (alias de `array_construct`),
+`json_get`/`json_value` (simple literal or dynamic key; exact member
+lookup, never a path), `json_path` (JSONPath limited to root `$` + steps
+of member/index), `json_build`, `array_length`, `array_get` (index from
+zero), `array_construct`, `list` (alias of `array_construct`),
 `array_concat`/`array_contains`/
 `array_append`/`array_prepend`/`array_remove`/`array_sort`/
-`array_index_of`, `array_agg`. Límites medidos por dialecto (BigQuery sin
-clave dinámica, Snowflake con sintaxis propia) en `docs/json-arrays.md`.
+`array_index_of`, `array_agg`. Limits measured per dialect (BigQuery
+without dynamic key, Snowflake with its own syntax) in `docs/json-arrays.md`.
 
 ```strata
 source events(ns: "crm", dataset: "events") {
@@ -348,7 +348,7 @@ model m {
 }
 ```
 
-### Condicionales: `if` / `case`
+### Conditionals: `if` / `case`
 
 ```strata
 source orders(ns: "crm", dataset: "orders") {
@@ -367,14 +367,14 @@ model m {
 }
 ```
 
-`if(cond, then, else)`: aridad exactamente 3, `cond` debe ser `bool`.
-`case(cond, val, [cond, val, ...], [else])`: aridad mínima 2, cualquier
-número de pares; sin `else`, una fila sin match da `NULL`. Ambos se
-emiten como `CASE WHEN...END`, idéntico en los cuatro dialectos. Detalle
-completo: `docs/incremental.md` no, este es nuevo — ver el catálogo en
-`strata/functions.py` (`if`/`case`) y `tests/test_conditionals.py`.
+`if(cond, then, else)`: arity exactly 3, `cond` must be `bool`.
+`case(cond, val, [cond, val, ...], [else])`: minimum arity 2, any
+number of pairs; without `else`, a row with no match gives `NULL`. Both
+are emitted as `CASE WHEN...END`, identical in the four dialects. Full
+detail: `docs/incremental.md` no, this one is new — see the catalog in
+`strata/functions.py` (`if`/`case`) and `tests/test_conditionals.py`.
 
-## 6. Contratos
+## 6. Contracts
 
 ```strata
 source orders(ns: "crm", dataset: "orders") {
@@ -393,29 +393,29 @@ model m -> contract OrderContract {
 }
 ```
 
-`nonnull`, `unique`, `primary_key` (`unique` implícito), `enum {A, B, ...}`
-(valores sin comillas), `protected` (marca de sensibilidad; no implica
-enmascaramiento automático — ver límite en `propuesta-lenguaje-strata.md`),
-`classification: "texto"` (metadato libre, requiere las comillas y los
-dos puntos).
+`nonnull`, `unique`, `primary_key` (`unique` implied), `enum {A, B, ...}`
+(values unquoted), `protected` (sensitivity marker; does not imply
+automatic masking — see limit in `propuesta-lenguaje-strata.md`),
+`classification: "text"` (free-form metadata, requires the quotes and the
+colon).
 
-`build <archivo> [modelos...] --strict` exige contrato a todo modelo
-comprobado, incluidas dependencias transitivas:
+`build <file> [models...] --strict` requires a contract on every checked
+model, including transitive dependencies:
 
 ```
 $ python -m strata build sin_contrato.strata --strict
 error: E014: strict mode requires every built model to declare -> contract: m
 ```
 
-Detalle: `docs/strict-contracts.md`.
+Detail: `docs/strict-contracts.md`.
 
-## 7. Semántica de warehouse
+## 7. Warehouse semantics
 
-`partition_by [cols]`, `freshness <umbral>` (`1h`, `24h`, `daily`,
-`weekly`, `monthly`, o una expresión SQL entre comillas),
-`freshness_column: col` — framework real conectado a `run --only-stale`
-(detección de staleness efectiva, no solo aceptado por el parser). Detalle
-completo: `docs/§2-warehouse-semantics.md`.
+`partition_by [cols]`, `freshness <threshold>` (`1h`, `24h`, `daily`,
+`weekly`, `monthly`, or a quoted SQL expression),
+`freshness_column: col` — real framework wired to `run --only-stale`
+(effective staleness detection, not just accepted by the parser). Full
+detail: `docs/§2-warehouse-semantics.md`.
 
 ```strata
 source orders(ns: "crm", dataset: "orders") {
@@ -429,15 +429,15 @@ model m {
 }
 ```
 
-`incremental merge_strategy: append|upsert` con `cdc_column` (obligatorio)
-y `merge_keys` (obligatorio solo para `upsert`) **ejecuta merge real**
-—no es solo sintaxis aceptada—: en cada run que no sea el primero para ese
-modelo, fusiona la snapshot anterior con las filas cuyo `cdc_column` es
-mayor que su watermark, en vez de recomputar todo desde cero. No soportado
-sobre modelos `group`/`aggregate` (rechazado en compilación, E087: no es
-sonante reagregar solo el delta). Detalle completo, incluida la prueba
-que distingue esto de un rebuild completo: `docs/incremental.md`, sección
-"Merge por fila".
+`incremental merge_strategy: append|upsert` with `cdc_column` (required)
+and `merge_keys` (required only for `upsert`) **performs a real merge**
+—not just accepted syntax—: on each run that is not the first for that
+model, it merges the previous snapshot with the rows whose `cdc_column`
+is greater than its watermark, instead of recomputing everything from
+scratch. Not supported on `group`/`aggregate` models (rejected at
+compile time, E087: it is not sound to re-aggregate only the delta).
+Full detail, including the test that distinguishes this from a full
+rebuild: `docs/incremental.md`, section "Merge by row".
 
 ```strata
 source events(ns: "crm", dataset: "events") {
@@ -453,28 +453,28 @@ model m {
 }
 ```
 
-## 8. No implementado hoy
+## 8. Not implemented today
 
-Verificado que fallan (no es una omisión, es el estado real):
+Verified as failing (not an omission, this is the actual state):
 
-- Operadores `like`/`rlike` en condiciones: → desde **2026-09-21** son
-  **operadores infix** de precedencia de comparación:
-  `filter country like "E%" and country rlike "^E"`. Siguen vigentes como
-  **funciones** `like(s, p)`, `rlike(s, p)` (misma semántica). Son
-  contextuales, no palabras reservadas: una columna llamada `like` sigue
-  siendo una columna (`filter like == "b"`), y `like(like, "x")` sigue
-  llamando a la función.
-- Constructores tipados `dict`/`map`: → **implementados** desde **2026-09-21**:
-  `map("k", v, ...)` / `dict("k", v, ...)` construyen `map<string, V>`;
-  `map_get(m, "k")` accede por clave exacta. Claves **solo string**,
-  valores homogéneos en el subconjunto JSON-representable
-  (string/int64/float64/bool/decimal/money/json). DuckDB nativo `MAP`,
-  Postgres/BigQuery/Snowflake respaldados por JSONB/JSON/VARIANT.
-- Tipo `struct`: → **implementado** desde **2026-09-21**:
-  `struct("f", v, "g", w)` construye `struct<f: T, g: U>`; `struct_get(s, "f")`
-  accede por campo exacto. DuckDB/BigQuery nativo `STRUCT`, Postgres/Snowflake
-  respaldados por JSONB/VARIANT. Campos con tipos escalares del subconjunto
-  JSON-representable.
+- `like`/`rlike` operators in conditions: → as of **2026-09-21** they are
+  **infix operators** of comparison precedence:
+  `filter country like "E%" and country rlike "^E"`. They remain valid as
+  **functions** `like(s, p)`, `rlike(s, p)` (same semantics). They are
+  contextual, not reserved words: a column called `like` is still a
+  column (`filter like == "b"`), and `like(like, "x")` still calls the
+  function.
+- Typed `dict`/`map` constructors: → **implemented** as of **2026-09-21**:
+  `map("k", v, ...)` / `dict("k", v, ...)` build `map<string, V>`;
+  `map_get(m, "k")` accesses by exact key. Keys **string only**,
+  homogeneous values in the JSON-representable subset
+  (string/int64/float64/bool/decimal/money/json). DuckDB native `MAP`,
+  Postgres/BigQuery/Snowflake backed by JSONB/JSON/VARIANT.
+- `struct` type: → **implemented** as of **2026-09-21**:
+  `struct("f", v, "g", w)` builds `struct<f: T, g: U>`; `struct_get(s, "f")`
+  accesses by exact field. DuckDB/BigQuery native `STRUCT`, Postgres/Snowflake
+  backed by JSONB/VARIANT. Fields with scalar types from the
+  JSON-representable subset.
 
-Si necesitas algo fuera de este subconjunto, `spec/grammar.md` lo deja
-documentado como fuera del soporte, no como un error de esta versión.
+If you need something outside this subset, `spec/grammar.md` documents it
+as out of support, not as an error in this version.

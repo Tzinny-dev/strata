@@ -59,7 +59,7 @@ See `docs/getting-started.md` and `docs/tutorial.md` for the full walkthrough (e
 | Warehouse | SQL emit (`compile --dialect`) | Engine run (`run -o` / `exec`) | Driver |
 |---|---|---|---|
 | DuckDB | ✅ | ✅ `DuckDBWarehouse` + `dbcompat` (`duckdb` default dep) | `duckdb` |
-| Postgres | ✅ | ✅ `cli.open_warehouse("postgres://...")` → `dbcompat.PGConn` (probado vs Postgres 16 efímero) — `adapters.get_adapter("postgres")` sigue stub E095 a propósito | `pip install strata[postgres]` |
+| Postgres | ✅ | ✅ `cli.open_warehouse("postgres://...")` → `dbcompat.PGConn` (tested against ephemeral Postgres 16) — `adapters.get_adapter("postgres")` remains stub E095 intentionally | `pip install strata[postgres]` |
 | BigQuery | ✅ | ✅ `BigQueryWarehouse` → `dbcompat.BigQueryConn` (`bigquery://project/dataset?location=US`) + `get_adapter("bigquery")` | `pip install strata[bigquery]` |
 | Snowflake | ✅ | ✅ `SnowflakeWarehouse` → `dbcompat.SnowflakeConn` (`snowflake://user:pass@account/db/schema?warehouse=WH&role=ROLE`) + `get_adapter("snowflake")` | `pip install strata[snowflake]` |
 
@@ -104,16 +104,16 @@ docker build -t ghcr.io/tzinny-dev/strata:0.1.5 -f Dockerfile .
 ## VS Code extension
 
 ```bash
-# marketplace (id: Tzinny-dev.strata-tzinny, versión alineada con strata-lang)
+# marketplace (id: Tzinny-dev.strata-tzinny, version aligned with strata-lang)
 code --install-extension Tzinny-dev.strata-tzinny
 ```
 
-Syntax highlighting para `.strata` + cliente LSP sobre `strata lsp`:
-diagnostics (el mismo `Checker` de `strata check`), completion de
-modelos/fuentes/columnas, hover de tipos y salto a definición de
-columnas. Requiere `strata` en el `PATH` o la setting
-`strata.binaryPath`. Rebuild local: `cd vscode && npm install &&
-npm run compile && npx vsce package`. Ver `docs-site/guide/vscode.md`.
+Syntax highlighting for `.strata` + LSP client over `strata lsp`:
+diagnostics (the same `Checker` as `strata check`), completion of
+models/sources/columns, type hover and go-to-definition for
+columns. Requires `strata` on the `PATH` or the setting
+`strata.binaryPath`. Local rebuild: `cd vscode && npm install &&
+npm run compile && npx vsce package`. See `docs-site/guide/vscode.md`.
 
 ## Development
 
