@@ -326,3 +326,33 @@ def test_cmd_catalog_fails_loud_without_manifest(tmp_path, capsys, monkeypatch):
     assert main() == 1
     err = capsys.readouterr().err
     assert "has no manifest" in err
+
+
+def test_run_rel_rejects_unsafe_run_id(tmp_path):
+    with pytest.raises(iceberg_mod.IcebergExportError):
+        iceberg_mod.run_rel("../../etc/passwd", "m")
+
+
+def test_verify_fails_loud_without_manifest(tmp_path):
+    con = duckdb.connect(":memory:")
+    with pytest.raises(iceberg_mod.IcebergExportError, match="has no manifest"):
+        iceberg_mod.verify_catalog_run(con, tmp_path / "lakehouse", "deadbeef0000")
+
+
+def test_verify_fails_loud_when_run_not_published(tmp_path):
+    # Registered in the manifest yet physically incomplete -> broken catalog.
+    catalog = tmp_path / "lakehouse"
+    manifest_run = {"runs": {"deadbeef0000": {"m0": "runs/deadbeef0000/m0"}}}
+    catalog.mkdir(parents=True)
+    (catalog / "_strata_manifest.json").write_text(
+        __import__("json").dumps(manifest_run))
+    con = duckdb.connect(":memory:")
+    with pytest.raises(iceberg_mod.IcebergExportError, match="missing"):
+        iceberg_mod.verify_catalog_run(con, catalog, "deadbeef0000")
+
+
+def test_export_snapshot_fails_loud_missing_table(tmp_path):
+    con = duckdb.connect(":memory:")
+    with pytest.raises(iceberg_mod.IcebergExportError, match="not found"):
+        iceberg_mod.export_snapshot(con, "no_such_snapshot", "m",
+                                    "r1dead0000", tmp_path / "catalog")
