@@ -28,12 +28,11 @@ table cannot drift from the real lexer.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional
 
 # ---------------------------------------------------------------------------
 # lexical terminals shared with lexer.py (kept in lockstep, enforced by tests)
 # ---------------------------------------------------------------------------
-KEYWORDS: List[str] = [
+KEYWORDS: list[str] = [
     "source", "contract", "model", "pipeline", "fn", "import", "from",
     "join_left", "join_inner", "join_anti", "join_semi", "on",
     "filter", "where", "let", "derive", "select", "aggregate", "group",
@@ -47,12 +46,12 @@ KEYWORDS: List[str] = [
     "for", "over", "->", "=>", "test", "expect",
 ]
 
-TYPE_KEYWORDS: List[str] = [
+TYPE_KEYWORDS: list[str] = [
     "int64", "float64", "decimal", "string", "bool", "date", "timestamp",
     "uuid", "json", "money", "array",
 ]
 
-SYMBOLS: List[str] = [
+SYMBOLS: list[str] = [
     "->", "==", "!=", "<=", ">=", "=>", "||", "${",
     "(", ")", "{", "}", "[", "]", ",", ":", ";", ".", "=", "<",
     "+", "-", "*", "/", "%",
@@ -71,7 +70,7 @@ STR_GBNF = r'"\"" ( [^"\\] | "\\" ( ["\\nt] ) )* "\""'
 # bare identifiers are rule refs, double-quoted strings are terminals, and
 # `::` is an ignorable separator token (stripped at emit time)
 # ---------------------------------------------------------------------------
-RULES: Dict[str, object] = {}
+RULES: dict[str, object] = {}
 
 RULES["root"] = ("a .strata module: { top_decl }", ["top-decl*"])
 
@@ -398,7 +397,7 @@ RULES["binop"] = ("binary operators (documentation; ops are inlined in the ladde
 ])
 
 # operator ladder for expr (low -> high), emitted as chained rules
-PRECEDENCE: List[List[str]] = [
+PRECEDENCE: list[list[str]] = [
     ["or"],
     ["and"],
     ["==", "!=", "<", "<=", ">", ">=", "in", "like", "rlike"],
@@ -459,7 +458,7 @@ def _emit_alt(alt: str) -> str:
 
 def emit_gbnf() -> str:
     """Emit the whole grammar as llama.cpp GBNF text (root = ::=_ root)."""
-    lines: List[str] = []
+    lines: list[str] = []
     for op_idx, level in enumerate(PRECEDENCE):
         if op_idx < len(PRECEDENCE) - 1:
             nxt = f"expr_{op_idx + 1}"
@@ -484,9 +483,9 @@ def emit_gbnf() -> str:
     return "\n".join(lines) + "\n"
 
 
-def validate() -> List[str]:
+def validate() -> list[str]:
     """Fail-loud consistency checks; returns a list of problems (empty == ok)."""
-    problems: List[str] = []
+    problems: list[str] = []
     for name, (_doc, alts) in RULES.items():
         if not alts:
             problems.append(f"rule {name}: no alternatives")

@@ -9,13 +9,11 @@ query — the same philosophy as the 3-phase pins.
 from __future__ import annotations
 
 import datetime
-from typing import List
 
-from . import ast
-from . import functions
+from . import ast, functions
 from .analysis import BaseCol, Plan, TypedModel
-from .types import StrataType, INT64, FLOAT64, STRING, BOOL, DATE, TIMESTAMP, UUID, JSON
-from .dialects import Dialect, DUCKDB
+from .dialects import DUCKDB, Dialect
+from .types import JSON, StrataType
 
 _RAW, _OUTER = "raw", "outer"
 
@@ -30,7 +28,7 @@ BINOP_SQL = {"==": "=", "!=": "!=", "<": "<", "<=": "<=", ">": ">", ">=": ">=",
              "%": "%", "||": "||", "in": "IN", "like": "LIKE"}
 
 
-def _rlike_sql(dialect: "Dialect", expr: str, pattern: str) -> str:
+def _rlike_sql(dialect: Dialect, expr: str, pattern: str) -> str:
     """Regexp-match SQL for a dialect: same mapping as the rlike() call."""
     if dialect.name == "duckdb":
         return f"REGEXP_MATCHES({expr}, {pattern})"
@@ -198,7 +196,7 @@ class Translator:
                 key = e.args[i]
                 val = e.args[i + 1]
                 if not isinstance(key, ast.Literal) or not isinstance(key.value, str):
-                    raise RuntimeError(f"json_build() key must be a string literal")
+                    raise RuntimeError("json_build() key must be a string literal")
                 if not functions.valid_json_key(key.value):
                     raise RuntimeError(f"json_build() invalid key: {key.value!r}")
                 parts.append(f"'{key.value}', {self.expr(val)}")
@@ -291,7 +289,7 @@ class Translator:
             if d == "bigquery":
                 if not isinstance(key_expr, ast.Literal) or not isinstance(key_expr.value, str):
                     raise RuntimeError(
-                        f"dialect 'bigquery' cannot take a dynamic key in map_get(): the "
+                        "dialect 'bigquery' cannot take a dynamic key in map_get(): the "
                         "engine requires the JSONPath to be a string literal or query "
                         "parameter; use a literal key")
                 path = _lit("$." + key_expr.value)
@@ -343,19 +341,19 @@ class Translator:
                 if isinstance(field_expr, ast.Literal) and isinstance(field_expr.value, str):
                     return f"{base}.{field_expr.value}"
                 raise RuntimeError(
-                    f"dialect 'bigquery' cannot take a dynamic field in struct_get(): "
+                    "dialect 'bigquery' cannot take a dynamic field in struct_get(): "
                     "use a literal field name")
             if d == "postgres":
                 if isinstance(field_expr, ast.Literal) and isinstance(field_expr.value, str):
                     return f"({base} ->> {_lit(field_expr.value)})"
                 raise RuntimeError(
-                    f"dialect 'postgres' cannot take a dynamic field in struct_get(): "
+                    "dialect 'postgres' cannot take a dynamic field in struct_get(): "
                     "use a literal field name")
             # Snowflake: GET on VARIANT
             if isinstance(field_expr, ast.Literal) and isinstance(field_expr.value, str):
                 return f"GET({base}, {_lit(field_expr.value)})"
             raise RuntimeError(
-                f"dialect 'snowflake' cannot take a dynamic field in struct_get(): "
+                "dialect 'snowflake' cannot take a dynamic field in struct_get(): "
                 "use a literal field name")
 
         # --- json_get / json_value: object member by literal key, or by an
@@ -466,8 +464,7 @@ class Translator:
                         "json_path() (GET_PATH needs a member or index step); use "
                         "the column itself")
                 sub = path[1:]
-                if sub.startswith("."):
-                    sub = sub[1:]
+                sub = sub.removeprefix(".")
                 return f"GET_PATH({base}, {_lit(sub)})"
             raise RuntimeError(f"dialect {d!r} cannot express {name}()")
 
@@ -728,7 +725,7 @@ class Translator:
             raise RuntimeError(f"non-window function {e.name}() with over(...) reached codegen")
         head = functions.emit_sql(
             e.name, ", ".join(self.expr(a) for a in e.args), self.dialect)
-        frame: List[str] = []
+        frame: list[str] = []
         if e.over.partition_by:
             frame.append("PARTITION BY " + ", ".join(self.expr(p) for p in e.over.partition_by))
         if e.over.sort:
@@ -769,9 +766,9 @@ class Translator:
         return " ".join(parts)
 
 
-def _base_select(plan: Plan, dialect: Dialect, base_cols: List[BaseCol],
-                 preds: List[ast.Node], upstream_prefix: str = "v_",
-                 joins: Optional[List[object]] = None) -> str:
+def _base_select(plan: Plan, dialect: Dialect, base_cols: list[BaseCol],
+                 preds: list[ast.Node], upstream_prefix: str = "v_",
+                 joins: Optional[list[object]] = None) -> str:
     """SELECT...FROM...[WHERE] over the left table (the left branch when the
     model combines rows with a set operation, the whole base otherwise).
 
@@ -853,7 +850,7 @@ def _union_cast(dialect: Dialect, t: StrataType) -> str:
 
 
 def _setop_base(plan: Plan, dialect: Dialect,
-                upstream_prefix: str = "v_") -> Tuple[List[str], str]:
+                upstream_prefix: str = "v_") -> Tuple[list[str], str]:
     """(extra_ctes, base_body) for a model combining rows with set operations.
 
     The left branch is the model's own base query (filters, lets and joins
@@ -918,7 +915,7 @@ def _setop_base(plan: Plan, dialect: Dialect,
 
 
 def gen_base_subquery(plan: Plan, dialect: Dialect = DUCKDB,
-                      upstream_prefix: str = "v_") -> Tuple[List[str], str]:
+                      upstream_prefix: str = "v_") -> Tuple[list[str], str]:
     """Content of the `base` CTE plus any sibling CTEs it needs (set models
     need `b_left` for their left branch): returns (extra_ctes, base_body)."""
     if not plan.set_ops:
@@ -926,7 +923,7 @@ def gen_base_subquery(plan: Plan, dialect: Dialect = DUCKDB,
     return _setop_base(plan, dialect, upstream_prefix)
 
 
-def join_check_sql(table: str, keys: List[str]) -> str:
+def join_check_sql(table: str, keys: list[str]) -> str:
     """Duplicate-key probe backing a join cardinality expectation: counts key
     groups occurring more than once, ignoring all-NULL keys (they never match
     in an equi-join, so they cannot fan out). Zero means the side is unique
@@ -1001,7 +998,7 @@ def model_sql(tm: TypedModel, dialect: Dialect = DUCKDB,
     return f"-- model {tm.name}" + (f" -> contract {tm.contract}" if tm.contract else "") + "\nWITH " + ctes + "\n" + outer + "\n"
 
 
-def full_sql(tms: List[TypedModel], names: List[str], dialect: Dialect = DUCKDB,
+def full_sql(tms: list[TypedModel], names: list[str], dialect: Dialect = DUCKDB,
              view_prefix: str = "v_", upstream_prefix: str = "v_") -> str:
     """One CREATE-statement string per model in `names`, in given order."""
     # One statement per view: `materialize` executes them sequentially in

@@ -1,10 +1,8 @@
 """Recursive-descent parser matching spec/grammar.md."""
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
-
-from .lexer import Lexer, Token
 from . import ast
+from .lexer import Lexer, Token
 
 
 class ParseError(Exception):
@@ -48,18 +46,18 @@ class Parser:
             self.i += 1
         return t
 
-    def at(self, kind: str, value: Optional[object] = None) -> bool:
+    def at(self, kind: str, value: object | None = None) -> bool:
         """True when the current token has the given kind and optional value."""
         t = self.cur()
         return t.kind == kind and (value is None or t.value == value)
 
-    def match(self, kind: str, value: Optional[object] = None) -> Optional[Token]:
+    def match(self, kind: str, value: object | None = None) -> Token | None:
         """Consume and return the current token when it matches kind/value, else None."""
         if self.at(kind, value):
             return self.advance()
         return None
 
-    def expect(self, kind: str, value: Optional[object] = None) -> Token:
+    def expect(self, kind: str, value: object | None = None) -> Token:
         """Consume a token of the given kind/value or raise ParseError with a span."""
         t = self.cur()
         if (value is None and t.kind == kind) or (value is not None and t.kind == kind and t.value == value):
@@ -69,7 +67,7 @@ class Parser:
             file=self.path, line=t.line, col=t.col,
             end_line=t.end_line, end_col=t.end_col)
 
-    def span(self, tok: Token) -> Tuple[int, int, int, int]:
+    def span(self, tok: Token) -> tuple[int, int, int, int]:
         """Source span tuple (line, col, end_line, end_col) of a token."""
         return (tok.line, tok.col, tok.end_line, tok.end_col)
 
@@ -176,7 +174,7 @@ class Parser:
             self.expect("SYM", "}")
         return decl
 
-    def parse_source_props(self) -> List[Tuple[str, object]]:
+    def parse_source_props(self) -> list[tuple[str, object]]:
         """Parse the resource property list of a source declaration."""
         props = []
         while not self.at("SYM", "}"):
@@ -231,7 +229,7 @@ class Parser:
         decl.type_spec, decl.params = self.parse_type_spec()
         return decl
 
-    def parse_type_spec(self) -> Tuple[str, List[object]]:
+    def parse_type_spec(self) -> tuple[str, list[object]]:
         """A type in a source/contract/domain position: a builtin (with
         parameters, array elements recursing to any depth), or a bare
         identifier referencing a `domain` alias (resolved at check time).
@@ -344,7 +342,7 @@ class Parser:
                 break
         return f
 
-    def _parse_freshness_value(self) -> List[str]:
+    def _parse_freshness_value(self) -> list[str]:
         """Parse freshness value(s): incremental, daily, weekly, 1h, 24h, etc.
 
         Supports comma-separated multiple values: freshness 1h, daily
@@ -609,7 +607,7 @@ class Parser:
         self.expect("SYM", "}")
         return decl
 
-    def parse_join_expect(self) -> Optional[str]:
+    def parse_join_expect(self) -> str | None:
         """Parse an optional `expect ...` marker after a join key."""
         # `expect many_to_one|one_to_one` after a join condition. The two
         # cardinalities are contextual identifiers (not keywords) so existing
@@ -652,7 +650,7 @@ class Parser:
             st.limit = st.start
         return st
 
-    def parse_assigns(self) -> List[ast.OutAssign]:
+    def parse_assigns(self) -> list[ast.OutAssign]:
         """Parse the `assign { ... }` block of a transform step."""
         self.expect("SYM", "{")
         assigns = []
@@ -688,7 +686,7 @@ class Parser:
             self.expect("SYM", "}")
         return decl
 
-    def parse_type_str(self) -> List[str]:
+    def parse_type_str(self) -> list[str]:
         """Parse a type expression (`List<...>`, `Map<K,V>`, `Struct<...>`, primitive, or model reference)."""
         if self.at("ID") and self.cur().value == "List":
             self.advance()
@@ -749,7 +747,7 @@ class Parser:
             left = ast.BinOp(op=op, left=left, right=right)
         return left
 
-    def _prec(self, op: Optional[object]) -> int:
+    def _prec(self, op: object | None) -> int:
         if op in ("==", "!=", "<", "<=", ">", ">=", "in", "like", "rlike"):
             return PREC["cmp"]
         if op in ("+", "-", "||"):
@@ -861,8 +859,8 @@ class Parser:
             file=self.path, line=t.line, col=t.col,
             end_line=t.end_line, end_col=t.end_col)
 
-    def parse_window_call(self, name: str, args: List[ast.Node],
-                          span: Tuple[int, int, int, int]) -> ast.WindowCall:
+    def parse_window_call(self, name: str, args: list[ast.Node],
+                          span: tuple[int, int, int, int]) -> ast.WindowCall:
         """`fn(args) over (partition_by: [...], sort: [expr desc, ...])`.
 
         `over` is a reserved window keyword, never a bare call name; both
@@ -907,7 +905,7 @@ class Parser:
                 file=self.path, line=t.line, col=t.col,
                 end_line=t.end_line, end_col=t.end_col)
 
-    def parse_list(self, span: Tuple[int, int, int, int]) -> ast.Node:
+    def parse_list(self, span: tuple[int, int, int, int]) -> ast.Node:
         """Parse a list literal [...]."""
         # [ ... ] or [ body for var in iter ]
         first = None

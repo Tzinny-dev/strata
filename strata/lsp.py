@@ -20,13 +20,12 @@ from __future__ import annotations
 import json
 import re
 import sys
-from collections import OrderedDict
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any
 
-from .parser import parse_strata
 from .analysis import Checker, Project, StrataError
-from .functions import FUNCTIONS, Fn
+from .functions import FUNCTIONS
+from .parser import parse_strata
 
 
 @dataclass
@@ -62,7 +61,7 @@ SEVERITY_INFORMATION = 3
 SEVERITY_HINT = 4
 
 
-def diag_from_error(e: Exception) -> Optional[Diagnostic]:
+def diag_from_error(e: Exception) -> Diagnostic | None:
     """Map an exception to an LSP Diagnostic, or None when it carries no source span."""
     file = getattr(e, "file", None)
     line = getattr(e, "line", 1) - 1
@@ -87,23 +86,21 @@ def _uri(text: str) -> str:
 class LSPContext:
     """Holds the current document state for LSP operations."""
     def __init__(self) -> None:
-        self.uri: Optional[str] = None
+        self.uri: str | None = None
         self.text: str = ""
         self.path: str = "<strata>"
-        self.modules: Dict[str, Project] = {}
-        self.diagnostics: List[Diagnostic] = []
-        self.typed: Dict[str, Any] = {}
-        self.models: Dict[str, Any] = {}
-        self.sources: List[str] = []
-        self.parsed: Optional[Any] = None
+        self.modules: dict[str, Project] = {}
+        self.diagnostics: list[Diagnostic] = []
+        self.typed: dict[str, Any] = {}
+        self.models: dict[str, Any] = {}
+        self.sources: list[str] = []
+        self.parsed: Any | None = None
 
     def reload(self, text: str, uri: str) -> None:
         """Re-parse `text` for `uri` and refresh the cached project state."""
         self.text = text
         self.uri = uri
         self.path = uri.replace("file://", "")
-        import tempfile, os
-        from pathlib import Path
         self.diagnostics = []
         self.typed = {}
         self.models = {}
@@ -131,7 +128,7 @@ class LSPContext:
 class LSPServer:
     def __init__(self, ctx: LSPContext) -> None:
         self.ctx = ctx
-        self.capabilities: Dict[str, Any] = {
+        self.capabilities: dict[str, Any] = {
             "textDocumentSync": {"openClose": True, "change": 2},
             "completionProvider": {"resolveProvider": False,
                                     "triggerCharacters": ["."]},
@@ -139,7 +136,7 @@ class LSPServer:
             "definitionProvider": True,
         }
 
-    def _find_model_at(self, line: int, col: int) -> Optional[Tuple[str, int, int]]:
+    def _find_model_at(self, line: int, col: int) -> tuple[str, int, int] | None:
         """Return (model_name, col_start, col_end) or None."""
         text = self.ctx.text
         lines = text.split("\n")
@@ -154,9 +151,9 @@ class LSPServer:
                 return (name, m.start(1), m.end(1))
         return None
 
-    def completion(self, line: int, col: int) -> List[Dict[str, Any]]:
+    def completion(self, line: int, col: int) -> list[dict[str, Any]]:
         """Completion items at (line, col): model names and source names."""
-        items: List[Dict[str, Any]] = []
+        items: list[dict[str, Any]] = []
         # Model names
         proj = getattr(self.ctx, '_proj', None)
         if proj is not None:
@@ -186,7 +183,7 @@ class LSPServer:
                                   "insertText": cname})
         return items
 
-    def hover(self, line: int, col: int) -> Optional[Dict[str, Any]]:
+    def hover(self, line: int, col: int) -> dict[str, Any] | None:
         """Hover text for the token at (line, col), or None."""
         text = self.ctx.text
         lines = text.split("\n")
@@ -200,7 +197,6 @@ class LSPServer:
             if hasattr(tm, "schema"):
                 for cname, ccol in tm.schema.items():
                     if cname in ln and cname:
-                        from .types import StrataType
                         t = ccol.t
                         tstr = str(t) if t else "unknown"
                         if not ccol.nullable:
@@ -219,7 +215,7 @@ class LSPServer:
                         }
         return None
 
-    def definition(self, line: int, col: int) -> Optional[Dict[str, Any]]:
+    def definition(self, line: int, col: int) -> dict[str, Any] | None:
         """Definition location for the token at (line, col), or None."""
         text = self.ctx.text
         lines = text.split("\n")
@@ -247,7 +243,7 @@ def run() -> None:
     req_id = 0
     initialized = False
 
-    def send(method: str, params: Dict[str, Any] = {}, id: Optional[int] = None) -> None:
+    def send(method: str, params: dict[str, Any] = {}, id: int | None = None) -> None:
         msg = {"jsonrpc": "2.0", "method": method, "params": params}
         if id is not None:
             msg["id"] = id
@@ -317,8 +313,8 @@ def run() -> None:
             break
 
 
-def _diag_list(diagnostics: List[Diagnostic]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
+def _diag_list(diagnostics: list[Diagnostic]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     for d in diagnostics:
         out.append({
             "range": {

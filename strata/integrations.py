@@ -14,17 +14,16 @@ documented as "completed" or "production-ready".
 """
 from __future__ import annotations
 
-import json
-from typing import Any, Dict, List, Optional
 from pathlib import Path
+from typing import Any
 
 
 def airflow_dag_factory(
     module_path: str,
-    dag_id: Optional[str] = None,
+    dag_id: str | None = None,
     schedule: str = "@daily",
     catchup: bool = False,
-    tags: Optional[List[str]] = None,
+    tags: list[str] | None = None,
 ) -> str:
     """Generate an Airflow DAG Python file for a Strata module.
 
@@ -113,8 +112,8 @@ with DAG(
 
 def prefect_flow_factory(
     module_path: str,
-    flow_name: Optional[str] = None,
-    schedule: Optional[str] = None,
+    flow_name: str | None = None,
+    schedule: str | None = None,
 ) -> str:
     """Generate a Prefect flow Python file for a Strata module.
 
@@ -181,9 +180,9 @@ if __name__ == "__main__":
 
 def freshness_check_hook(
     module_path: str,
-    webhook_url: Optional[str] = None,
-    slack_channel: Optional[str] = None,
-) -> Dict[str, Any]:
+    webhook_url: str | None = None,
+    slack_channel: str | None = None,
+) -> dict[str, Any]:
     """Create a freshness check hook for monitoring.
 
     Returns a configuration dict that can be used by monitoring tools.
@@ -202,7 +201,7 @@ def freshness_check_hook(
 def partition_dependency_resolver(
     module_path: str,
     partition_column: str = "ds",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Create a partition dependency resolver for orchestrators.
 
     Returns configuration for partition-based scheduling.
@@ -222,7 +221,7 @@ def partition_dependency_resolver(
 def metrics_exporter(
     module_path: str,
     metrics_format: str = "prometheus",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Create a metrics exporter configuration for Strata pipelines.
 
     Returns configuration for exporting pipeline metrics.

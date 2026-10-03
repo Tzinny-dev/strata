@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
 
 
 class LexError(Exception):
@@ -62,7 +61,7 @@ class Lexer:
         self.pos = 0
         self.line = 1
         self.col = 1
-        self.tokens: List[Token] = []
+        self.tokens: list[Token] = []
 
     def _peek(self, off: int = 0) -> str:
         i = self.pos + off
@@ -83,10 +82,7 @@ class Lexer:
             ch = self._peek()
             if ch in " \t\r\n":
                 self._advance()
-            elif ch == "/" and self._peek(1) == "/":
-                while self.pos < len(self.text) and self._peek() != "\n":
-                    self._advance()
-            elif ch == "#":
+            elif ch == "/" and self._peek(1) == "/" or ch == "#":
                 while self.pos < len(self.text) and self._peek() != "\n":
                     self._advance()
             elif ch == "/" and self._peek(1) == "*":
@@ -100,7 +96,7 @@ class Lexer:
             else:
                 break
 
-    def _token(self, kind: str, value: Optional[object] = None) -> None:
+    def _token(self, kind: str, value: object | None = None) -> None:
         end_line, end_col = self.line, self.col
         self.tokens.append(Token(kind, value, self.line, self.col,
                                  end_line=end_line, end_col=end_col))
@@ -108,7 +104,7 @@ class Lexer:
     def _advance_to(self) -> None:
         pass
 
-    def tokenize(self) -> List[Token]:
+    def tokenize(self) -> list[Token]:
         """Run the lexer over the whole input, returning the token stream.
 
         Raises StrataError on any lexing problem (unexpected character,
@@ -173,7 +169,7 @@ class Lexer:
         cur = []
         while True:
             if self.pos >= len(self.text):
-                raise LexError(f"unterminated string",
+                raise LexError("unterminated string",
                                file=self.path, line=line, col=col,
                                end_line=self.line, end_col=self.col)
             ch = self._peek()
@@ -189,12 +185,12 @@ class Lexer:
                 while self.pos < len(self.text) and (self._peek().isalnum() or self._peek() == "_"):
                     ident.append(self._advance())
                 if not ident:
-                    raise LexError(f"empty interpolation",
+                    raise LexError("empty interpolation",
                                    file=self.path, line=self.line,
                                    col=self.col, end_line=self.line,
                                    end_col=self.col)
                 if self._peek() != "}":
-                    raise LexError(f"expected '}}'",
+                    raise LexError("expected '}'",
                                    file=self.path, line=self.line,
                                    col=self.col, end_line=self.line,
                                    end_col=self.col)
@@ -203,7 +199,7 @@ class Lexer:
             elif ch == "\\":
                 self._advance()
                 if self.pos >= len(self.text):
-                    raise LexError(f"unterminated string",
+                    raise LexError("unterminated string",
                                    file=self.path, line=line, col=col,
                                    end_line=self.line, end_col=self.col)
                 e = self._advance()

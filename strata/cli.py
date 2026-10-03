@@ -8,22 +8,27 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
-from typing import Any, Dict, List, Optional, Tuple
-
-from . import analysis
-from . import sqlgen
-from . import exec as exec_mod
+from . import analysis, sqlgen
 from . import bench as bench_mod
+from . import exec as exec_mod
+from .analysis import (
+    Checker,
+    Project,
+    StrataError,
+    TypedModel,
+    blast_radius,
+    build_down_edges,
+)
+from .diagnostic import format_diagnostic
 from .dialects import Dialect, get_dialect
 from .lexer import LexError
 from .parser import ParseError, parse_strata
-from .analysis import Project, TypedModel, StrataError, Checker, build_down_edges, blast_radius
-from .diagnostic import format_diagnostic
 
 
 def load(path: str,
-         search_dirs: Optional[List[str]] = None) -> Project:
+         search_dirs: list[str] | None = None) -> Project:
     """Parse a `.strata` file and build its analysis Project (parse errors raise)."""
     src = Path(path).read_text()
     module = parse_strata(src, path)
@@ -32,14 +37,14 @@ def load(path: str,
 
 
 def check(proj: Project,
-          model_names: Optional[List[str]] = None) -> Dict[str, TypedModel]:
+          model_names: list[str] | None = None) -> dict[str, TypedModel]:
     """Typecheck a Project; returns {model_name: TypedModel}, raising StrataError on failure."""
     ck = Checker(proj)
     tms = ck.check_all(model_names)
     return tms
 
 
-def open_warehouse(output: Optional[str], read_only: bool = False) -> Any:
+def open_warehouse(output: str | None, read_only: bool = False) -> Any:
     """Open a warehouse connection for `-o`/`--output`.
 
     `postgres://...`/`postgresql://...` connects via psycopg2 (wrapped in
@@ -65,8 +70,9 @@ def open_warehouse(output: Optional[str], read_only: bool = False) -> Any:
         except ImportError:
             raise RuntimeError(
                 "bigquery driver not available; pip install google-cloud-bigquery")
+        from urllib.parse import parse_qs, unquote, urlparse
+
         from .dbcompat import BigQueryConn
-        from urllib.parse import urlparse, parse_qs, unquote
 
         # bigquery://project/dataset?location=US  or bigquery://project.dataset
         parsed = urlparse(output)
@@ -88,8 +94,9 @@ def open_warehouse(output: Optional[str], read_only: bool = False) -> Any:
         except ImportError:
             raise RuntimeError(
                 "snowflake driver not available; pip install snowflake-connector-python")
+        from urllib.parse import parse_qs, unquote, urlparse
+
         from .dbcompat import SnowflakeConn
-        from urllib.parse import urlparse, parse_qs, unquote
 
         # snowflake://user:password@account/database/schema?warehouse=WH&role=ROLE
         parsed = urlparse(output)
@@ -144,8 +151,8 @@ def cmd_build(args: argparse.Namespace) -> int:
     return 0
 
 
-def render_build(proj: Project, tms: Dict[str, TypedModel],
-                 names: List[str]) -> str:
+def render_build(proj: Project, tms: dict[str, TypedModel],
+                 names: list[str]) -> str:
     """Deterministic build report: typed contracts + fingerprints + column
     lineage. Shared by `cmd_build` and the bench golden runner (Fase 4)."""
     out = []
@@ -208,9 +215,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def _fail_loud_contracts(proj: Project, tms: Dict[str, TypedModel],
-                         changes: List[Tuple[str, str]],
-                         radius: List[Tuple[str, str]]) -> Optional[List[Tuple[str, str]]]:
+def _fail_loud_contracts(proj: Project, tms: dict[str, TypedModel],
+                         changes: list[tuple[str, str]],
+                         radius: list[tuple[str, str]]) -> list[tuple[str, str]] | None:
     """Fail-loud §7 (E030-32): a change that removes/narrows a column that a
     downstream model reads is a cross-team contract break. Protected columns
     (contract `protected`/`primary_key`/`nonnull`) are the hard boundary: the
@@ -227,7 +234,7 @@ def _fail_loud_contracts(proj: Project, tms: Dict[str, TypedModel],
     if not breaking:
         return None
     consumed = sorted(radius)
-    print(f"\nE030: change to protected/consumed column(s) breaks consumer contract:")
+    print("\nE030: change to protected/consumed column(s) breaks consumer contract:")
     for n, c in breaking:
         print(f"  producer {n}.{c} (protected/contract-bound)")
     print(f"  -> {len(consumed)} consumer column(s) depend on it:")
@@ -280,7 +287,7 @@ def _semantic_diff(base_path: str, head_path: str,
     impact from the BASE lineage graph. Exit 1 + E030 when breaking."""
     from .diff import diff_projects, impact_radius, render, to_json_dict
 
-    def _load_checked(p: str) -> Tuple[Project, Optional[str]]:
+    def _load_checked(p: str) -> tuple[Project, str | None]:
         """Load and typecheck a module; returns (project, first-error-string-or-None)."""
         proj = load(p, search_dirs=([search_dir] if search_dir else None))
         diag = None
@@ -669,8 +676,12 @@ def cmd_import_dbt(args: argparse.Namespace) -> int:
     warehouse owns the types). With `--models DIR`, each `models/*.sql` model is
     translated into the Strata model body (SELECT/WHERE/GROUP BY/JOIN/CASE
     subset plus `WITH` CTEs; anything else is E042 fail-loud, nothing emitted)."""
-    from strata.importdbt import import_dbt_schema, import_dbt_project
-    from strata.importdbt import ImportFailedFailLoud, TransformFailLoud
+    from strata.importdbt import (
+        ImportFailedFailLoud,
+        TransformFailLoud,
+        import_dbt_project,
+        import_dbt_schema,
+    )
     path = Path(args.file)
     model_dir = getattr(args, "models", None)
     try:
@@ -691,7 +702,7 @@ def cmd_import_dbt(args: argparse.Namespace) -> int:
     return 0
 
 
-def render_graph(tms: Dict[str, TypedModel], names: List[str],
+def render_graph(tms: dict[str, TypedModel], names: list[str],
                  fmt: str = "dot") -> str:
     """DAG of the typed module: inputs (sources) plus models, with edges for
     reads and model dependencies. Deterministic (sorted), machine-parsable
@@ -763,14 +774,14 @@ def cmd_graph(args: argparse.Namespace) -> int:
     return 0
 
 
-def _topo_order(tms: Dict[str, TypedModel],
-                names: List[str]) -> List[str]:
+def _topo_order(tms: dict[str, TypedModel],
+                names: list[str]) -> list[str]:
     """Deterministic topological order of a model subset (Kahn). Used by
     `strata profile --run` to materialize one model at a time while its
     upstreams are already live (v_*)."""
     wanted = set(names)
     remaining = set(wanted)
-    order: List[str] = []
+    order: list[str] = []
     while remaining:
         ready = sorted(n for n in remaining
                        if all(d not in wanted or d in order for d in tms[n].deps))
@@ -784,10 +795,10 @@ def _topo_order(tms: Dict[str, TypedModel],
     return order
 
 
-def render_profile(proj: Project, tms: Dict[str, TypedModel], path: str,
+def render_profile(proj: Project, tms: dict[str, TypedModel], path: str,
                    dialect: Dialect, parse_ms: float, check_ms: float,
-                   emit_ms: Dict[str, float],
-                   runs: Optional[List[Tuple[str, float, int]]] = None) -> str:
+                   emit_ms: dict[str, float],
+                   runs: list[tuple[str, float, int]] | None = None) -> str:
     """Deterministic (sorted) profile report: compile phases plus, when a run
     happened, per-model materialization time and row counts."""
     out = [f"profile: {path}   dialect {dialect.name}   "
@@ -831,7 +842,7 @@ def cmd_profile(args: argparse.Namespace) -> int:
         print(str(ve), file=sys.stderr)
         return 4
     names = args.model or list(tms)
-    emit_ms: Dict[str, float] = {}
+    emit_ms: dict[str, float] = {}
     for name in _topo_order(tms, names):
         t0 = time.time()
         sqlgen.model_sql(tms[name], dialect=dialect)
@@ -1305,7 +1316,7 @@ def cmd_catalog(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """CLI entry point: build the argument parser, dispatch the subcommand, return its exit code."""
     ap = argparse.ArgumentParser(prog="strata", description="declarative, versioned data transformations")
     sub = ap.add_subparsers(dest="cmd", required=True)

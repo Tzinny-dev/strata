@@ -20,7 +20,7 @@ cluster), not guessed from documentation.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 from .types import StrataType
 
@@ -38,25 +38,25 @@ class PGConn:
         self.raw = raw
         self._cur = raw.cursor()
 
-    def execute(self, sql: str, params: Optional[Any] = None) -> "PGConn":
+    def execute(self, sql: str, params: Any | None = None) -> PGConn:
         """Run SQL (with `?` bind markers) and return self for chaining."""
         self._cur.execute(sql.replace("?", "%s"), params or None)
         return self
 
-    def fetchone(self) -> Optional[tuple]:
+    def fetchone(self) -> tuple | None:
         """Return the next result row, or None."""
         return self._cur.fetchone()
 
-    def fetchall(self) -> List[tuple]:
+    def fetchall(self) -> list[tuple]:
         """Return all remaining result rows as a list."""
         return self._cur.fetchall()
 
-    def fetchmany(self, n: int) -> List[tuple]:
+    def fetchmany(self, n: int) -> list[tuple]:
         """Return up to n remaining result rows."""
         return self._cur.fetchmany(n)
 
     @property
-    def description(self) -> Optional[Any]:
+    def description(self) -> Any | None:
         """DB-API description of the most recent result set."""
         return self._cur.description
 
@@ -76,11 +76,11 @@ class BigQueryConn:
     def __init__(self, client: Any, dataset: str = "") -> None:
         self.client = client
         self.dataset = dataset
-        self._rows: List[tuple] = []
-        self._description: Optional[Any] = None
+        self._rows: list[tuple] = []
+        self._description: Any | None = None
         self._cur_index = 0
 
-    def _inline_params(self, sql: str, params: Optional[Any]) -> str:
+    def _inline_params(self, sql: str, params: Any | None) -> str:
         if not params:
             return sql
         # exec.py only uses `?` for schema/table names — safe to inline as 'literal'
@@ -90,7 +90,7 @@ class BigQueryConn:
             out = out.replace("?", lit, 1)
         return out
 
-    def execute(self, sql: str, params: Optional[Any] = None) -> "BigQueryConn":
+    def execute(self, sql: str, params: Any | None = None) -> BigQueryConn:
         """Run SQL and store result for fetch* chaining."""
         q = self._inline_params(sql, params)
         # BigQuery `client.query` is async — wait for result
@@ -106,25 +106,25 @@ class BigQueryConn:
             self._description = None
         return self
 
-    def fetchone(self) -> Optional[tuple]:
+    def fetchone(self) -> tuple | None:
         if self._cur_index >= len(self._rows):
             return None
         row = self._rows[self._cur_index]
         self._cur_index += 1
         return row
 
-    def fetchall(self) -> List[tuple]:
+    def fetchall(self) -> list[tuple]:
         rows = self._rows[self._cur_index :]
         self._cur_index = len(self._rows)
         return rows
 
-    def fetchmany(self, n: int) -> List[tuple]:
+    def fetchmany(self, n: int) -> list[tuple]:
         rows = self._rows[self._cur_index : self._cur_index + n]
         self._cur_index += len(rows)
         return rows
 
     @property
-    def description(self) -> Optional[Any]:
+    def description(self) -> Any | None:
         return self._description
 
     def close(self) -> None:
@@ -141,23 +141,23 @@ class SnowflakeConn:
         self.raw = raw
         self._cur = raw.cursor()
 
-    def execute(self, sql: str, params: Optional[Any] = None) -> "SnowflakeConn":
+    def execute(self, sql: str, params: Any | None = None) -> SnowflakeConn:
         # snowflake-connector uses %s or ? depending, accept both — translate ? → %s
         q = sql.replace("?", "%s") if params else sql
         self._cur.execute(q, params or None)
         return self
 
-    def fetchone(self) -> Optional[tuple]:
+    def fetchone(self) -> tuple | None:
         return self._cur.fetchone()
 
-    def fetchall(self) -> List[tuple]:
+    def fetchall(self) -> list[tuple]:
         return self._cur.fetchall()
 
-    def fetchmany(self, n: int) -> List[tuple]:
+    def fetchmany(self, n: int) -> list[tuple]:
         return self._cur.fetchmany(n)
 
     @property
-    def description(self) -> Optional[Any]:
+    def description(self) -> Any | None:
         return self._cur.description
 
     def close(self) -> None:
@@ -204,7 +204,7 @@ def db_schema(con: Any) -> str:
     return "main"
 
 
-def live_view_defs(con: Any) -> Dict[str, str]:
+def live_view_defs(con: Any) -> dict[str, str]:
     """{view_name: definition_text}, used only for substring/regex search
     for a snapshot table name (see exec._current_snapshot_table,
     recover_metadata, protected_runs, gc_plan, gc_snapshots, run()).
@@ -259,7 +259,7 @@ _PG_ARRAY_ELEM = {
 }
 
 
-def physical_schema(con: Any, view: str) -> Dict[str, str]:
+def physical_schema(con: Any, view: str) -> dict[str, str]:
     """Actual physical column types of a live table/view, normalized into
     the same convention `physical_types()` below compares against.
 
@@ -278,7 +278,7 @@ def physical_schema(con: Any, view: str) -> Dict[str, str]:
             "numeric_scale, udt_name FROM information_schema.columns "
             "WHERE table_schema = ? AND table_name = ? "
             "ORDER BY ordinal_position", [schema, view]).fetchall()
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         for name, dtype, prec, scale, udt in rows:
             if dtype == "numeric" and prec is not None:
                 out[name] = f"NUMERIC({prec},{scale or 0})"
@@ -323,7 +323,7 @@ _DUCKDB_INT64_PHYSICAL = {"BIGINT", "INTEGER", "HUGEINT"}
 _PG_INT64_PHYSICAL = {"BIGINT", "INTEGER"}
 
 
-def physical_types(con: Any, t: StrataType) -> Set[str]:
+def physical_types(con: Any, t: StrataType) -> set[str]:
     """Acceptable warehouse storage types for a declared Strata type,
     dialect-aware via the connection actually in use. Narrowing (e.g. a
     BIGINT column promised, VARCHAR/TEXT found) is never accepted
@@ -360,7 +360,7 @@ def physical_types(con: Any, t: StrataType) -> Set[str]:
         return {"JSONB"} if pg else {"JSON"}
     if t.name == "decimal":
         if bq:
-            return {f"NUMERIC", f"BIGNUMERIC", f"DECIMAL({t.precision},{t.scale})", f"NUMERIC({t.precision},{t.scale})"}
+            return {"NUMERIC", "BIGNUMERIC", f"DECIMAL({t.precision},{t.scale})", f"NUMERIC({t.precision},{t.scale})"}
         type_str = f"NUMERIC({t.precision},{t.scale})" if is_pg_like \
             else f"DECIMAL({t.precision},{t.scale})"
         return {type_str}

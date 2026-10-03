@@ -8,8 +8,7 @@ instead of emitting a silently-wrong query.
 """
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Optional
-
+from collections.abc import Callable
 
 from .types import StrataType
 
@@ -19,12 +18,12 @@ class Dialect:
     types, function overrides, optional partitioning support)."""
 
     def __init__(self, name: str, quote_ident: Callable[[str], str],
-                 type_map: Dict[str, str],
+                 type_map: dict[str, str],
                  decimal: Callable[[int, int], str], money: str,
                  array: Callable[[str], str], supports_anti_semi: bool,
-                 function_map: Optional[Dict[str, str]] = None,
+                 function_map: dict[str, str] | None = None,
                  supports_partitioning: bool = False,
-                 partition_clause: Optional[Callable[[List[str]], str]] = None) -> None:
+                 partition_clause: Callable[[list[str]], str] | None = None) -> None:
         self.name = name
         self._quote = quote_ident
         self.type_map = type_map
@@ -46,7 +45,7 @@ class Dialect:
         return f"{alias}.{self.ident(name)}"
 
     # -- types ----------------------------------------------------------
-    def sql_type(self, name: str) -> Optional[str]:
+    def sql_type(self, name: str) -> str | None:
         """Physical SQL type for a logical type name, or None if unknown."""
         return self.type_map.get(name)
 
@@ -73,7 +72,7 @@ class Dialect:
         raise ValueError(f"dialect {self.name}: unknown cast target {spec!r}")
 
     # -- partitioning --------------------------------------------------
-    def partition_clause(self, columns: List[str]) -> str:
+    def partition_clause(self, columns: list[str]) -> str:
         """Generate partitioning clause for CTAS if supported.
 
         Returns empty string if dialect doesn't support partitioning.

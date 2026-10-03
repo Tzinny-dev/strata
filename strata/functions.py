@@ -14,14 +14,24 @@ differently overrides this catalog; the catalog is the default.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
-from typing import Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from .dialects import Dialect
 from .types import (
-    Inf, StrataType, INT64, FLOAT64, STRING, BOOL, JSON, UNKNOWN, array,
-    map_type, struct_type, unify,
+    BOOL,
+    FLOAT64,
+    INT64,
+    JSON,
+    STRING,
+    UNKNOWN,
+    Inf,
+    StrataType,
+    array,
+    map_type,
+    struct_type,
+    unify,
 )
 
 # error codes owned by this module
@@ -52,7 +62,7 @@ _JSONPATH_FILTER = re.compile(r"\?\s*\(")
 _JSONPATH_STEP = re.compile(r"(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\])")
 
 
-def json_path_problem(path: object) -> Optional[str]:
+def json_path_problem(path: object) -> str | None:
     """Why a literal ``json_path()`` path cannot be emitted, or None if it can.
 
     Lives next to the catalog so the checker and the code generator reject the
@@ -100,7 +110,7 @@ def _kind_label(fn: Fn, i: int) -> str:
     return fn.arg_kinds[i - 1] if i <= len(fn.arg_kinds) else fn.kind
 
 
-_KINDS: Dict[str, Callable[[Inf], bool]] = {
+_KINDS: dict[str, Callable[[Inf], bool]] = {
     "any": lambda a: True,
     "numeric": _numeric,
     "string": lambda a: a.t == STRING,
@@ -125,17 +135,17 @@ class Fn:
     """
     name: str
     min_args: int
-    ret: Callable[[List[Inf]], Inf]
+    ret: Callable[[list[Inf]], Inf]
     max_args: int = -1                 # -1 = unbounded
     kind: str = "any"                  # default per-argument kind (see _KINDS)
-    arg_kinds: Tuple[str, ...] = ()    # per-position kind override, 1-based
+    arg_kinds: tuple[str, ...] = ()    # per-position kind override, 1-based
     ret_label: str = ""                # result-type label for the E063 message
     aggregate: bool = False            # only legal inside a group body
     window: bool = False               # legal under over(...)
     accepts_star: bool = False         # count(*)
-    sql: Optional[str] = None          # SQL spelling; default upper(name)
+    sql: str | None = None          # SQL spelling; default upper(name)
     doc: str = ""
-    unit_names: Optional[frozenset] = None   # date fns: legal unit spellings
+    unit_names: frozenset | None = None   # date fns: legal unit spellings
     collection: bool = False          # requires typed collection codegen
 
     @property
@@ -147,7 +157,7 @@ class Fn:
         return self.sql or self.name.upper()
 
 
-def _unify_all(args: List[Inf]) -> StrataType:
+def _unify_all(args: list[Inf]) -> StrataType:
     """Least upper bound across arguments; `null` (unknown) arguments adapt to
     the rest, so coalesce(a, null) is a string, not a mismatch."""
     t = UNKNOWN
@@ -161,7 +171,7 @@ def _unify_all(args: List[Inf]) -> StrataType:
     return t
 
 
-def _if_ret(args: List[Inf]) -> Inf:
+def _if_ret(args: list[Inf]) -> Inf:
     """if(cond, then, else): exactly one branch runs per row, and either one
     could be the row that runs, so either being nullable makes the result
     nullable — unlike coalesce, which only turns non-nullable once EVERY
@@ -170,7 +180,7 @@ def _if_ret(args: List[Inf]) -> Inf:
     return Inf(_unify_all(branches), any(b.nullable for b in branches))
 
 
-def _case_values(args: List[Inf]) -> List[Inf]:
+def _case_values(args: list[Inf]) -> list[Inf]:
     """The THEN/ELSE value slots of a case(cond, val, [cond, val, ...],
     [else]) call: every odd-indexed arg, plus a trailing ELSE if the
     argument count is odd."""
@@ -181,7 +191,7 @@ def _case_values(args: List[Inf]) -> List[Inf]:
     return values
 
 
-def _case_ret(args: List[Inf]) -> Inf:
+def _case_ret(args: list[Inf]) -> Inf:
     """case(...): nullable whenever there's no ELSE (an unmatched row falls
     through to SQL NULL regardless of branch types) or any value branch is
     itself nullable."""
@@ -190,7 +200,7 @@ def _case_ret(args: List[Inf]) -> Inf:
     return Inf(_unify_all(values), (not has_else) or any(v.nullable for v in values))
 
 
-def _check_if(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
+def _check_if(fn: Fn, args: list[Inf]) -> tuple[str, str] | None:
     """Validate an if() call: condition must be bool; return type is LUB of
     then/else branches. Returns (error_code, message) if validation fails,
     or None if OK."""
@@ -204,7 +214,7 @@ def _check_if(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
     return None
 
 
-def _check_case(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
+def _check_case(fn: Fn, args: list[Inf]) -> tuple[str, str] | None:
     """Validate a case() call: each condition must be bool; return type is
     LUB of all value branches. No ELSE means result is NULL for unmatched rows.
     Returns (error_code, message) if validation fails, or None if OK."""
@@ -235,7 +245,7 @@ def _arity_msg(fn: Fn) -> str:
     return f"{fn.name}() takes {want} argument(s)"
 
 
-def check(fn: Fn, args: List[Inf], has_star: bool = False) -> Optional[Tuple[str, str]]:
+def check(fn: Fn, args: list[Inf], has_star: bool = False) -> tuple[str, str] | None:
     """Return (code, message) when the call is malformed, else None.
 
     Pure on purpose: the checker owns error construction and spans, so this
@@ -322,7 +332,7 @@ def _valid_elem(t: StrataType) -> bool:
     return t.name == "array" and t.elem is not None and _valid_elem(t.elem)
 
 
-def _constructed_type(args: List[Inf]) -> StrataType:
+def _constructed_type(args: list[Inf]) -> StrataType:
     """Construct a STRATA type from a list of ``Inf`` value types.
 
     Returns the first non-UNKNOWN type found among the arguments, wrapped
@@ -331,7 +341,7 @@ def _constructed_type(args: List[Inf]) -> StrataType:
     return array(next(a.t for a in args if a.t != UNKNOWN))
 
 
-def _map_constructed_type(args: List[Inf]) -> StrataType:
+def _map_constructed_type(args: list[Inf]) -> StrataType:
     """Map/dict constructor return type: the (unified) key and value types.
     Keys are proven string by ``_check_map_operation``; values unify over
     the JSON-representable scalar set."""
@@ -350,7 +360,7 @@ def _valid_map_value(t: StrataType) -> bool:
     return t.name in ("string", "int64", "float64", "bool", "decimal", "money", "json")
 
 
-def _check_map_operation(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
+def _check_map_operation(fn: Fn, args: list[Inf]) -> tuple[str, str] | None:
     """Validate map/dict constructors and map_get:
     - map/dict need key/value pairs (even count), string keys, homogeneous
       JSON-representable value types;
@@ -382,7 +392,7 @@ def _check_map_operation(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
     return None
 
 
-def _struct_constructed_type(args: List[Inf]) -> StrataType:
+def _struct_constructed_type(args: list[Inf]) -> StrataType:
     """Struct constructor return type: named fields with their unified types.
     Args come as (name, value) pairs; names are literal strings, values unify."""
     fields = []
@@ -409,7 +419,7 @@ def _struct_field_type(struct_t: StrataType, field_expr: Inf) -> StrataType:
     return UNKNOWN
 
 
-def _check_struct_operation(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
+def _check_struct_operation(fn: Fn, args: list[Inf]) -> tuple[str, str] | None:
     """Validate struct() constructor and struct_get() accessor.
     - struct() needs name/value pairs (even count), string literal names;
     - struct_get() needs a typed struct and a string literal field name."""
@@ -432,7 +442,7 @@ def _check_struct_operation(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]
     return None
 
 
-def _check_json_build(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
+def _check_json_build(fn: Fn, args: list[Inf]) -> tuple[str, str] | None:
     """Validate a json_build() call: requires an even number of arguments
     (key/value pairs). Non-NULL keys must be string-typed.
 
@@ -450,7 +460,7 @@ def _check_json_build(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
     return None
 
 
-def _check_array_operation(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]:
+def _check_array_operation(fn: Fn, args: list[Inf]) -> tuple[str, str] | None:
     """Validate array operation calls (array_append, array_prepend, array_remove,
     array_index_of, array_construct, array_contains, array_concat).
 
@@ -494,7 +504,7 @@ def _check_array_operation(fn: Fn, args: List[Inf]) -> Optional[Tuple[str, str]]
     return None
 
 
-def check_date_call(fn: Fn, unit: str) -> Optional[Tuple[str, str]]:
+def check_date_call(fn: Fn, unit: str) -> tuple[str, str] | None:
     """Validate the symbolic unit of a date call (`years: 1` kwarg name or
     `month` unit literal). Split from ``check`` because the unit is not an
     expression argument — the caller (analysis) extracts it from the AST."""
@@ -507,7 +517,7 @@ def check_date_call(fn: Fn, unit: str) -> Optional[Tuple[str, str]]:
 
 # ---------------------------------------------------------------- the catalog
 
-def _same(a: List[Inf]) -> Inf:
+def _same(a: list[Inf]) -> Inf:
     """Return the type and nullability of the single argument.
 
     Used by max() and min() as the identity function: the result
@@ -515,7 +525,7 @@ def _same(a: List[Inf]) -> Inf:
     return Inf(a[0].t, a[0].nullable)
 
 
-def _unified(a: List[Inf]) -> Inf:
+def _unified(a: list[Inf]) -> Inf:
     """Return the unified type and nullability of multiple arguments.
 
     The result type is the least upper bound (LUB) of all argument types
@@ -532,7 +542,7 @@ DATE_ADD_UNITS = frozenset({"years", "quarters", "months", "weeks", "days"})
 DATE_TRUNC_UNITS = frozenset({"year", "quarter", "month", "week", "day"})
 
 
-FUNCTIONS: List[Fn] = [
+FUNCTIONS: list[Fn] = [
     Fn("count", 0, lambda a: Inf(INT64, False), max_args=1,
        aggregate=True, window=True, accepts_star=True,
        doc="rows in the group; count() and count(*) count rows, count(col) skips NULL"),
@@ -711,7 +721,7 @@ FUNCTIONS: List[Fn] = [
        doc="last argument value inside the partition"),
 ]
 
-_BY_NAME: Dict[str, Fn] = {f.name: f for f in FUNCTIONS}
+_BY_NAME: dict[str, Fn] = {f.name: f for f in FUNCTIONS}
 
 AGGREGATES = frozenset(f.name for f in FUNCTIONS if f.aggregate)
 
@@ -729,7 +739,7 @@ def is_windowable(name: str) -> bool:
     return bool(fn) and fn.window
 
 
-def get(name: str) -> Optional[Fn]:
+def get(name: str) -> Fn | None:
     """Look up a function, or None when the language does not declare it."""
     return _BY_NAME.get(name)
 
@@ -739,7 +749,7 @@ def is_aggregate(name: str) -> bool:
     return name in AGGREGATES
 
 
-def emit_sql(name: str, args_sql: str, dialect: Optional[Dialect] = None) -> str:
+def emit_sql(name: str, args_sql: str, dialect: Dialect | None = None) -> str:
     """SQL for a declared function: dialect spelling wins over the default.
 
     A no-argument call to a star-accepting function (``count()``) emits

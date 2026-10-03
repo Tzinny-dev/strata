@@ -11,16 +11,14 @@ present as a production testing framework.
 """
 from __future__ import annotations
 
-import datetime
-from typing import Any, Dict, List, Optional, Tuple
-from pathlib import Path
-import tempfile
 import os
+import tempfile
+from typing import Any
 
 
 def create_test_source(
     name: str,
-    columns: Dict[str, str],
+    columns: dict[str, str],
     ns: str = "test_ns",
     dataset: str = "test_dataset",
 ) -> str:
@@ -32,13 +30,13 @@ def create_test_source(
 def create_test_model(
     name: str,
     source: str,
-    freshness: Optional[str] = None,
-    freshness_column: Optional[str] = None,
-    partition_by: Optional[List[str]] = None,
+    freshness: str | None = None,
+    freshness_column: str | None = None,
+    partition_by: list[str] | None = None,
     incremental: bool = False,
-    merge_strategy: Optional[str] = None,
-    merge_keys: Optional[List[str]] = None,
-    cdc_column: Optional[str] = None,
+    merge_strategy: str | None = None,
+    merge_keys: list[str] | None = None,
+    cdc_column: str | None = None,
     staleness_ok: bool = False,
 ) -> str:
     """Create a test model declaration."""
@@ -72,9 +70,9 @@ def create_test_model(
 
 
 def create_test_module(
-    sources: Dict[str, Dict[str, str]],
-    models: Dict[str, Dict[str, Any]],
-    output_dir: Optional[str] = None,
+    sources: dict[str, dict[str, str]],
+    models: dict[str, dict[str, Any]],
+    output_dir: str | None = None,
 ) -> str:
     """Create a complete test module with sources and models.
 
@@ -126,10 +124,10 @@ def create_test_module(
 def create_stale_data(
     con: Any,
     table_name: str,
-    rows: List[Tuple],
-    columns: List[str],
+    rows: list[tuple],
+    columns: list[str],
     hours_old: int = 0,
-    timestamp_column: Optional[str] = None,
+    timestamp_column: str | None = None,
 ) -> None:
     """Create test data that appears stale.
 
@@ -154,8 +152,8 @@ def create_stale_data(
 def create_fresh_data(
     con: Any,
     table_name: str,
-    rows: List[Tuple],
-    columns: List[str],
+    rows: list[tuple],
+    columns: list[str],
 ) -> None:
     """Create test data that appears fresh (current timestamp).
 
@@ -171,8 +169,8 @@ def create_fresh_data(
 def simulate_source_change(
     con: Any,
     table_name: str,
-    new_rows: List[Tuple],
-    columns: List[str],
+    new_rows: list[tuple],
+    columns: list[str],
 ) -> None:
     """Simulate a source data change by inserting new rows.
 
@@ -192,11 +190,10 @@ class FreshnessTestHelper:
 
     def __init__(self, con: Any) -> None:
         self.con = con
-        self.tables_created: List[str] = []
+        self.tables_created: list[str] = []
 
     def setup(self) -> None:
         """Set up test tables."""
-        pass
 
     def teardown(self) -> None:
         """Clean up test tables."""
@@ -210,8 +207,8 @@ class FreshnessTestHelper:
     def create_source_table(
         self,
         name: str,
-        columns: Dict[str, str],
-        rows: Optional[List[Tuple]] = None,
+        columns: dict[str, str],
+        rows: list[tuple] | None = None,
     ) -> None:
         """Create a source table for testing."""
         cols = ", ".join(f"{col} {typ}" for col, typ in columns.items())
@@ -226,25 +223,23 @@ class FreshnessTestHelper:
     def assert_model_is_stale(self, model_name: str, expected_stale: bool = True) -> None:
         """Assert that a model is stale or fresh."""
         # This would need to be implemented with actual staleness checking
-        pass
 
     def assert_freshness_threshold(self, model_name: str, expected_hours: float) -> None:
         """Assert that a model has the expected freshness threshold."""
         # This would need to be implemented with actual threshold checking
-        pass
 
     def get_table_row_count(self, table_name: str) -> int:
         """Get the row count of a table."""
         result = self.con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
         return result[0] if result else 0
 
-    def get_table_columns(self, table_name: str) -> List[str]:
+    def get_table_columns(self, table_name: str) -> list[str]:
         """Get the column names of a table."""
         result = self.con.execute(f"DESCRIBE {table_name}").fetchall()
         return [row[0] for row in result]
 
 
-def create_test_fixtures() -> Dict[str, Any]:
+def create_test_fixtures() -> dict[str, Any]:
     """Create common test fixtures for freshness testing."""
     return {
         "sources": {

@@ -16,12 +16,12 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
 
-from .analysis import Checker, Project, StrataError
+from .analysis import Project, StrataError
 from .dialects import get_dialect
-from .sqlgen import full_sql
 from .diff import diff_projects, impact_radius, to_json_dict
+from .sqlgen import full_sql
+
 
 def _bench_dir() -> Path:
     """Bench dir, aware of PyInstaller frozen builds (sys._MEIPASS).
@@ -46,7 +46,7 @@ DIALECTS = ("duckdb", "postgres", "snowflake", "bigquery")
 
 
 def _run_module(root: Path, case: dict) -> list[str]:
-    from .cli import load, check, render_build  # lazy: cli imports this module
+    from .cli import check, load, render_build  # lazy: cli imports this module
     mod = root / case["module"]
     proj = load(str(mod))
     tms = check(proj)
@@ -61,8 +61,8 @@ def _run_module(root: Path, case: dict) -> list[str]:
 
 
 def _run_diff(root: Path, case: dict) -> list[str]:
-    from .cli import load, check  # lazy: cli imports this module
-    def _load(p: str) -> Tuple[Project, Optional[str]]:
+    from .cli import check, load  # lazy: cli imports this module
+    def _load(p: str) -> tuple[Project, str | None]:
         proj = load(str(root / p))
         diag = None
         try:

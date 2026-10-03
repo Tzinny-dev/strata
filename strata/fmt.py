@@ -1,11 +1,12 @@
 """Strata canonical formatter: AST -> text (idempotent)."""
 from __future__ import annotations
+
 from decimal import Decimal
 from math import isfinite
 
 from . import ast
 from .lexer import KEYWORDS, TYPE_KEYWORDS
-from typing import List
+
 
 def _q(s: str) -> str:
     # Escape literal interpolation markers; TemplateStr emits its variables separately.
@@ -34,7 +35,7 @@ def _type_param(p: object) -> str:
         return f"money({sub[0]})" if sub else "money"
     return spec
 
-def _type_str(spec: str, params: List[object]) -> str:
+def _type_str(spec: str, params: list[object]) -> str:
     if spec == "decimal":
         return f"decimal({params[0]}, {params[1]})"
     if spec == "array":
@@ -129,7 +130,7 @@ def _expr(e: ast.Node) -> str:
         return "\n".join(lines)
     raise ValueError(f"unsupported expression: {type(e).__name__}")
 
-def _stmts(stmts: List[ast.Stmt], ind: str) -> List[str]:
+def _stmts(stmts: list[ast.Stmt], ind: str) -> list[str]:
     out = []
     for s in stmts:
         if isinstance(s, ast.FromStmt):

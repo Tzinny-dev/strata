@@ -1,10 +1,8 @@
 """Strata AST nodes."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple, Dict
-
-from .types import Col
 
 
 @dataclass
@@ -22,13 +20,13 @@ class Literal(Node):
 @dataclass
 class ColumnRef(Node):
     name: str = ""
-    qualifier: Optional[str] = None
+    qualifier: str | None = None
 
 
 @dataclass
 class Call(Node):
     name: str = ""
-    args: List[Node] = field(default_factory=list)
+    args: list[Node] = field(default_factory=list)
     # `count(distinct x)`: the only DISTINCT aggregate form the language
     # offers (validated by the typechecker against the catalog).
     distinct: bool = False
@@ -48,15 +46,14 @@ class Kwarg(Node):
 @dataclass
 class Star(Node):
     """`*` as a call argument: only valid inside count(*)."""
-    pass
 
 
 @dataclass
 class WindowSpec(Node):
     """The `over (...)` clause of a window call: partition columns plus the
     ordering inside each partition, reusing the `sort` (expr, desc) shape."""
-    partition_by: List[Node] = field(default_factory=list)
-    sort: List[Tuple[Node, bool]] = field(default_factory=list)
+    partition_by: list[Node] = field(default_factory=list)
+    sort: list[tuple[Node, bool]] = field(default_factory=list)
 
 
 @dataclass
@@ -64,7 +61,7 @@ class WindowCall(Node):
     """`fn(args) over (partition_by: [...], sort: [...])`: a function applied
     over a window, evaluated after grouping/aggregation in the outer query."""
     name: str = ""
-    args: List[Node] = field(default_factory=list)
+    args: list[Node] = field(default_factory=list)
     over: WindowSpec = None
     # count(distinct x) inside a window: parsed but rejected by the
     # typechecker (the DISTINCT aggregate form is only supported in the
@@ -88,12 +85,12 @@ class UnOp(Node):
 @dataclass
 class TemplateStr(Node):
     # "prefix{id}suffix{id2}" -> parts
-    parts: List[Tuple[str, Optional[str]]] = field(default_factory=list)
+    parts: list[tuple[str, str | None]] = field(default_factory=list)
 
 
 @dataclass
 class ListExpr(Node):
-    items: List[Node] = field(default_factory=list)
+    items: list[Node] = field(default_factory=list)
 
 
 @dataclass
@@ -107,9 +104,9 @@ class ListComprehension(Node):
 class ModelValue(Node):
     """model literal used inside fn bodies (compile-time value constructor)."""
     name: Node = None
-    contract: Optional[str] = None
-    attrs: Dict[str, str] = field(default_factory=dict)
-    stmts: List["Stmt"] = field(default_factory=list)
+    contract: str | None = None
+    attrs: dict[str, str] = field(default_factory=dict)
+    stmts: list[Stmt] = field(default_factory=list)
 
 
 # ------------------------------------------------------------------ statements
@@ -129,7 +126,7 @@ class JoinStmt(Stmt):
     kind: str = ""          # left inner anti semi
     table: str = ""
     on: Node = None
-    expect: Optional[str] = None  # None | "many_to_one" | "one_to_one"
+    expect: str | None = None  # None | "many_to_one" | "one_to_one"
 
 
 @dataclass
@@ -151,30 +148,30 @@ class OutAssign(Node):
 
 @dataclass
 class DeriveStmt(Stmt):
-    assigns: List[OutAssign] = field(default_factory=list)
+    assigns: list[OutAssign] = field(default_factory=list)
 
 
 @dataclass
 class AggregateStmt(Stmt):
-    assigns: List[OutAssign] = field(default_factory=list)
+    assigns: list[OutAssign] = field(default_factory=list)
 
 
 @dataclass
 class GroupStmt(Stmt):
-    keys: List[Node] = field(default_factory=list)
-    body: List[Stmt] = field(default_factory=list)
+    keys: list[Node] = field(default_factory=list)
+    body: list[Stmt] = field(default_factory=list)
 
 
 @dataclass
 class SortStmt(Stmt):
-    keys: List[Tuple[Node, bool]] = field(default_factory=list)  # (expr, desc)
+    keys: list[tuple[Node, bool]] = field(default_factory=list)  # (expr, desc)
 
 
 @dataclass
 class TakeStmt(Stmt):
-    start: Optional[int] = None
-    end: Optional[int] = None
-    limit: Optional[int] = None
+    start: int | None = None
+    end: int | None = None
+    limit: int | None = None
 
 
 @dataclass
@@ -215,13 +212,13 @@ class DedupStmt(Stmt):
     keep-one-row-per-key (ROW_NUMBER partitioned by the keys, ordered by the
     remaining output columns, rn = 1), portable across all four engines.
     """
-    by: List[Node] = field(default_factory=list)
+    by: list[Node] = field(default_factory=list)
     span: Any = None
 
 
 @dataclass
 class SelectStmt(Stmt):
-    assigns: List[OutAssign] = field(default_factory=list)
+    assigns: list[OutAssign] = field(default_factory=list)
 
 
 # ------------------------------------------------------------------ declarations
@@ -229,27 +226,27 @@ class SelectStmt(Stmt):
 @dataclass
 class SourceDecl(Node):
     name: str = ""
-    resource: Dict[str, str] = field(default_factory=dict)
-    props: List[Tuple[str, str]] = field(default_factory=list)
+    resource: dict[str, str] = field(default_factory=dict)
+    props: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
 class ContractField(Node):
     name: str = ""
     type_spec: str = ""
-    params: List[object] = field(default_factory=list)
+    params: list[object] = field(default_factory=list)
     nonnull: bool = False
     unique: bool = False
     primary: bool = False
     protected: bool = False
     enum: list = field(default_factory=list)
-    classification: Optional[str] = None
+    classification: str | None = None
 
 
 @dataclass
 class ContractDecl(Node):
     name: str = ""
-    fields: List[ContractField] = field(default_factory=list)
+    fields: list[ContractField] = field(default_factory=list)
 
 
 @dataclass
@@ -262,30 +259,30 @@ class DomainDecl(Node):
     """
     name: str = ""
     type_spec: str = ""
-    params: List[object] = field(default_factory=list)
+    params: list[object] = field(default_factory=list)
 
 
 @dataclass
 class ModelDecl(Node):
     name: str = ""
-    contract: Optional[str] = None
-    attrs: Dict[str, str] = field(default_factory=dict)
-    partition_by: List[Node] = field(default_factory=list)
-    freshness: Optional[List[str]] = None  # e.g. ['incremental'], ['1h', 'daily']
-    freshness_column: Optional[str] = None  # event-time column for freshness check
+    contract: str | None = None
+    attrs: dict[str, str] = field(default_factory=dict)
+    partition_by: list[Node] = field(default_factory=list)
+    freshness: list[str] | None = None  # e.g. ['incremental'], ['1h', 'daily']
+    freshness_column: str | None = None  # event-time column for freshness check
     # Incremental model configuration
     incremental: bool = False  # True if this is an incremental model
-    merge_keys: List[Node] = field(default_factory=list)  # Keys for upsert/merge
-    merge_strategy: Optional[str] = None  # 'upsert', 'append', 'replace'
-    cdc_column: Optional[str] = None  # Change Data Capture column
-    stmts: List[Stmt] = field(default_factory=list)
+    merge_keys: list[Node] = field(default_factory=list)  # Keys for upsert/merge
+    merge_strategy: str | None = None  # 'upsert', 'append', 'replace'
+    cdc_column: str | None = None  # Change Data Capture column
+    stmts: list[Stmt] = field(default_factory=list)
     generated: bool = False       # produced by fn expansion
 
 
 @dataclass
 class FnDecl(Node):
     name: str = ""
-    params: List[Tuple[str, str]] = field(default_factory=list)
+    params: list[tuple[str, str]] = field(default_factory=list)
     body: Node = None
     return_type: str = ""
 
@@ -293,9 +290,9 @@ class FnDecl(Node):
 @dataclass
 class PipelineDecl(Node):
     name: str = ""
-    env: Optional[str] = None
-    models: List[Node] = field(default_factory=list)
-    sources: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    env: str | None = None
+    models: list[Node] = field(default_factory=list)
+    sources: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -316,29 +313,29 @@ class TestDecl(Node):
     evaluated at run-time against the staged view of the model — a failing
     test aborts the swap (fail-closed blue-green)."""
     model: str = ""
-    checks: List["TestCheck"] = field(default_factory=list)
+    checks: list[TestCheck] = field(default_factory=list)
 
 
 @dataclass
 class TestCheck(Node):
     kind: str = "expect"   # reserved: 'row_count'
-    col: Optional[str] = None
-    op: Optional[str] = None
+    col: str | None = None
+    op: str | None = None
     value: object = None
 
 
 @dataclass
 class Module:
     path: str = ""
-    decls: List[Node] = field(default_factory=list)
+    decls: list[Node] = field(default_factory=list)
 
-    def find(self, kind: Callable[[Node], bool], name: Optional[str] = None) -> Optional[Node]:
+    def find(self, kind: Callable[[Node], bool], name: str | None = None) -> Node | None:
         """First declaration whose kind matches and, if given, whose name matches; None otherwise."""
         for d in self.decls:
             if kind(d) and (name is None or d.name == name):
                 return d
         return None
 
-    def all(self, kind: Callable[[Node], bool]) -> List[Node]:
+    def all(self, kind: Callable[[Node], bool]) -> list[Node]:
         """Every declaration whose kind matches."""
         return [d for d in self.decls if kind(d)]

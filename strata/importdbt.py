@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """`strata import-dbt` — Fase 2 §11 adoption: migrate a dbt project WITHOUT
 leaving the warehouse, by importing the dbt schema.yml (sources + models with
 column contracts) into a deterministic .strata artifact that must pass
@@ -24,8 +23,8 @@ from __future__ import annotations
 import re
 import sys
 from argparse import Namespace
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import yaml
 
@@ -86,9 +85,9 @@ _TOKEN = re.compile(r"""\"[^\"]*\"|'[^']*'|\d+(?:\.\d+)?|[A-Za-z_]\w*|[<>=!<>+*/
                     re.VERBOSE)
 
 
-def _split_top_level(tokens: List[Tuple[str, int]], sep: str) -> List[List[Tuple[str, int]]]:
+def _split_top_level(tokens: list[tuple[str, int]], sep: str) -> list[list[tuple[str, int]]]:
     """Split a token stream at depth-0 separators (aggregate parens nest)."""
-    out: List[List[Tuple[str, int]]] = [[]]
+    out: list[list[tuple[str, int]]] = [[]]
     for tok, depth in tokens:
         if depth == 0 and tok == sep:
             out.append([])
@@ -97,10 +96,10 @@ def _split_top_level(tokens: List[Tuple[str, int]], sep: str) -> List[List[Tuple
     return out
 
 
-def _strip_jinja(sql: str, model: str, models: Set[str], sources: Set[str]) -> str:
+def _strip_jinja(sql: str, model: str, models: set[str], sources: set[str]) -> str:
     """Resolve ONLY `{{ ref('m') }}`, `{{ source('ns','t') }}` and `{{ config(...) }}`.
     Any other Jinja (`{{ macro(...) }}`, `{% ... %}`) fails loud E042."""
-    out: List[str] = []
+    out: list[str] = []
     i = 0
     while True:
         start = sql.find("{{", i)
@@ -140,8 +139,8 @@ def _strip_jinja(sql: str, model: str, models: Set[str], sources: Set[str]) -> s
             f"E042: {model}: Jinja `{{{{ {inner} }}}}` is not one of the supported "
             f"ref/source/config forms; macros are out of the translatable subset "
             f"(fail-loud §4, translate it to plain Strata instead).")
-    res = re.sub(r"\{#.*?#\}", "", "".join(out), flags=re.S)
-    m = re.search(r"\{%.*?%\}", res, flags=re.S)
+    res = re.sub(r"\{#.*?#\}", "", "".join(out), flags=re.DOTALL)
+    m = re.search(r"\{%.*?%\}", res, flags=re.DOTALL)
     if m:
         raise TransformFailLoud(
             f"E042: {model}: Jinja block `{m.group(0)}` (e.g. dbt statenents) is "
@@ -149,9 +148,9 @@ def _strip_jinja(sql: str, model: str, models: Set[str], sources: Set[str]) -> s
     return res
 
 
-def _tokenize(sql: str) -> List[Tuple[str, int]]:
+def _tokenize(sql: str) -> list[tuple[str, int]]:
     """Token stream with values AND paren depth; `(`/`)` are kept (aggregates)."""
-    tokens: List[Tuple[str, int]] = []
+    tokens: list[tuple[str, int]] = []
     depth = 0
     for m in _TOKEN.finditer(sql):
         tok = m.group(0)
@@ -166,9 +165,9 @@ def _tokenize(sql: str) -> List[Tuple[str, int]]:
     return tokens
 
 
-def _flat_words(tokens: Iterable[Tuple[str, int]]) -> List[str]:
+def _flat_words(tokens: Iterable[tuple[str, int]]) -> list[str]:
     """Collapse `a . b` into `a.b` (SQL qualification) in a flat token run."""
-    words: List[str] = []
+    words: list[str] = []
     pending_dot = False
     for t, _ in tokens:
         if t == ".":
@@ -182,7 +181,7 @@ def _flat_words(tokens: Iterable[Tuple[str, int]]) -> List[str]:
     return words
 
 
-def _join_str(item: List[Tuple[str, int]]) -> str:
+def _join_str(item: list[tuple[str, int]]) -> str:
     """Reconstruct a readable SQL expression from tokens, without awkward spaces."""
     s = re.sub(r"\s+", " ", " ".join(t for t, _ in item)).strip()
     return s.replace(" . ", ".").replace("( ", "(").replace(" )", ")")
@@ -214,7 +213,7 @@ def _literal_strata(tok: str) -> str:
     return tok
 
 
-def _parse_where_conjunct(conj: List[Tuple[str, int]], model: str) -> Optional[str]:
+def _parse_where_conjunct(conj: list[tuple[str, int]], model: str) -> str | None:
     """One `IS [NOT] NULL` or `col op literal` conjunct => Strata expr. Returns
     None when the conjunct is out of the subset (caller fails loud §4)."""
     words = _flat_words(conj)
@@ -246,7 +245,7 @@ def _parse_case_expr(s: str, model: str) -> str:
     (col vs literal / IS NULL), values are literals or bare columns.
     """
     # Normalize: strip outer CASE ... END, then split WHEN/THEN/ELSE
-    m = re.match(r"(?i)^CASE\s+(.*)\s+END\s*$", s, flags=re.S)
+    m = re.match(r"(?i)^CASE\s+(.*)\s+END\s*$", s, flags=re.DOTALL)
     if not m:
         raise TransformFailLoud(f"E042: {model}: malformed CASE {s!r}")
     inner = m.group(1).strip()
@@ -257,8 +256,8 @@ def _parse_case_expr(s: str, model: str) -> str:
     # Expect WHEN cond THEN val [WHEN cond THEN val]* [ELSE val]
     # We'll walk words
     i = 0
-    parts: List[str] = []
-    else_val: Optional[str] = None
+    parts: list[str] = []
+    else_val: str | None = None
     while i < len(words):
         if words[i].upper() != "WHEN":
             if words[i].upper() == "ELSE":
@@ -268,9 +267,7 @@ def _parse_case_expr(s: str, model: str) -> str:
                 else_val = _literal_strata(words[i + 1]) if words[i + 1].upper() not in ("NULL", "TRUE", "FALSE") and not _IDENT.fullmatch(words[i + 1]) else words[i + 1] if _IDENT.fullmatch(words[i + 1]) else _literal_strata(words[i + 1])
                 # Handle quoted literals vs columns
                 raw = words[i + 1]
-                if raw[0] in "\"'":
-                    else_val = _literal_strata(raw)
-                elif raw.upper() in ("NULL", "TRUE", "FALSE"):
+                if raw[0] in "\"'" or raw.upper() in ("NULL", "TRUE", "FALSE"):
                     else_val = _literal_strata(raw)
                 elif _IDENT.fullmatch(raw):
                     else_val = raw
@@ -307,9 +304,7 @@ def _parse_case_expr(s: str, model: str) -> str:
         if val_idx >= len(words):
             raise TransformFailLoud(f"E042: {model}: CASE THEN without value")
         raw_val = words[val_idx]
-        if raw_val[0] in "\"'":
-            val_expr = _literal_strata(raw_val)
-        elif raw_val.upper() in ("NULL", "TRUE", "FALSE"):
+        if raw_val[0] in "\"'" or raw_val.upper() in ("NULL", "TRUE", "FALSE"):
             val_expr = _literal_strata(raw_val)
         elif _IDENT.fullmatch(raw_val):
             val_expr = _strip_qualifier(raw_val)
@@ -331,16 +326,16 @@ def _parse_case_expr(s: str, model: str) -> str:
     return f"case({', '.join(parts)})"
 
 
-def _parse_select_item(item: List[Tuple[str, int]], model: str) -> Tuple[str, str, str]:
+def _parse_select_item(item: list[tuple[str, int]], model: str) -> tuple[str, str, str]:
     """One top-level SELECT expression => (kind, emit, out). kind is 'col'
     (a plain column), 'agg' (count/sum/avg/min/max), or 'case' (CASE ...)."""
     s = _join_str(item).strip()
     # CASE ... END [AS alias] — detect before other patterns
-    m_case = re.match(r"(?i)^CASE\s+WHEN.*\s+END(?:\s+AS\s+([A-Za-z_][A-Za-z0-9_]*))?$", s, flags=re.S)
+    m_case = re.match(r"(?i)^CASE\s+WHEN.*\s+END(?:\s+AS\s+([A-Za-z_][A-Za-z0-9_]*))?$", s, flags=re.DOTALL)
     if m_case:
         alias = m_case.group(1)
         # Extract CASE ... END part
-        m2 = re.match(r"(?i)^(CASE\s+WHEN.*\s+END)\s*(?:AS\s+[A-Za-z_][A-Za-z0-9_]*)?\s*$", s, flags=re.S)
+        m2 = re.match(r"(?i)^(CASE\s+WHEN.*\s+END)\s*(?:AS\s+[A-Za-z_][A-Za-z0-9_]*)?\s*$", s, flags=re.DOTALL)
         case_part = m2.group(1) if m2 else s
         out = alias or f"case_{abs(hash(s)) % 1000}"
         if alias is None:
@@ -378,12 +373,12 @@ def _parse_select_item(item: List[Tuple[str, int]], model: str) -> Tuple[str, st
         f"(bare columns, aliases, CASE, and count/sum/avg/min/max only)")
 
 
-_strip_comments_re = re.compile(r"(\"\"\"|\")(?:[^\"\\\\]|\\\\[\"\\\\nt])*\"|'[^']*'|--[^\n]*|/\*.*?(?:\*/|\Z)", flags=re.S)
+_strip_comments_re = re.compile(r"(\"\"\"|\")(?:[^\"\\\\]|\\\\[\"\\\\nt])*\"|'[^']*'|--[^\n]*|/\*.*?(?:\*/|\Z)", flags=re.DOTALL)
 
 
 def _strip_sql_comments(sql: str) -> str:
     """Remove `--` and `/* */` comments while keeping string literals intact."""
-    out: List[str] = []
+    out: list[str] = []
     i = 0
     while i < len(sql):
         ch = sql[i]
@@ -436,18 +431,18 @@ def _balanced_paren(sql: str, start: int) -> int:
     return -1
 
 
-def _split_config_args(text: str) -> List[Tuple[str, str]]:
+def _split_config_args(text: str) -> list[tuple[str, str]]:
     """Split `{{ config(k1 = v1, k2 = v2, ...) }}` inner text into kwargs.
 
     Tolerates single/double-quoted values, `[...]` lists and nesting up to a
     balanced bracket depth; anything a Strata import cannot attribute to a
     known dbt-iceberg key is simply ignored (config is advisory for a
     translation, never a gate)."""
-    out: List[Tuple[str, str]] = []
-    parts: List[str] = []
-    cur: List[str] = []
+    out: list[tuple[str, str]] = []
+    parts: list[str] = []
+    cur: list[str] = []
     depth = 0
-    quote: Optional[str] = None
+    quote: str | None = None
     i = 0
     while i < len(text):
         ch = text[i]
@@ -483,26 +478,26 @@ def _split_config_args(text: str) -> List[Tuple[str, str]]:
     return out
 
 
-def _extract_config_kwargs(sql: str) -> Dict[str, str]:
+def _extract_config_kwargs(sql: str) -> dict[str, str]:
     """Pull dbt-iceberg `{{ config(...) }}` kwargs out of the raw model SQL.
 
     Keys are lowercased; values are kept as raw strings (quotes/brackets
     preserved) so the annotation lines below can quote them verbatim."""
-    kwargs: Dict[str, str] = {}
-    for m in re.finditer(r"\{\{\s*config\s*\((.*?)\)\s*\}\}", sql, flags=re.S):
+    kwargs: dict[str, str] = {}
+    for m in re.finditer(r"\{\{\s*config\s*\((.*?)\)\s*\}\}", sql, flags=re.DOTALL):
         for key, value in _split_config_args(m.group(1)):
             kwargs[key] = value
     return kwargs
 
 
-def _iceberg_config_notes(sql: str) -> List[str]:
+def _iceberg_config_notes(sql: str) -> list[str]:
     """Deterministic `//` notes for dbt-iceberg config directives the import
     cannot (or must not) carry into the Strata model: hive partitioning and
     TTL are physical/retention concerns (§4.2 v1 publishes unpartitioned), and
     incremental materialization collapses to a full deterministic recompute.
     Recording them keeps the translation honest without failing the whole
     import (§4: never silently drop a semantics the author declared)."""
-    notes: List[str] = []
+    notes: list[str] = []
     kw = _extract_config_kwargs(sql)
     for key, value in kw.items():
         if key == "partition_by":
@@ -522,7 +517,7 @@ def _iceberg_config_notes(sql: str) -> List[str]:
     return notes
 
 
-def _rewrite_dml_annotation(sql: str, model: str) -> Tuple[str, List[str], List[str]]:
+def _rewrite_dml_annotation(sql: str, model: str) -> tuple[str, list[str], list[str]]:
     """Rewrite a dbt-iceberg DML statement at the top of a model .sql into the
     plain SELECT that Strata can translate, returning (body_sql, dedup_keys,
     annotation_lines).
@@ -537,7 +532,7 @@ def _rewrite_dml_annotation(sql: str, model: str) -> Tuple[str, List[str], List[
     Anything Strata cannot express deterministically (a WHERE referencing
     `{{ this }}`, DELETE clauses, non-equi ON) fails loud E042 — the dbt DML
     semantics would otherwise be silently guessed (§4)."""
-    notes: List[str] = []
+    notes: list[str] = []
     clean = _strip_sql_comments(sql.strip())
     # Skip leading jinja blocks (e.g. `{{ config(...) }}`) so the DML statement
     # starts the match — a dbt file is config-first, DML-second.
@@ -604,7 +599,7 @@ def _rewrite_dml_annotation(sql: str, model: str) -> Tuple[str, List[str], List[
                 f"E042: {model}: MERGE INTO {target} must have both WHEN MATCHED "
                 f"and WHEN NOT MATCHED (fail-loud §4).")
         # ON keys: AND-separated `a.col = b.col` equi-joins only.
-        keys: List[str] = []
+        keys: list[str] = []
         for part_toks in _split_top_level(_tokenize(cond), "AND"):
             w = _flat_words(part_toks)
             m2 = re.match(r"(?i)([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*"
@@ -630,7 +625,7 @@ def _rewrite_dml_annotation(sql: str, model: str) -> Tuple[str, List[str], List[
     return "", [], notes
 
 
-def _split_with(sql: str, model: str) -> Tuple[List[Tuple[str, str]], str]:
+def _split_with(sql: str, model: str) -> tuple[list[tuple[str, str]], str]:
     """Split `WITH cte AS (...), cte2 AS (...)  SELECT ...` into:
       - (cte_name, cte_body_sql) pairs, in order
       - the trailing top-level SELECT (the model's main query)
@@ -649,7 +644,7 @@ def _split_with(sql: str, model: str) -> Tuple[List[Tuple[str, str]], str]:
             f"E042: {model}: `WITH RECURSIVE` is out of the translatable subset "
             f"(fail-loud §4) — translate the recursion to plain Strata instead.")
     # walk depth-0 tokens to find `name AS ( ... )` blocks
-    ctes: List[Tuple[str, str]] = []
+    ctes: list[tuple[str, str]] = []
     i = 1  # skip WITH
     while True:
         if i >= len(toks) or not _IDENT.fullmatch(toks[i][0]):
@@ -704,8 +699,8 @@ def _split_with(sql: str, model: str) -> Tuple[List[Tuple[str, str]], str]:
     return ctes, main_sql
 
 
-def _translate_sql(sql_text: str, model: str, models: Set[str],
-                   sources: Set[str]) -> Tuple[List[str], List[Tuple[str, List[str]]]]:
+def _translate_sql(sql_text: str, model: str, models: set[str],
+                   sources: set[str]) -> tuple[list[str], list[tuple[str, list[str]]]]:
     """Translate a dbt model .sql into (main_body, cte_helpers).
 
     `main_body` is the Strata body lines for `model`. `cte_helpers` are
@@ -737,8 +732,8 @@ def _translate_sql(sql_text: str, model: str, models: Set[str],
             main_body += [f"dedup by {', '.join(dedup_keys)}"]
         return notes + main_body, []
     # Each CTE is a contract-less helper model named `{model}__{cte}`.
-    table_map: Dict[str, str] = {}
-    helper_defs: List[Tuple[str, List[str]]] = []
+    table_map: dict[str, str] = {}
+    helper_defs: list[tuple[str, list[str]]] = []
     for name, cte_sql in ctes:
         helper = f"{model}__{name}"
         if helper in models or helper in sources:
@@ -758,9 +753,9 @@ def _translate_sql(sql_text: str, model: str, models: Set[str],
     return notes + main_body, helper_defs
 
 
-def _parse_transform(sql_text: str, model: str, models: Set[str],
-                     sources: Set[str],
-                     table_map: Optional[Dict[str, str]] = None) -> List[str]:
+def _parse_transform(sql_text: str, model: str, models: set[str],
+                     sources: set[str],
+                     table_map: dict[str, str] | None = None) -> list[str]:
     """Translate ONE dbt model .sql (WITH already peeled off) into Strata body statements.
 
     Subset: `SELECT <list> FROM <ref|source> [AS alias] [JOIN ... ON ...]`
@@ -792,8 +787,8 @@ def _parse_transform(sql_text: str, model: str, models: Set[str],
             f"E042: {model}: subqueries (a second SELECT) are out of the subset")
 
     # Split the token stream into top-level clauses: SELECT .. FROM .. WHERE .. GROUP BY
-    groups: List[List[Tuple[str, int]]] = []
-    cur: List[Tuple[str, int]] = []
+    groups: list[list[tuple[str, int]]] = []
+    cur: list[tuple[str, int]] = []
     seen_from = False
     for tok, d in toks[1:]:
         if d == 0 and tok.upper() in ("FROM", "WHERE", "GROUP"):
@@ -824,7 +819,7 @@ def _parse_transform(sql_text: str, model: str, models: Set[str],
     # Each JOIN must have ON with at least one `a.col = b.col` (AND-separated). USING, CROSS without ON, and comma-FROM are out of subset.
     from_toks = from_st[1:]  # after FROM
     # Helper to read a table ref + optional alias, returning (table, alias, consumed)
-    def _read_table_ref(idx: int) -> Tuple[str, Optional[str], int]:
+    def _read_table_ref(idx: int) -> tuple[str, str | None, int]:
         if idx >= len(from_toks):
             raise TransformFailLoud(f"E042: {model}: FROM/JOIN table missing")
         tbl = from_toks[idx][0]
@@ -835,7 +830,7 @@ def _parse_transform(sql_text: str, model: str, models: Set[str],
                 f"with a contract, nor a CTE in scope — fail-loud §4.")
         emit_name = table_map.get(tbl, tbl) if table_map else tbl
         nxt = idx + 1
-        alias: Optional[str] = None
+        alias: str | None = None
         if nxt < len(from_toks) and from_toks[nxt][0].upper() == "AS":
             nxt += 1
             if nxt >= len(from_toks) or not _IDENT.fullmatch(from_toks[nxt][0]):
@@ -850,12 +845,12 @@ def _parse_transform(sql_text: str, model: str, models: Set[str],
 
     base_table, base_alias, pos = _read_table_ref(0)
     table = base_table
-    alias_map: Dict[str, str] = {}
+    alias_map: dict[str, str] = {}
     if base_alias:
         alias_map[base_alias] = base_table
     else:
         alias_map[base_table] = base_table
-    joins: List[Tuple[str, str, str]] = []  # (join_type, join_table, on_expr)
+    joins: list[tuple[str, str, str]] = []  # (join_type, join_table, on_expr)
     while pos < len(from_toks):
         # Parse join type
         jt = "INNER"
@@ -892,14 +887,14 @@ def _parse_transform(sql_text: str, model: str, models: Set[str],
             raise TransformFailLoud(f"E042: {model}: JOIN {j_tbl!r} without ON")
         pos += 1  # skip ON
         # Collect ON condition tokens until next JOIN or end
-        on_toks: List[Tuple[str, int]] = []
+        on_toks: list[tuple[str, int]] = []
         while pos < len(from_toks) and from_toks[pos][0].upper() not in ("JOIN", "LEFT", "RIGHT", "INNER", "FULL", "CROSS"):
             on_toks.append(from_toks[pos])
             pos += 1
         if not on_toks:
             raise TransformFailLoud(f"E042: {model}: JOIN {j_tbl!r} ON is empty")
         # ON is AND-separated `a.col = b.col` (only equi-joins in subset)
-        on_parts: List[str] = []
+        on_parts: list[str] = []
         for conj in _split_top_level(on_toks, "AND"):
             w = _flat_words(conj)
             # Expect `a.col = b.col` or `a.col == b.col`
@@ -932,7 +927,7 @@ def _parse_transform(sql_text: str, model: str, models: Set[str],
     # `alias_map` is used later for SELECT qualification if needed
 
     # -- WHERE (AND-only conjuncts)
-    preds: List[str] = []
+    preds: list[str] = []
     if where_st:
         for conj in _split_top_level(where_st[1:], "AND"):
             expr = _parse_where_conjunct(conj, model)
@@ -943,7 +938,7 @@ def _parse_transform(sql_text: str, model: str, models: Set[str],
             preds.append(expr)
 
     # -- GROUP BY
-    keys: List[str] = []
+    keys: list[str] = []
     if group_st:
         gw = [t for t, _ in group_st]
         if [w.upper() for w in gw[:2]] == ["GROUP", "BY"]:
@@ -968,7 +963,7 @@ def _parse_transform(sql_text: str, model: str, models: Set[str],
             keys.append(_strip_qualifier(cand))
 
     # -- assemble the Strata body
-    body: List[str] = [f"from {table}"]
+    body: list[str] = [f"from {table}"]
     for jt, jtbl, on in joins:
         body.append(f"{jt} {jtbl} on {on}")
     if preds:
@@ -991,7 +986,7 @@ def _parse_transform(sql_text: str, model: str, models: Set[str],
         raise TransformFailLoud(
             f"E042: {model}: GROUP BY with no aggregate is meaningless — translate "
             f"to a dedup by hand if that is what you meant (fail-loud §4)")
-    key_terms: List[str] = []
+    key_terms: list[str] = []
     key_outs = {it[2] for it in select_items if it[0] in ("col", "case")}
     for k in keys:
         if k in key_outs:
@@ -1088,8 +1083,8 @@ def import_dbt_schema(schema: Path) -> str:
     return "\n".join(out)
 
 
-def _emit_model_body(mdl: dict, transforms: Dict[str, List[str]],
-                     schema: Path) -> List[str]:
+def _emit_model_body(mdl: dict, transforms: dict[str, list[str]],
+                     schema: Path) -> list[str]:
     """Model block statements: SQL-translated body when present, otherwise the
     contract-only `derive` passthrough (schema-only import). A model without a
     transform still needs `depends_on:` to name its `from` — same E041 rule."""
@@ -1121,8 +1116,8 @@ def import_dbt_project(schema: Path, model_dir: Path) -> str:
     source_names = {t["name"]
                     for s in doc.get("sources", []) or []
                     for t in s.get("tables", []) or []}
-    transforms: Dict[str, List[str]] = {}
-    cte_helpers: Dict[str, List[Tuple[str, List[str]]]] = {}
+    transforms: dict[str, list[str]] = {}
+    cte_helpers: dict[str, list[tuple[str, list[str]]]] = {}
     for sql_file in sorted(model_dir.glob("*.sql")):
         stem = sql_file.stem
         if stem not in model_names:

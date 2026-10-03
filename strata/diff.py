@@ -16,8 +16,7 @@ Breaking taxonomy (what a consumer can hold onto):
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Tuple
+from dataclasses import asdict, dataclass, field
 
 from . import ast
 from .analysis import Project, TypedModel, blast_radius, source_decl_cols
@@ -40,7 +39,7 @@ class ModelChange:
     kind: str            # added | removed | changed
     fingerprint_old: str = ""
     fingerprint_new: str = ""
-    columns: List[ColChange] = field(default_factory=list)
+    columns: list[ColChange] = field(default_factory=list)
 
 
 def _contract_flags(c: ast.ContractField) -> str:
@@ -56,9 +55,9 @@ def _contract_flags(c: ast.ContractField) -> str:
     return ",".join(bits)
 
 
-def _col_changes(name: str, b: dict, h: dict) -> List[ColChange]:
+def _col_changes(name: str, b: dict, h: dict) -> list[ColChange]:
     """Shared column-level taxonomy over two {col: Col} schemas."""
-    cols: List[ColChange] = []
+    cols: list[ColChange] = []
     for cname in sorted(set(b) | set(h)):
         cb, ch = b.get(cname), h.get(cname)
         if cb is None:
@@ -87,10 +86,10 @@ def _col_changes(name: str, b: dict, h: dict) -> List[ColChange]:
     return cols
 
 
-def diff_tms(base: Dict[str, TypedModel],
-             head: Dict[str, TypedModel]) -> List[ModelChange]:
+def diff_tms(base: dict[str, TypedModel],
+             head: dict[str, TypedModel]) -> list[ModelChange]:
     """Column-level semantic diff between two checked module versions."""
-    out: List[ModelChange] = []
+    out: list[ModelChange] = []
     for name in sorted(set(base) | set(head)):
         b, h = base.get(name), head.get(name)
         if b is None:
@@ -105,14 +104,14 @@ def diff_tms(base: Dict[str, TypedModel],
     return out
 
 
-def diff_projects(base_proj: Project, head_proj: Project) -> List[ModelChange]:
+def diff_projects(base_proj: Project, head_proj: Project) -> list[ModelChange]:
     """Full semantic diff: model outputs AND source (upstream catalog) schemas.
     Source schema changes are exactly the E030-32 story (types-and-contracts
     §5 phase B): a column that moved/narrowed upstream breaks every consumer.
     A model missing from `typed` because it failed to typecheck is reported as
     `compile-error` (fail-loud), never as `removed` (that would lie)."""
     changes = diff_tms(base_proj.typed, head_proj.typed)
-    fixed: List[ModelChange] = []
+    fixed: list[ModelChange] = []
     for mc in changes:
         if mc.kind == "removed" and mc.model in head_proj.models:
             mc.kind = "compile-error"
@@ -136,13 +135,13 @@ def diff_projects(base_proj: Project, head_proj: Project) -> List[ModelChange]:
     return changes
 
 
-def breaking_cols(changes: List[ModelChange]) -> List[Tuple[str, str]]:
+def breaking_cols(changes: list[ModelChange]) -> list[tuple[str, str]]:
     """Flat list of (model, column) pairs carrying breaking changes."""
     return [(c.model, c.col) for mc in changes for c in mc.columns if c.breaking]
 
 
-def impact_radius(base: Dict[str, TypedModel],
-                  changes: List[ModelChange]) -> List[Tuple[str, str]]:
+def impact_radius(base: dict[str, TypedModel],
+                  changes: list[ModelChange]) -> list[tuple[str, str]]:
     """Consumers affected by the breaking changes, via the BASE lineage graph
     (the question is who depended on the old version). With nullable
     propagation the diff flags every downstream column as breaking too, so we
@@ -161,10 +160,10 @@ def impact_radius(base: Dict[str, TypedModel],
     return [c for c in radius if c not in roots]
 
 
-def render(changes: List[ModelChange],
-           radius: List[Tuple[str, str]]) -> List[str]:
+def render(changes: list[ModelChange],
+           radius: list[tuple[str, str]]) -> list[str]:
     """Render a human-readable text report over the changes and their blast radius."""
-    lines: List[str] = []
+    lines: list[str] = []
     for mc in changes:
         if mc.kind == "added":
             lines.append(f"model {mc.model}  ADDED ({mc.fingerprint_new[:8]})")
@@ -191,8 +190,8 @@ def render(changes: List[ModelChange],
 
 
 def to_json_dict(base_path: str, head_path: str,
-                 changes: List[ModelChange],
-                 radius: List[Tuple[str, str]]) -> dict:
+                 changes: list[ModelChange],
+                 radius: list[tuple[str, str]]) -> dict:
     """Machine-readable diff summary as a JSON-friendly dict."""
     brk = [c for mc in changes for c in mc.columns if c.breaking]
     return {

@@ -1,7 +1,7 @@
 # strata-lang — reproducible runner
-# Build: docker build -t ghcr.io/tzinny-dev/strata:0.1.0 .
-# Run:   docker run --rm ghcr.io/tzinny-dev/strata:0.1.0 strata --help
-#        docker run --rm -v $PWD:/work -w /work ghcr.io/tzinny-dev/strata:0.1.0 strata build examples/daily_orders.strata
+# Build: docker build -t ghcr.io/tzinny-dev/strata:0.1.5 .
+# Run:   docker run --rm ghcr.io/tzinny-dev/strata:0.1.5 strata --help
+#        docker run --rm -v $PWD:/work -w /work ghcr.io/tzinny-dev/strata:0.1.5 strata build examples/daily_orders.strata
 FROM python:3.12-slim
 
 LABEL org.opencontainers.image.source="https://github.com/Tzinny-dev/strata"
@@ -18,7 +18,7 @@ WORKDIR /app
 # strata-lang pulls duckdb+PyYAML; [postgres] adds psycopg2-binary, [all] adds bq/sf if needed.
 # Use --no-cache-dir to keep image small.
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir "strata-lang[postgres]==0.1.0"
+    && pip install --no-cache-dir "strata-lang[postgres]==0.1.5"
 
 # Copy examples for smoke test / demo (not required at runtime)
 COPY examples/ ./examples/

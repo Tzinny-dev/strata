@@ -33,7 +33,7 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 MANIFEST_NAME = "_strata_manifest.json"
 _RUN_ID_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -116,7 +116,7 @@ def export_snapshot(con: Any, snapshot_table: str, model_name: str,
     return rel
 
 
-def load_manifest(catalog_dir: Path) -> Optional[Dict[str, Any]]:
+def load_manifest(catalog_dir: Path) -> dict[str, Any] | None:
     """Read the catalog manifest, or None when the catalog has none yet."""
     mf = catalog_dir / MANIFEST_NAME
     if not mf.exists():
@@ -124,8 +124,8 @@ def load_manifest(catalog_dir: Path) -> Optional[Dict[str, Any]]:
     return json.loads(mf.read_text())
 
 
-def _atomic_write_manifest(catalog_dir: Path, runs: Dict[str, Any],
-                           default: str) -> Dict[str, Any]:
+def _atomic_write_manifest(catalog_dir: Path, runs: dict[str, Any],
+                           default: str) -> dict[str, Any]:
     catalog_dir.mkdir(parents=True, exist_ok=True)
     manifest = {"runs": runs, "default": default}
     mf = catalog_dir / MANIFEST_NAME
@@ -136,7 +136,7 @@ def _atomic_write_manifest(catalog_dir: Path, runs: Dict[str, Any],
 
 
 def write_manifest(catalog_dir: Path, run_id: str,
-                   tables: Dict[str, Path]) -> Dict[str, Any]:
+                   tables: dict[str, Path]) -> dict[str, Any]:
     """Merge `run_id -> {model: rel dir}` into the catalog manifest.
 
     Content-addressed and deterministic: same run gives byte-identical
@@ -150,8 +150,8 @@ def write_manifest(catalog_dir: Path, run_id: str,
     return _atomic_write_manifest(catalog_dir, runs, run_id)
 
 
-def export_run(con: Any, run_id: str, snapshots: Dict[str, str],
-               catalog_dir: Path) -> Dict[str, Any]:
+def export_run(con: Any, run_id: str, snapshots: dict[str, str],
+               catalog_dir: Path) -> dict[str, Any]:
     """Export a committed run's snapshot tables to the Iceberg catalog.
 
     `snapshots` is {model name -> snapshot TABLE name} (the same mapping
@@ -160,8 +160,8 @@ def export_run(con: Any, run_id: str, snapshots: Dict[str, str],
     catalog with no manifest is provably incomplete and fail-loud, never
     a half-published run.
     """
-    tables: Dict[str, Path] = {}
-    failed: List[str] = []
+    tables: dict[str, Path] = {}
+    failed: list[str] = []
     for model, snap in sorted(snapshots.items()):
         try:
             tables[model] = export_snapshot(con, snap, model, run_id, catalog_dir)
@@ -174,7 +174,7 @@ def export_run(con: Any, run_id: str, snapshots: Dict[str, str],
     return write_manifest(catalog_dir, run_id, tables)
 
 
-def _require_run(catalog_dir: Path, run_id: str) -> Dict[str, Any]:
+def _require_run(catalog_dir: Path, run_id: str) -> dict[str, Any]:
     """The manifest entry for `run_id` or a fail-loud error."""
     mf = load_manifest(catalog_dir)
     if mf is None:
@@ -188,7 +188,7 @@ def _require_run(catalog_dir: Path, run_id: str) -> Dict[str, Any]:
     return mf
 
 
-def verify_catalog_run(con: Any, catalog_dir: Path, run_id: str) -> Dict[str, Any]:
+def verify_catalog_run(con: Any, catalog_dir: Path, run_id: str) -> dict[str, Any]:
     """Verify a published run WITHOUT re-execution: every model's Iceberg
     table must be physically present and readable through iceberg_scan.
 
@@ -226,7 +226,7 @@ def ensure_pyiceberg() -> Any:
     try:
         from pyiceberg.table import StaticTable
         return StaticTable
-    except ImportError as e:
+    except ImportError:
         raise IcebergUnavailable(
             "pyiceberg is not installed; cannot verify the catalog without "
             "DuckDB. Install it via: pip install 'pyiceberg[pyarrow]'"
@@ -234,7 +234,7 @@ def ensure_pyiceberg() -> Any:
 
 
 def verify_catalog_run_pyiceberg(catalog_dir: Path, run_id: str,
-                                 engine_cls: Any = None) -> Dict[str, Any]:
+                                 engine_cls: Any = None) -> dict[str, Any]:
     """Verify a published run with pyiceberg — a DuckDB-independent reader.
 
     Same contract as `verify_catalog_run` ({run_id, models, rows}, first
@@ -265,7 +265,7 @@ def verify_catalog_run_pyiceberg(catalog_dir: Path, run_id: str,
     return out
 
 
-def rollback_run(catalog_dir: Path, run_id: str) -> Dict[str, Any]:
+def rollback_run(catalog_dir: Path, run_id: str) -> dict[str, Any]:
     """Repoint the catalog's live run (`default`) to a previously exported run.
 
     Physical data is immutable; rollback only repoints the manifest, so it
@@ -282,8 +282,8 @@ def rollback_run(catalog_dir: Path, run_id: str) -> Dict[str, Any]:
     return _atomic_write_manifest(catalog_dir, mf["runs"], run_id)
 
 
-def gc_catalog(catalog_dir: Path, keep: int = 2, keep_days: Optional[float] = None,
-               apply: bool = False) -> Dict[str, Any]:
+def gc_catalog(catalog_dir: Path, keep: int = 2, keep_days: float | None = None,
+               apply: bool = False) -> dict[str, Any]:
     """Snapshot retention over the Iceberg catalog.
 
     Protected: the last `keep` runs, the `default` (live) run, and runs

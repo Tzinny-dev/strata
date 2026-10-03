@@ -9,14 +9,12 @@ artifacts, not by reading source)."""
 
 from __future__ import annotations
 
-from typing import Dict, List
-
 from .analysis import Project, TypedModel, build_down_edges
 
 
-def build_dashboard(proj: Project, tms: Dict[str, TypedModel], path: str,
-                    history: List[dict] | None = None,
-                    manifest: Dict[str, str] | None = None) -> dict:
+def build_dashboard(proj: Project, tms: dict[str, TypedModel], path: str,
+                    history: list[dict] | None = None,
+                    manifest: dict[str, str] | None = None) -> dict:
     """Collect the dashboard facts. `history` is the content-addressed run
     log (exec.load_history), `manifest` the last-applied fingerprints
     (exec.load_manifest); both optional so the dashboard degrades cleanly on
@@ -25,7 +23,7 @@ def build_dashboard(proj: Project, tms: Dict[str, TypedModel], path: str,
     down = build_down_edges(tms)
 
     models = []
-    edges: List[List[str]] = []
+    edges: list[list[str]] = []
     for name in sorted(tms):
         tm = tms[name]
         cols = list(tm.schema.values())

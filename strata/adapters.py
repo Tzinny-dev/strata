@@ -18,7 +18,7 @@ job is transport, not translation.
 from __future__ import annotations
 
 import abc
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class AdapterNotAvailable(Exception):
@@ -44,12 +44,12 @@ class Warehouse(abc.ABC):
         ...
 
     @abc.abstractmethod
-    def fetch(self, sql: str) -> List[tuple]:
+    def fetch(self, sql: str) -> list[tuple]:
         """Run a query and return all result rows."""
         ...
 
     @abc.abstractmethod
-    def materialize(self, name: str, sql: str, partition_by: Optional[List[str]] = None) -> None:
+    def materialize(self, name: str, sql: str, partition_by: list[str] | None = None) -> None:
         """CREATE TABLE <name> AS <sql> atomically.
 
         If partition_by is provided and dialect supports it, the table
@@ -63,12 +63,12 @@ class Warehouse(abc.ABC):
         ...
 
     @abc.abstractmethod
-    def list_views(self) -> List[str]:
+    def list_views(self) -> list[str]:
         """Names of live views in the warehouse default schema."""
         ...
 
 
-_MISSING: Dict[str, tuple] = {
+_MISSING: dict[str, tuple] = {
     "postgres": ("psycopg2-binary", "psycopg2"),
     "bigquery": ("google-cloud-bigquery", "google.cloud.bigquery"),
     "snowflake": ("snowflake-connector-python", "snowflake.connector"),
@@ -151,17 +151,16 @@ class DuckDBWarehouse(Warehouse):
 
     def connect(self) -> None:
         """Open the warehouse connection."""
-        pass
 
     def execute(self, sql: str) -> None:
         """Run a statement that returns no rows."""
         self.con.execute(sql)
 
-    def fetch(self, sql: str) -> List[tuple]:
+    def fetch(self, sql: str) -> list[tuple]:
         """Run a query and return all result rows."""
         return self.con.execute(sql).fetchall()
 
-    def materialize(self, name: str, sql: str, partition_by: Optional[List[str]] = None) -> None:
+    def materialize(self, name: str, sql: str, partition_by: list[str] | None = None) -> None:
         # DuckDB doesn't support partitioning in CTAS, so we ignore it
         """Create the table atomically (partitioning ignored where unsupported)."""
         self.con.execute(f"CREATE TABLE {name} AS {sql}")
@@ -170,7 +169,7 @@ class DuckDBWarehouse(Warehouse):
         """Drop the physical table if it exists."""
         self.con.execute(f"DROP TABLE IF EXISTS {name}")
 
-    def list_views(self) -> List[str]:
+    def list_views(self) -> list[str]:
         """Names of live views in the warehouse default schema."""
         rows = self.con.execute(
             "SELECT table_name FROM information_schema.tables "
@@ -182,7 +181,7 @@ class BigQueryWarehouse(Warehouse):
     """Warehouse backed by google-cloud-bigquery. Also acts as a DB-API-like
     connection for exec.py (execute/fetchone/fetchall chaining via BigQueryConn)."""
 
-    def __init__(self, project: Optional[str] = None, dataset: str = "", location: Optional[str] = None, credentials: Any = None) -> None:
+    def __init__(self, project: str | None = None, dataset: str = "", location: str | None = None, credentials: Any = None) -> None:
         from google.cloud import bigquery as bq  # type: ignore
 
         # bigquery.Client picks project from env/credentials if not given
@@ -210,27 +209,27 @@ class BigQueryWarehouse(Warehouse):
         pass
 
     # Warehouse ABC
-    def execute(self, sql: str, params: Optional[Any] = None) -> Any:  # type: ignore
+    def execute(self, sql: str, params: Any | None = None) -> Any:  # type: ignore
         """Warehouse execute (no params) or Conn execute (with params) — both chain."""
         return self._conn.execute(sql, params)
 
-    def fetch(self, sql: str) -> List[tuple]:
+    def fetch(self, sql: str) -> list[tuple]:
         return self._conn.execute(sql).fetchall()
 
-    def fetchone(self) -> Optional[tuple]:
+    def fetchone(self) -> tuple | None:
         return self._conn.fetchone()
 
-    def fetchall(self) -> List[tuple]:
+    def fetchall(self) -> list[tuple]:
         return self._conn.fetchall()
 
     @property
-    def description(self) -> Optional[Any]:
+    def description(self) -> Any | None:
         return self._conn.description
 
     def close(self) -> None:
         self._conn.close()
 
-    def materialize(self, name: str, sql: str, partition_by: Optional[List[str]] = None) -> None:
+    def materialize(self, name: str, sql: str, partition_by: list[str] | None = None) -> None:
         # BigQuery CREATE OR REPLACE TABLE `dataset.name` AS (sql) — partition_by ignored for now (requires PARTITION BY clause)
         tbl = f"`{self.dataset}.{name}`" if self.dataset and "." not in name else f"`{name}`"
         # Use backticks, handle already-qualified name
@@ -247,7 +246,7 @@ class BigQueryWarehouse(Warehouse):
         except Exception:
             pass
 
-    def list_views(self) -> List[str]:
+    def list_views(self) -> list[str]:
         try:
             return list(self._conn.execute(
                 f"SELECT table_name FROM `{self.dataset}.INFORMATION_SCHEMA.VIEWS`"
@@ -259,7 +258,7 @@ class BigQueryWarehouse(Warehouse):
 class SnowflakeWarehouse(Warehouse):
     """Warehouse backed by snowflake-connector-python. Also acts as DB-API conn."""
 
-    def __init__(self, account: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None, warehouse: Optional[str] = None, database: Optional[str] = None, schema: Optional[str] = None, role: Optional[str] = None) -> None:
+    def __init__(self, account: str | None = None, user: str | None = None, password: str | None = None, warehouse: str | None = None, database: str | None = None, schema: str | None = None, role: str | None = None) -> None:
         import snowflake.connector  # type: ignore
 
         # snowflake.connector.connect requires account/user/password — let it raise if missing
@@ -280,26 +279,26 @@ class SnowflakeWarehouse(Warehouse):
     def connect(self) -> None:
         pass
 
-    def execute(self, sql: str, params: Optional[Any] = None) -> Any:  # type: ignore
+    def execute(self, sql: str, params: Any | None = None) -> Any:  # type: ignore
         return self._conn.execute(sql, params)
 
-    def fetch(self, sql: str) -> List[tuple]:
+    def fetch(self, sql: str) -> list[tuple]:
         return self._conn.execute(sql).fetchall()
 
-    def fetchone(self) -> Optional[tuple]:
+    def fetchone(self) -> tuple | None:
         return self._conn.fetchone()
 
-    def fetchall(self) -> List[tuple]:
+    def fetchall(self) -> list[tuple]:
         return self._conn.fetchall()
 
     @property
-    def description(self) -> Optional[Any]:
+    def description(self) -> Any | None:
         return self._conn.description
 
     def close(self) -> None:
         self._conn.close()
 
-    def materialize(self, name: str, sql: str, partition_by: Optional[List[str]] = None) -> None:
+    def materialize(self, name: str, sql: str, partition_by: list[str] | None = None) -> None:
         # Snowflake CREATE OR REPLACE TABLE name AS sql
         self._conn.execute(f"CREATE OR REPLACE TABLE {name} AS {sql}")
 
@@ -309,7 +308,7 @@ class SnowflakeWarehouse(Warehouse):
         except Exception:
             pass
 
-    def list_views(self) -> List[str]:
+    def list_views(self) -> list[str]:
         try:
             rows = self._conn.execute(
                 "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_SCHEMA = CURRENT_SCHEMA()"

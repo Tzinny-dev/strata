@@ -11,22 +11,38 @@ import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, NoReturn, Optional, Set, Tuple
+from typing import NoReturn
 
-from . import ast
-from . import functions
+from . import ast, functions
 from .types import (
-    StrataType, Inf, INT64, FLOAT64, STRING, BOOL, DATE, TIMESTAMP, UUID, JSON,
-    UNKNOWN, decimal, money, array, map_type, struct_type, binary_type, unify, Col,
+    BOOL,
+    DATE,
+    FLOAT64,
+    INT64,
+    JSON,
+    STRING,
+    TIMESTAMP,
+    UNKNOWN,
+    UUID,
+    Col,
+    Inf,
+    StrataType,
+    array,
+    binary_type,
+    decimal,
+    map_type,
+    money,
+    struct_type,
+    unify,
 )
 
 
 class StrataError(Exception):
     def __init__(self, msg: str, code: str = "E099",
-                 span: Optional[Tuple[int, int, int, int]] = None,
-                 file: Optional[str] = None,
+                 span: tuple[int, int, int, int] | None = None,
+                 file: str | None = None,
                  severity: str = "error",
-                 help: Optional[str] = None) -> None:
+                 help: str | None = None) -> None:
         super().__init__(msg)
         self.code = code
         self.span = span
@@ -36,9 +52,9 @@ class StrataError(Exception):
 
 
 def err(code: str, msg: str,
-        span: Optional[Tuple[int, int, int, int]] = None,
-        file: Optional[str] = None, severity: str = "error",
-        help: Optional[str] = None) -> StrataError:
+        span: tuple[int, int, int, int] | None = None,
+        file: str | None = None, severity: str = "error",
+        help: str | None = None) -> StrataError:
     """Build a StrataError with a code, optional span/file, severity and help."""
     return StrataError(msg, code=code, span=span, file=file,
                        severity=severity, help=help)
@@ -73,7 +89,7 @@ class Origin:
     col: str
     kind: str = "passthrough"
 
-    def key(self) -> Tuple[str, str]:
+    def key(self) -> tuple[str, str]:
         """Identity key (node, col) used as the edge label in lineage maps."""
         return (self.node, self.col)
 
@@ -85,7 +101,7 @@ class InputSpec:
     alias: str
     node: str
     is_source: bool
-    cols: "OrderedDict[str, Col]"
+    cols: OrderedDict[str, Col]
 
 
 @dataclass
@@ -98,15 +114,15 @@ class JoinSpec:
     # Cardinality expectation (None | "many_to_one" | "one_to_one") with the
     # equi-join key columns per side, extracted at check time; enforced at
     # materialize time by counting duplicate key groups on the upstream tables.
-    expect: Optional[str] = None
-    left_keys: List[str] = field(default_factory=list)
-    right_keys: List[str] = field(default_factory=list)
+    expect: str | None = None
+    left_keys: list[str] = field(default_factory=list)
+    right_keys: list[str] = field(default_factory=list)
 
 
 @dataclass
 class BaseCol:
     name: str
-    expr: Optional[ast.Node]
+    expr: ast.Node | None
 
 
 @dataclass
@@ -118,66 +134,66 @@ class PlanOut:
 
 @dataclass
 class Plan:
-    partition_by: List[Node] = field(default_factory=list)
-    freshness: Optional[List[str]] = None  # e.g. ['incremental'], ['1h', 'daily']
-    freshness_column: Optional[str] = None  # event-time column for freshness check
+    partition_by: list[Node] = field(default_factory=list)
+    freshness: list[str] | None = None  # e.g. ['incremental'], ['1h', 'daily']
+    freshness_column: str | None = None  # event-time column for freshness check
     # Incremental model configuration
     incremental: bool = False  # True if this is an incremental model
-    merge_keys: List[Node] = field(default_factory=list)  # Keys for upsert/merge
-    merge_strategy: Optional[str] = None  # 'upsert', 'append', 'replace'
-    cdc_column: Optional[str] = None  # Change Data Capture column
-    inputs: List[InputSpec] = field(default_factory=list)
-    joins: List[JoinSpec] = field(default_factory=list)
-    base_cols: List[BaseCol] = field(default_factory=list)
-    preds: List[ast.Node] = field(default_factory=list)
-    having: List[ast.Node] = field(default_factory=list)
-    outputs: List[PlanOut] = field(default_factory=list)
-    group_exprs: List[ast.Node] = field(default_factory=list)
-    sorts: List[Tuple[ast.Node, bool]] = field(default_factory=list)
-    limit: Optional[Tuple[Optional[int], Optional[int]]] = None
+    merge_keys: list[Node] = field(default_factory=list)  # Keys for upsert/merge
+    merge_strategy: str | None = None  # 'upsert', 'append', 'replace'
+    cdc_column: str | None = None  # Change Data Capture column
+    inputs: list[InputSpec] = field(default_factory=list)
+    joins: list[JoinSpec] = field(default_factory=list)
+    base_cols: list[BaseCol] = field(default_factory=list)
+    preds: list[ast.Node] = field(default_factory=list)
+    having: list[ast.Node] = field(default_factory=list)
+    outputs: list[PlanOut] = field(default_factory=list)
+    group_exprs: list[ast.Node] = field(default_factory=list)
+    sorts: list[tuple[ast.Node, bool]] = field(default_factory=list)
+    limit: tuple[int | None, int | None] | None = None
     grouped: bool = False
     # id(ast.Call) -> StrataType of the temporal base argument, filled by the
     # date-function typing path: sqlgen needs it to know where DATE must be
     # preserved (DuckDB/Postgres promote to TIMESTAMP on month/year math).
-    date_arg_types: Dict[int, StrataType] = field(default_factory=dict)
+    date_arg_types: dict[int, StrataType] = field(default_factory=dict)
     # Container type for collection calls; Snowflake GET needs an element cast.
-    collection_arg_types: Dict[int, StrataType] = field(default_factory=dict)
+    collection_arg_types: dict[int, StrataType] = field(default_factory=dict)
     # One expand per model: (source_col, output_col, element_type_name) of the
     # lateral array unnest that runs in the base subquery.
-    expand: Optional[Tuple[str, str, str]] = None
+    expand: tuple[str, str, str] | None = None
     # Set operations combining the current rows with same-shaped models, in
     # statement order: each (op, all, right_node). They must be consecutive;
     # statements before the first shape the left branch (base_cols/preds up
     # to the split), statements after the last see the combined rows.
-    set_ops: List[Tuple[str, bool, str]] = field(default_factory=list)
+    set_ops: list[tuple[str, bool, str]] = field(default_factory=list)
     setop_base_split: int = 0
     setop_pred_split: int = 0
     # Union branch column types, in positional order: (name, [branch types in
     # chain order: left branch first, then each right model in set_ops
     # order], unified_type) for the casts in every branch.
-    setop_cols: List[Tuple[str, List["StrataType"], "StrataType"]] = field(default_factory=list)
+    setop_cols: list[tuple[str, list[StrataType], StrataType]] = field(default_factory=list)
     # Set-op right model aliases (alias -> node), so qualified references to
     # the combined columns (`b.x`) compile to the bare union column name.
-    setop_right: Dict[str, str] = field(default_factory=dict)
+    setop_right: dict[str, str] = field(default_factory=dict)
     # Full-row duplicate elimination (SELECT DISTINCT over the final rows).
     distinct: bool = False
     # `dedup by k1, k2`: deterministic one-row-per-key over the final rows
     # (keys must be output columns; the tiebreak orders by the rest).
-    dedup_keys: List[ast.Node] = field(default_factory=list)
+    dedup_keys: list[ast.Node] = field(default_factory=list)
 
 
 @dataclass
 class TypedModel:
     name: str
-    contract: Optional[str]
-    attrs: Dict[str, str]
-    schema: "OrderedDict[str, Col]" = field(default_factory=OrderedDict)
-    lineage: Dict[str, List[Origin]] = field(default_factory=dict)
-    reads: Set[Tuple[str, str]] = field(default_factory=set)
-    plan: Optional[Plan] = None
-    deps: List[str] = field(default_factory=list)
+    contract: str | None
+    attrs: dict[str, str]
+    schema: OrderedDict[str, Col] = field(default_factory=OrderedDict)
+    lineage: dict[str, list[Origin]] = field(default_factory=dict)
+    reads: set[tuple[str, str]] = field(default_factory=set)
+    plan: Plan | None = None
+    deps: list[str] = field(default_factory=list)
     fingerprint: str = ""
-    diags: List[str] = field(default_factory=list)
+    diags: list[str] = field(default_factory=list)
 
 
 # ------------------------------------------------------------------ schemas
@@ -188,8 +204,8 @@ TYPE_FROM_KW = {
 }
 
 
-def type_from_spec(spec: str, params: List[object],
-                   domains: Optional[Dict[str, StrataType]] = None) -> StrataType:
+def type_from_spec(spec: str, params: list[object],
+                   domains: dict[str, StrataType] | None = None) -> StrataType:
     """Resolve a declared type: builtins (array elements recurse to any depth
     over scalars, parameterized types and nested arrays), or a bare `domain`
     alias looked up in the project's pre-resolved domain table."""
@@ -241,7 +257,7 @@ def _valid_map_value(t: StrataType) -> bool:
     return t.name in ("string", "int64", "float64", "bool", "decimal", "money", "json")
 
 
-def _elem_type(p: object, domains: Optional[Dict[str, StrataType]]) -> StrataType:
+def _elem_type(p: object, domains: dict[str, StrataType] | None) -> StrataType:
     # Array element params: bare names stay bare strings (scalars, or domain
     # aliases resolved here); parameterized or nested elements are
     # (spec, subparams) tuples resolved recursively.
@@ -264,7 +280,7 @@ def _elem_type(p: object, domains: Optional[Dict[str, StrataType]]) -> StrataTyp
 
 
 def contract_field_col(f: ast.ContractField,
-                       domains: Optional[Dict[str, StrataType]] = None) -> Col:
+                       domains: dict[str, StrataType] | None = None) -> Col:
     """Resolve a ContractField into a typed Col (resolving domain aliases, E078 on unknowns)."""
     t = type_from_spec(f.type_spec, f.params, domains)
     if t.name == "unknown":
@@ -283,7 +299,7 @@ def contract_field_col(f: ast.ContractField,
 
 
 def source_decl_cols(decl: ast.SourceDecl,
-                     domains: Optional[Dict[str, StrataType]] = None) -> List[Col]:
+                     domains: dict[str, StrataType] | None = None) -> list[Col]:
     """Column list declared by a source declaration (`columns: {...}`), empty when absent."""
     for kind, val in decl.props:
         if kind == "columns":
@@ -294,15 +310,15 @@ def source_decl_cols(decl: ast.SourceDecl,
 # ------------------------------------------------------------------ fn evaluation (definition domain)
 
 class FnEvaluator:
-    def __init__(self, project: "Project") -> None:
+    def __init__(self, project: Project) -> None:
         self.project = project
 
-    def call(self, decl: ast.FnDecl, args: List[object]) -> object:
+    def call(self, decl: ast.FnDecl, args: list[object]) -> object:
         """Evaluate a fn call with the given argument values."""
         env = dict(zip([p for p, _ in decl.params], args))
         return self._val(decl.body, env)
 
-    def _val(self, e: ast.Node, env: Dict[str, object]) -> object:
+    def _val(self, e: ast.Node, env: dict[str, object]) -> object:
         if isinstance(e, ast.Literal):
             return e.value
         if isinstance(e, ast.TemplateStr):
@@ -343,7 +359,7 @@ class FnEvaluator:
             return self._model_value(e, env)
         raise self._err("F042", f"unsupported expression in fn body: {type(e).__name__}", e.span)
 
-    def _model_value(self, mv: ast.ModelValue, env: Dict[str, object]) -> ast.ModelDecl:
+    def _model_value(self, mv: ast.ModelValue, env: dict[str, object]) -> ast.ModelDecl:
         import copy
         return ast.ModelDecl(
             name=str(self._val(mv.name, env)),
@@ -354,7 +370,7 @@ class FnEvaluator:
             span=mv.span,
         )
 
-    def _subst_stmt(self, stmt: ast.Stmt, env: Dict[str, object]) -> ast.Stmt:
+    def _subst_stmt(self, stmt: ast.Stmt, env: dict[str, object]) -> ast.Stmt:
         if isinstance(stmt, ast.FilterStmt):
             stmt.cond = self._subst_expr(stmt.cond, env)
         elif isinstance(stmt, ast.LetStmt):
@@ -366,7 +382,7 @@ class FnEvaluator:
                 a.expr = self._subst_expr(a.expr, env)
         return stmt
 
-    def _subst_expr(self, e: ast.Node, env: Dict[str, object]) -> ast.Node:
+    def _subst_expr(self, e: ast.Node, env: dict[str, object]) -> ast.Node:
         if isinstance(e, ast.ColumnRef):
             if e.name in env:
                 return ast.Literal(value=env[e.name], span=e.span)
@@ -390,30 +406,30 @@ class FnEvaluator:
 # ------------------------------------------------------------------ project
 
 class Project:
-    def __init__(self, module: ast.Module, search_dirs: Optional[List[str]] = None,
-                 _seen: Optional[Set[str]] = None) -> None:
+    def __init__(self, module: ast.Module, search_dirs: list[str] | None = None,
+                 _seen: set[str] | None = None) -> None:
         self.module = module
         self.search_dirs = [str(p) for p in (search_dirs or [])]
-        self.expansions: List[ast.GeneratorDecl] = []
-        self.sources: Dict[str, ast.SourceDecl] = {}
-        self.contracts: Dict[str, ast.ContractDecl] = {}
-        self.models: Dict[str, ast.ModelDecl] = {}
-        self.domains: Dict[str, ast.DomainDecl] = {}
-        self.domain_types: Dict[str, StrataType] = {}
-        self.fns: Dict[str, ast.FnDecl] = {}
-        self.pipelines: List[ast.PipelineDecl] = []
-        self.tests: Dict[str, List[ast.TestDecl]] = {}
-        self.typed: Dict[str, TypedModel] = {}
-        self.modules: Dict[str, ast.Module] = {module.path or "<strata>": module}
-        self.imports: List[str] = []
+        self.expansions: list[ast.GeneratorDecl] = []
+        self.sources: dict[str, ast.SourceDecl] = {}
+        self.contracts: dict[str, ast.ContractDecl] = {}
+        self.models: dict[str, ast.ModelDecl] = {}
+        self.domains: dict[str, ast.DomainDecl] = {}
+        self.domain_types: dict[str, StrataType] = {}
+        self.fns: dict[str, ast.FnDecl] = {}
+        self.pipelines: list[ast.PipelineDecl] = []
+        self.tests: dict[str, list[ast.TestDecl]] = {}
+        self.typed: dict[str, TypedModel] = {}
+        self.modules: dict[str, ast.Module] = {module.path or "<strata>": module}
+        self.imports: list[str] = []
         self._resolve()
         self._resolve_domains()
         self._expand_fns()
 
     # -- multi-file imports (spec/grammar.md: `import a.b` -> a/b.strata) ----
-    def _resolve_import(self, path: str, seen: Set[str]) -> Optional[ast.Module]:
+    def _resolve_import(self, path: str, seen: set[str]) -> ast.Module | None:
         rel = Path(*path.split(".")).with_suffix(".strata")
-        candidates: List[Path] = []
+        candidates: list[Path] = []
         cur = Path(self.module.path or "<strata>")
         if str(cur) not in ("<strata>", "") and cur.parent != Path("."):
             candidates.append(cur.parent / rel)
@@ -457,7 +473,7 @@ class Project:
             self.expansions.append(d)
 
     def _resolve(self) -> None:
-        seen: Set[str] = set()
+        seen: set[str] = set()
         try:
             seen.add(str(Path(self.module.path).resolve()))
         except Exception:
@@ -471,9 +487,9 @@ class Project:
     def _resolve_domains(self) -> None:
         """Pre-resolve `domain` aliases to StrataTypes (fail fast on cycles
         and unknown names, even when the alias is never used)."""
-        visiting: Set[str] = set()
+        visiting: set[str] = set()
 
-        def expand(spec: str, params: List[object]) -> StrataType:
+        def expand(spec: str, params: list[object]) -> StrataType:
             if spec in TYPE_FROM_KW:
                 return TYPE_FROM_KW[spec]
             if spec == "decimal":
@@ -561,7 +577,7 @@ class Project:
         for v in self._flatten_models(values):
             self.models.setdefault(v.name, v)
 
-    def _flatten_models(self, values: object) -> List[ast.ModelDecl]:
+    def _flatten_models(self, values: object) -> list[ast.ModelDecl]:
         out = []
         for v in values:
             if isinstance(v, list):
@@ -570,7 +586,7 @@ class Project:
                 out.append(v)
         return out
 
-    def source_schema(self, name: str) -> "OrderedDict[str, Col]":
+    def source_schema(self, name: str) -> OrderedDict[str, Col]:
         """Ordered column schema of a source declaration by name (E020/E021 when unknown/empty)."""
         decl = self.sources.get(name)
         if decl is None:
@@ -580,7 +596,7 @@ class Project:
             raise err("E021", f"source {name!r} has no declared columns (add columns: {{...}})")
         return OrderedDict((c.name, c) for c in cols)
 
-    def input_schema(self, name: str) -> Tuple["OrderedDict[str, Col]", bool, str]:
+    def input_schema(self, name: str) -> tuple[OrderedDict[str, Col], bool, str]:
         """(cols, is_source, node) where the input name is a source or an already-typed model."""
         if name in self.sources:
             return self.source_schema(name), True, name
@@ -591,8 +607,8 @@ class Project:
             return tm.schema, False, name
         raise err("E020", f"unknown input {name!r} (not a source or model)")
 
-    def model_names_for(self, pipeline: Optional[ast.PipelineDecl],
-                    include_generated: bool = False) -> List[str]:
+    def model_names_for(self, pipeline: ast.PipelineDecl | None,
+                    include_generated: bool = False) -> list[str]:
         """Names of the models a pipeline selects (or all non-generated models when None)."""
         if pipeline is None:
             return [n for n in self.models if include_generated or not self.models[n].generated]
@@ -608,7 +624,7 @@ class Project:
                 raise err("F046", f"pipeline has unexpanded fn {item.name!r}", item.span)
         return names
 
-    def pipeline_by_name(self, name: Optional[str]) -> Optional[ast.PipelineDecl]:
+    def pipeline_by_name(self, name: str | None) -> ast.PipelineDecl | None:
         """Pipeline declaration by name, or the first one when name is None."""
         if not self.pipelines:
             return None
@@ -619,7 +635,7 @@ class Project:
                 return p
         raise err("E023", f"unknown pipeline {name!r}")
 
-    def pipeline_sources(self, pipeline: Optional[str]) -> Dict[str, Dict[str, str]]:
+    def pipeline_sources(self, pipeline: str | None) -> dict[str, dict[str, str]]:
         """Per-env source resource overrides for `run --pipeline`.
 
         `pipeline prod { sources: { orders: from(ns: "x", dataset: "y") } }`
@@ -651,7 +667,7 @@ def types_compat(exp: StrataType, got: StrataType) -> bool:
 
 
 def infer_binary(op: str, lt: Inf, rt: Inf,
-                 span: Optional[Tuple[int, int, int, int]] = None) -> Inf:
+                 span: tuple[int, int, int, int] | None = None) -> Inf:
     """Infer the result type of a binary operator, raising E05x on invalid combinations."""
     if op in ("like", "rlike"):
         # Same contract as the like()/rlike() calls: both sides strings; a
@@ -690,15 +706,15 @@ def infer_binary(op: str, lt: Inf, rt: Inf,
 class Checker:
     def __init__(self, project: Project) -> None:
         self.p = project
-        self.all_reads: Dict[str, Set[Tuple[str, str]]] = {}
+        self.all_reads: dict[str, set[tuple[str, str]]] = {}
         self.file = project.module.path or "<strata>"
 
     def _err(self, code: str, msg: str,
-             span: Optional[Tuple[int, int, int, int]] = None,
-             help: Optional[str] = None) -> NoReturn:
+             span: tuple[int, int, int, int] | None = None,
+             help: str | None = None) -> NoReturn:
         raise err(code, msg, span=span, file=self.file, help=help)
 
-    def check_all(self, model_names: Optional[List[str]] = None) -> Dict[str, TypedModel]:
+    def check_all(self, model_names: list[str] | None = None) -> dict[str, TypedModel]:
         """Typecheck every model in topological order and return the typed graph."""
         names = model_names if (model_names is not None and model_names) else list(self.p.models)
         order = self._topo(names)
@@ -708,7 +724,7 @@ class Checker:
             self.all_reads[n] = set(tm.reads)
         return self.p.typed
 
-    def check_tests(self, model_names: Optional[List[str]] = None) -> int:
+    def check_tests(self, model_names: list[str] | None = None) -> int:
         """Validate declarative tests (E091-E094). Must be called after check_all."""
         for tds in self.p.tests.values():
             for td in tds:
@@ -742,7 +758,7 @@ class Checker:
                                           help="check the literal type matches the column type")
         return sum(len(tds) for tds in self.p.tests.values())
 
-    def _topo(self, names: List[str]) -> List[str]:
+    def _topo(self, names: list[str]) -> list[str]:
         visiting, done, out = set(), set(), []
 
         def visit(n: str) -> None:
@@ -764,14 +780,10 @@ class Checker:
             visit(n)
         return out
 
-    def _deps(self, decl: ast.ModelDecl) -> List[str]:
+    def _deps(self, decl: ast.ModelDecl) -> list[str]:
         deps = []
         for s in decl.stmts:
-            if isinstance(s, ast.FromStmt):
-                deps.append(s.table)
-            elif isinstance(s, ast.JoinStmt):
-                deps.append(s.table)
-            elif isinstance(s, ast.SetOpStmt):
+            if isinstance(s, ast.FromStmt) or isinstance(s, ast.JoinStmt) or isinstance(s, ast.SetOpStmt):
                 deps.append(s.table)
         return deps
 
@@ -795,29 +807,29 @@ class _ModelState:
         tm.plan.merge_strategy = decl.merge_strategy
         tm.plan.cdc_column = decl.cdc_column
         self.tm = tm
-        self.inputs: List[InputSpec] = []
-        self.base_cols: List[BaseCol] = []
-        self.own: Dict[str, str] = {}
-        self.cols: "OrderedDict[str, Col]" = OrderedDict()
-        self.origins: Dict[str, List[Origin]] = {}
-        self.preds: List[ast.Node] = []
-        self.outputs: List[PlanOut] = []
-        self.group_keys: Set[str] = set()
+        self.inputs: list[InputSpec] = []
+        self.base_cols: list[BaseCol] = []
+        self.own: dict[str, str] = {}
+        self.cols: OrderedDict[str, Col] = OrderedDict()
+        self.origins: dict[str, list[Origin]] = {}
+        self.preds: list[ast.Node] = []
+        self.outputs: list[PlanOut] = []
+        self.group_keys: set[str] = set()
         self.in_group = False
         # Set-operation chain state: set-ops must be consecutive (no other
         # statement between them); anything else closes the chain.
         self._setop_chain_open = False
         # Per-column branch types and running unified types while a model's
         # set-op chain grows (chained branches extend the per-column lists).
-        self._setop_branches: "Dict[str, List[StrataType]]" = OrderedDict()
-        self._setop_unified: "Dict[str, StrataType]" = OrderedDict()
+        self._setop_branches: dict[str, list[StrataType]] = OrderedDict()
+        self._setop_unified: dict[str, StrataType] = OrderedDict()
         # Set-op right-model aliases, registered so qualified references like
         # `b.x` resolve against the combined (union) columns.
-        self.setop_right: Dict[str, str] = {}
+        self.setop_right: dict[str, str] = {}
 
     def _err(self, code: str, msg: str,
-             span: Optional[Tuple[int, int, int, int]] = None,
-             help: Optional[str] = None) -> NoReturn:
+             span: tuple[int, int, int, int] | None = None,
+             help: str | None = None) -> NoReturn:
         raise err(code, msg, span=span, file=self.file, help=help)
 
     def run(self) -> TypedModel:
@@ -851,7 +863,7 @@ class _ModelState:
             raise self._err("E040", f"unknown column {e.name!r} in {where}", e.span)
         return col
 
-    def origin_of(self, e: ast.ColumnRef) -> List[Origin]:
+    def origin_of(self, e: ast.ColumnRef) -> list[Origin]:
         """Lineage [Origin] entries backing a column reference."""
         if e.qualifier:
             for i, inp in enumerate(self.inputs):
@@ -942,7 +954,7 @@ class _ModelState:
         return fn.ret(args)
 
     def _reject_nested_window(self, e: ast.Node,
-                              span: Optional[Tuple[int, int, int, int]]) -> None:
+                              span: tuple[int, int, int, int] | None) -> None:
         if isinstance(e, ast.WindowCall):
             raise self._err(functions.E_WINDOW_PLACEMENT, "a window cannot appear inside a window", span)
         if isinstance(e, ast.Call):
@@ -998,9 +1010,7 @@ class _ModelState:
             # array_prepend's array is the second argument; json_build has no
             # array base (its type is the return type).  Everything else uses
             # args[0] as the collection base.
-            if name in ("array_construct", "list"):
-                base_t = fn.ret(args).t
-            elif name in ("map", "dict"):
+            if name in ("array_construct", "list") or name in ("map", "dict"):
                 base_t = fn.ret(args).t
             elif name == "struct":
                 # Compute struct type from AST to get field names
@@ -1009,14 +1019,12 @@ class _ModelState:
                     name_node = e.args[i]
                     val_node = e.args[i + 1]
                     if not isinstance(name_node, ast.Literal) or not isinstance(name_node.value, str):
-                        raise self._err("E063", f"struct() field names must be string literals", name_node.span)
+                        raise self._err("E063", "struct() field names must be string literals", name_node.span)
                     fname = name_node.value
                     ftype = self.infer(val_node).t
                     fields.append((fname, ftype))
                 base_t = struct_type(fields)
-            elif name == "json_build":
-                base_t = fn.ret(args).t
-            elif name == "array_agg":
+            elif name == "json_build" or name == "array_agg":
                 base_t = fn.ret(args).t
             elif name == "array_prepend":
                 base_t = args[1].t
@@ -1087,7 +1095,7 @@ class _ModelState:
     # knows where DATE must be preserved across dialects that promote to
     # TIMESTAMP with month/year arithmetic (DuckDB/Postgres).
 
-    def infer_date_call(self, e: ast.Call, fn: "functions.Fn") -> Inf:
+    def infer_date_call(self, e: ast.Call, fn: functions.Fn) -> Inf:
         # Check arity before indexing; symbolic units never resolve as columns.
         """Typecheck a date_add/date_sub/date_trunc/date_diff call with its symbolic unit."""
         if len(e.args) != fn.min_args:
@@ -1146,10 +1154,7 @@ class _ModelState:
             self.infer(s.cond)
         elif isinstance(s, ast.LetStmt):
             self.do_let(s)
-        elif isinstance(s, ast.DeriveStmt):
-            for a in s.assigns:
-                self.do_output(a)
-        elif isinstance(s, ast.AggregateStmt):
+        elif isinstance(s, ast.DeriveStmt) or isinstance(s, ast.AggregateStmt):
             for a in s.assigns:
                 self.do_output(a)
         elif isinstance(s, ast.GroupStmt):
@@ -1215,7 +1220,7 @@ class _ModelState:
             self.origins[key] = [Origin(node, name, "joined")]
             self.base_cols.append(BaseCol(name=key, expr=None))
 
-    def _join_cardinality(self, s: ast.JoinStmt, inp: InputSpec) -> Tuple[Optional[str], List[str], List[str]]:
+    def _join_cardinality(self, s: ast.JoinStmt, inp: InputSpec) -> tuple[str | None, list[str], list[str]]:
         """Validate an `expect many_to_one|one_to_one` annotation and extract
         the equi-join key columns per side for the materialize-time check.
 
@@ -1231,10 +1236,10 @@ class _ModelState:
             raise self._err("E079", f"expect {s.expect} does not apply to a {s.kind} "
                               f"join (it never multiplies rows)", s.span)
         left_alias = self.inputs[0].alias
-        true_pairs: List[Tuple[str, str]] = []
-        right_only: List[str] = []
+        true_pairs: list[tuple[str, str]] = []
+        right_only: list[str] = []
 
-        def l_plain(e: ast.Node) -> Optional[str]:
+        def l_plain(e: ast.Node) -> str | None:
             if not isinstance(e, ast.ColumnRef):
                 return None
             if e.qualifier:
@@ -1244,7 +1249,7 @@ class _ModelState:
                 return e.name
             return None
 
-        def r_plain(e: ast.Node) -> Optional[str]:
+        def r_plain(e: ast.Node) -> str | None:
             if isinstance(e, ast.ColumnRef) and e.qualifier == inp.alias:
                 return e.name
             return None
@@ -1291,7 +1296,7 @@ class _ModelState:
 
         walk(s.on)
 
-        def ordered(keys: List[str]) -> List[str]:
+        def ordered(keys: list[str]) -> list[str]:
             out = []
             for k in keys:
                 if k not in out:
@@ -1450,7 +1455,7 @@ class _ModelState:
         self._setop_chain_open = True
 
     def _require_no_window(self, e: ast.Node,
-                           span: Optional[Tuple[int, int, int, int]],
+                           span: tuple[int, int, int, int] | None,
                            where: str) -> None:
         """Windows run after grouping in the outer query, so `let` (inner
         subquery), `filter`, group keys and `sort` must not contain them."""
@@ -1460,7 +1465,7 @@ class _ModelState:
                       f"over(...) is only allowed in select/derive/aggregate "
                       f"outputs, not in {where} (found {found})", span)
 
-    def _find_window(self, e: ast.Node) -> Optional[str]:
+    def _find_window(self, e: ast.Node) -> str | None:
         if isinstance(e, ast.WindowCall):
             return e.name
         if isinstance(e, ast.Call):
@@ -1503,7 +1508,7 @@ class _ModelState:
         self.cols[a.name] = col
         self.origins[a.name] = self._origin_of_expr(a.expr)
 
-    def _origin_of_expr(self, e: ast.Node) -> List[Origin]:
+    def _origin_of_expr(self, e: ast.Node) -> list[Origin]:
         if isinstance(e, ast.ColumnRef):
             return self.origin_of(e)
         if isinstance(e, ast.WindowCall):
@@ -1511,7 +1516,7 @@ class _ModelState:
             # windowed expression keeps its kind on the argument origins while
             # recording that a window produced them.
             kind = "windowed"
-            out: List[Origin] = []
+            out: list[Origin] = []
             for a in e.args:
                 out.extend(self._origin_of_expr(a))
             for p in e.over.partition_by:
@@ -1523,7 +1528,7 @@ class _ModelState:
             return [Origin(o.node, o.col, kind) for o in out]
         if isinstance(e, ast.Call):
             kind = "aggregated" if e.name in AGGREGATES else "derived"
-            out: List[Origin] = []
+            out: list[Origin] = []
             for a in e.args:
                 out.extend(self._origin_of_expr(a))
             if not out:
@@ -1672,9 +1677,9 @@ class _ModelState:
 
 # ------------------------------------------------------------------ blast radius
 
-def build_down_edges(tms: Dict[str, TypedModel]) -> Dict[Tuple[str, str], List[Tuple[str, str]]]:
+def build_down_edges(tms: dict[str, TypedModel]) -> dict[tuple[str, str], list[tuple[str, str]]]:
     """(upstream_node, col) -> [(model, output_col)]"""
-    down: Dict[Tuple[str, str], List[Tuple[str, str]]] = {}
+    down: dict[tuple[str, str], list[tuple[str, str]]] = {}
     for m, tm in tms.items():
         for out_name, origins in tm.lineage.items():
             for o in origins:
@@ -1684,7 +1689,7 @@ def build_down_edges(tms: Dict[str, TypedModel]) -> Dict[Tuple[str, str], List[T
     return down
 
 
-def blast_radius(tms: Dict[str, TypedModel], changes: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+def blast_radius(tms: dict[str, TypedModel], changes: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """All (node, col) descendants transitively affected by the given changed columns."""
     down = build_down_edges(tms)
     seen, stack = set(), list(changes)

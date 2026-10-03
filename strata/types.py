@@ -1,18 +1,17 @@
 """Strata value types and column/contract descriptors."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from typing import Optional, Set, List
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
 class StrataType:
     name: str = "unknown"
-    currency: Optional[str] = None
-    elem: Optional["StrataType"] = None
-    key: Optional["StrataType"] = None     # map key type
-    value: Optional["StrataType"] = None   # map value type
-    fields: Optional[List[Tuple[str, "StrataType"]]] = None  # struct fields: [(name, type), ...]
+    currency: str | None = None
+    elem: StrataType | None = None
+    key: StrataType | None = None     # map key type
+    value: StrataType | None = None   # map value type
+    fields: list[Tuple[str, StrataType]] | None = None  # struct fields: [(name, type), ...]
     precision: int = 38
     scale: int = 2
 
@@ -72,7 +71,7 @@ def map_type(key: StrataType, value: StrataType) -> StrataType:
     return StrataType("map", key=key, value=value)
 
 
-def struct_type(fields: List[Tuple[str, StrataType]]) -> StrataType:
+def struct_type(fields: list[Tuple[str, StrataType]]) -> StrataType:
     """Construct a struct type over the given named fields."""
     return StrataType("struct", fields=fields)
 
@@ -171,9 +170,9 @@ class Col:
     primary: bool = False
     protected: bool = False
     enum: frozenset = frozenset()
-    classification: Optional[str] = None
+    classification: str | None = None
 
-    def clone(self, **kw) -> "Col":
+    def clone(self, **kw) -> Col:
         """Copy of the Col with the given keyword overrides applied."""
         base = {
             "name": self.name,
@@ -209,11 +208,11 @@ class Col:
 @dataclass
 class Schema:
     node: str
-    cols: "OrderedDict[str, Col]" = field(default_factory=lambda: OrderedDict())
+    cols: OrderedDict[str, Col] = field(default_factory=lambda: OrderedDict())
 
-    def get(self, name: str) -> Optional[Col]:
+    def get(self, name: str) -> Col | None:
         """Column schema for `name`, or None when absent."""
         return self.cols.get(name)
 
 
-from collections import OrderedDict  # noqa: E402  (placed after dataclass for clarity)
+from collections import OrderedDict

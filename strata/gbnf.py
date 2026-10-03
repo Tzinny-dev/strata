@@ -49,8 +49,9 @@ never depend on a same-position cycle).
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, List, Optional, Sequence, Set, Tuple, Union
+from typing import Union
 
 
 class GbnfError(Exception):
@@ -97,7 +98,7 @@ class Alt:
 class Rep:
     inner: object
     lo: int
-    hi: Optional[int]  # None == unbounded
+    hi: int | None  # None == unbounded
 
 
 Node = Union[Lit, CharClass, AnyChar, Ref, Seq, Alt, Rep]
@@ -111,8 +112,8 @@ Node = Union[Lit, CharClass, AnyChar, Ref, Seq, Alt, Rep]
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 
 
-def _gbnf_tokens(text: str) -> List[Tuple[str, str]]:
-    toks: List[Tuple[str, str]] = []
+def _gbnf_tokens(text: str) -> list[tuple[str, str]]:
+    toks: list[tuple[str, str]] = []
     i, n = 0, len(text)
     while i < n:
         c = text[i]
@@ -213,7 +214,7 @@ _ESCAPES = {
 
 
 def _unescape(raw: str) -> str:
-    out: List[str] = []
+    out: list[str] = []
     i, n = 0, len(raw)
     while i < n:
         if raw[i] == "\\" and i + 1 < n:
@@ -225,10 +226,10 @@ def _unescape(raw: str) -> str:
     return "".join(out)
 
 
-def _expand_class(raw: str) -> Tuple[FrozenSet[str], bool]:
+def _expand_class(raw: str) -> tuple[frozenset[str], bool]:
     negate = raw.startswith("^")
     body = raw[1:] if negate else raw
-    chars: Set[str] = set()
+    chars: set[str] = set()
     i, n = 0, len(body)
     while i < n:
         ch = body[i]
@@ -268,15 +269,15 @@ def _expand_class(raw: str) -> Tuple[FrozenSet[str], bool]:
 
 
 class _Parser:
-    def __init__(self, toks: Sequence[Tuple[str, str]]) -> None:
+    def __init__(self, toks: Sequence[tuple[str, str]]) -> None:
         self.toks = toks
         self.i = 0
 
-    def peek(self) -> Optional[Tuple[str, str]]:
+    def peek(self) -> tuple[str, str] | None:
         """Next (kind, value) token without consuming, or None at end of input."""
         return self.toks[self.i] if self.i < len(self.toks) else None
 
-    def next(self) -> Tuple[str, str]:
+    def next(self) -> tuple[str, str]:
         """Consume and return the next (kind, value) token."""
         t = self.toks[self.i]
         self.i += 1
@@ -331,7 +332,7 @@ class _Parser:
         return Rep(base, lo, hi)
 
     def _seq(self) -> Node:
-        items: List[Node] = []
+        items: list[Node] = []
         while True:
             t = self.peek()
             if t is None or t[0] in ("PIPE", "RPAREN"):
@@ -363,10 +364,10 @@ class _Parser:
 
 @dataclass
 class GbnfGrammar:
-    rules: Dict[str, Node] = field(default_factory=dict)
+    rules: dict[str, Node] = field(default_factory=dict)
 
     @classmethod
-    def from_text(cls, text: str) -> "GbnfGrammar":
+    def from_text(cls, text: str) -> GbnfGrammar:
         """Parse a GBNF document string into a GbnfGrammar."""
         g = cls()
         toks_all = _gbnf_tokens(text)
@@ -415,10 +416,10 @@ class GbnfGrammar:
             raise GbnfError("grammar has no 'root' rule")
         return g
 
-    def validate(self) -> List[str]:
+    def validate(self) -> list[str]:
         """Every referenced rule is defined. Returns a list of problems."""
         names = set(self.rules)
-        problems: List[str] = []
+        problems: list[str] = []
         for name, node in self.rules.items():
             for ref in collect_refs(node):
                 if ref not in names and ref != name:
@@ -428,8 +429,8 @@ class GbnfGrammar:
     # -- matching ------------------------------------------------------------
 
     def _match(self, text: str, node: Node, pos: int,
-               memo: Dict[Tuple, FrozenSet[int]],
-               pending: Set[Tuple]) -> FrozenSet[int]:
+               memo: dict[tuple, frozenset[int]],
+               pending: set[tuple]) -> frozenset[int]:
         if isinstance(node, Lit):
             end = pos + len(node.text)
             return frozenset({end}) if text.startswith(node.text, pos) else frozenset()
@@ -454,9 +455,9 @@ class GbnfGrammar:
             memo[key] = res
             return res
         if isinstance(node, Seq):
-            cur: FrozenSet[int] = frozenset({pos})
+            cur: frozenset[int] = frozenset({pos})
             for item in node.items:
-                nxt: Set[int] = set()
+                nxt: set[int] = set()
                 for p in cur:
                     nxt |= self._match(text, item, p, memo, pending)
                 cur = frozenset(nxt)
@@ -464,16 +465,16 @@ class GbnfGrammar:
                     break
             return cur
         if isinstance(node, Alt):
-            res: Set[int] = set()
+            res: set[int] = set()
             for br in node.branches:
                 res |= self._match(text, br, pos, memo, pending)
             return frozenset(res)
         if isinstance(node, Rep):
-            reach: Set[int] = {pos}
-            frontier: Set[int] = {pos}
+            reach: set[int] = {pos}
+            frontier: set[int] = {pos}
             steps = 0
             while frontier and steps < len(text) + 1:
-                nxt: Set[int] = set()
+                nxt: set[int] = set()
                 for p in frontier:
                     nxt |= self._match(text, node.inner, p, memo, pending)
                 frontier = nxt - reach
@@ -481,8 +482,8 @@ class GbnfGrammar:
                 steps += 1
             if node.hi is not None:
                 # rebuild: positions reachable in exactly lo..hi iterations.
-                level: Set[int] = {pos}
-                out: Set[int] = set()
+                level: set[int] = {pos}
+                out: set[int] = set()
                 if node.lo <= 0:
                     out |= {pos}
                 for _ in range(1, node.hi + 1):
@@ -496,9 +497,9 @@ class GbnfGrammar:
             return frozenset(reach)
         raise GbnfError(f"unknown node {node!r}")
 
-    def accept_positions(self, text: str, start: str = "root") -> FrozenSet[int]:
+    def accept_positions(self, text: str, start: str = "root") -> frozenset[int]:
         """All end positions reachable from rule 'start' matching `text`."""
-        memo: Dict[Tuple, FrozenSet[int]] = {}
+        memo: dict[tuple, frozenset[int]] = {}
         return self._match(text, self.rules[start], 0, memo, set())
 
     def accepts(self, text: str) -> bool:
@@ -506,12 +507,12 @@ class GbnfGrammar:
         return len(text) in self.accept_positions(text)
 
 
-def collect_refs(node: Node) -> List[str]:
+def collect_refs(node: Node) -> list[str]:
     """Recursively collect Ref leaf names from a GBNF node."""
     if isinstance(node, Ref):
         return [node.name]
     if isinstance(node, Seq):
-        out: List[str] = []
+        out: list[str] = []
         for it in node.items:
             out.extend(collect_refs(it))
         return out
@@ -539,7 +540,7 @@ def token_spelling(tokens: Sequence[object]) -> str:
     their plain value. Whitespace and comments are already absent from the
     token stream (whitespace-agnostic grammar).
     """
-    parts: List[str] = []
+    parts: list[str] = []
     for tok in tokens:
         if tok.kind == "EOF":
             continue

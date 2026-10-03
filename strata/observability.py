@@ -9,11 +9,10 @@ dependency is required to import this module.
 """
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-from pathlib import Path
-import json
+from typing import Any
 
 
 @dataclass
@@ -21,8 +20,8 @@ class Metric:
     """A single metric data point."""
     name: str
     value: float
-    labels: Dict[str, str] = field(default_factory=dict)
-    timestamp: Optional[float] = None
+    labels: dict[str, str] = field(default_factory=dict)
+    timestamp: float | None = None
     metric_type: str = "gauge"  # gauge, counter, histogram
 
 
@@ -31,8 +30,8 @@ class MetricsCollector:
 
     def __init__(self, namespace: str = "strata") -> None:
         self.namespace = namespace
-        self.metrics: List[Metric] = []
-        self._start_time: Optional[float] = None
+        self.metrics: list[Metric] = []
+        self._start_time: float | None = None
 
     def start_timer(self) -> None:
         """Start a timer for duration metrics."""
@@ -95,7 +94,7 @@ class MetricsCollector:
             metric_type="counter",
         ))
 
-    def get_metrics(self) -> List[Metric]:
+    def get_metrics(self) -> list[Metric]:
         """Get all collected metrics."""
         return self.metrics
 
@@ -157,9 +156,9 @@ class JsonExporter:
 
 def create_monitoring_config(
     module_path: str,
-    exporters: Optional[List[str]] = None,
-    pushgateway_url: Optional[str] = None,
-) -> Dict[str, Any]:
+    exporters: list[str] | None = None,
+    pushgateway_url: str | None = None,
+) -> dict[str, Any]:
     """Create a monitoring configuration for a Strata pipeline."""
     if exporters is None:
         exporters = ["prometheus"]
@@ -177,7 +176,7 @@ def create_monitoring_config(
     }
 
 
-def dashboard_config() -> Dict[str, Any]:
+def dashboard_config() -> dict[str, Any]:
     """Create a Grafana dashboard configuration for Strata metrics."""
     return {
         "dashboard": {
