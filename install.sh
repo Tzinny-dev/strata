@@ -8,11 +8,13 @@ set -euo pipefail
 REPO="Tzinny-dev/strata"
 VERSION="${VERSION:-}"
 TO="${TO:-/usr/local/bin}"
+SKIP_SHA256="${SKIP_SHA256:-false}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="$2"; shift 2;;
     --to) TO="$2"; shift 2;;
+    --skip-sha256) SKIP_SHA256="true"; shift;;
     *) echo "unknown arg $1" >&2; exit 1;;
   esac
 done
@@ -49,12 +51,37 @@ if [[ "$ARCH" == "arm64" || "$ARCH" == "aarch64" ]]; then
 fi
 
 URL="https://github.com/$REPO/releases/download/v$VERSION/$ASSET"
+SHA_URL="https://github.com/$REPO/releases/download/v$VERSION/SHA256SUMS"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 echo "downloading $URL ..."
 curl -fsSL "$URL" -o "$TMP/strata"
 chmod +x "$TMP/strata"
+
+# Verify SHA256 if available and not skipped
+if [[ "$SKIP_SHA256" != "true" ]]; then
+  echo "downloading SHA256SUMS ..."
+  if curl -fsSL "$SHA_URL" -o "$TMP/SHA256SUMS" 2>/dev/null; then
+    EXPECTED_SHA="$(grep " $ASSET$" "$TMP/SHA256SUMS" | cut -d' ' -f1)"
+    if [[ -n "$EXPECTED_SHA" ]]; then
+      ACTUAL_SHA="$(sha256sum "$TMP/strata" | cut -d' ' -f1)"
+      if [[ "$ACTUAL_SHA" == "$EXPECTED_SHA" ]]; then
+        echo "SHA256 verified: $ACTUAL_SHA"
+      else
+        echo "error: SHA256 mismatch!" >&2
+        echo "  expected: $EXPECTED_SHA" >&2
+        echo "  actual:   $ACTUAL_SHA" >&2
+        echo "  Set SKIP_SHA256=true to bypass (not recommended)." >&2
+        exit 1
+      fi
+    else
+      echo "warning: $ASSET not found in SHA256SUMS, skipping verification" >&2
+    fi
+  else
+    echo "warning: SHA256SUMS not found for v$VERSION, skipping verification" >&2
+  fi
+fi
 
 # Verify basic smoke before install
 "$TMP/strata" --help >/dev/null

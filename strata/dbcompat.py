@@ -38,9 +38,45 @@ class PGConn:
         self.raw = raw
         self._cur = raw.cursor()
 
+    @staticmethod
+    def _convert_placeholders(sql: str, has_params: bool) -> str:
+        """Convert `?` placeholders to `%s` for psycopg2, handling string literals.
+
+        Only replaces `?` outside of single-quoted string literals.
+        If has_params is True, escapes literal `%` inside string literals as `%%`
+        to prevent psycopg2's Python % formatting from interpreting them
+        (e.g., LIKE '%foo%' would have %f interpreted as format specifier).
+        """
+        result = []
+        i = 0
+        in_literal = False
+        while i < len(sql):
+            ch = sql[i]
+            if ch == "'" and not in_literal:
+                in_literal = True
+                result.append(ch)
+            elif ch == "'" and in_literal:
+                # Check for escaped quote ('')
+                if i + 1 < len(sql) and sql[i + 1] == "'":
+                    result.append("''")
+                    i += 1
+                else:
+                    in_literal = False
+                    result.append(ch)
+            elif ch == "?" and not in_literal:
+                result.append("%s")
+            elif ch == "%" and has_params and in_literal:
+                # Escape literal % inside string literals as %% for psycopg2
+                result.append("%%")
+            else:
+                result.append(ch)
+            i += 1
+        return "".join(result)
+
     def execute(self, sql: str, params: Any | None = None) -> PGConn:
         """Run SQL (with `?` bind markers) and return self for chaining."""
-        self._cur.execute(sql.replace("?", "%s"), params or None)
+        converted = self._convert_placeholders(sql, params is not None)
+        self._cur.execute(converted, params or None)
         return self
 
     def fetchone(self) -> tuple | None:
@@ -86,7 +122,8 @@ class BigQueryConn:
         # exec.py only uses `?` for schema/table names — safe to inline as 'literal'
         out = sql
         for p in params:  # type: ignore
-            lit = "'" + str(p).replace("'", "''") + "'"
+            # BigQuery processes backslash escapes, so we need to escape them first
+            lit = "'" + str(p).replace("\\", "\\\\").replace("'", "''") + "'"
             out = out.replace("?", lit, 1)
         return out
 

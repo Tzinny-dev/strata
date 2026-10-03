@@ -9,6 +9,7 @@ query — the same philosophy as the 3-phase pins.
 from __future__ import annotations
 
 import datetime
+from typing import Optional, Tuple
 
 from . import ast, functions
 from .analysis import BaseCol, Plan, TypedModel
@@ -39,21 +40,8 @@ def _rlike_sql(dialect: Dialect, expr: str, pattern: str) -> str:
     return f"REGEXP_LIKE({expr}, {pattern})"
 
 
-def _lit(value: object) -> str:
-    if isinstance(value, bool):
-        return "TRUE" if value else "FALSE"
-    if value is None:
-        return "NULL"
-    if isinstance(value, str):
-        return "'" + value.replace("'", "''") + "'"
-    # datetime is a date subclass; check it first or a timestamp watermark
-    # (e.g. from an incremental cdc_column pushdown predicate) would lose
-    # its time component and silently become a bare DATE literal.
-    if isinstance(value, datetime.datetime):
-        return f"TIMESTAMP '{value.isoformat(sep=' ')}'"
-    if isinstance(value, datetime.date):
-        return f"DATE '{value.isoformat()}'"
-    return str(value)
+def _lit(dialect: Dialect, value: object) -> str:
+    return dialect.literal(value)
 
 
 def _sql_type_stub(t: StrataType) -> str:
@@ -114,7 +102,7 @@ class Translator:
     def expr(self, e: ast.Node) -> str:
         """Compile one expression AST node into dialect SQL."""
         if isinstance(e, ast.Literal):
-            return _lit(e.value)
+            return _lit(self.dialect, e.value)
         if isinstance(e, ast.ColumnRef):
             return self.col(e.name, e.qualifier)
         if isinstance(e, ast.UnOp):
@@ -292,7 +280,7 @@ class Translator:
                         "dialect 'bigquery' cannot take a dynamic key in map_get(): the "
                         "engine requires the JSONPath to be a string literal or query "
                         "parameter; use a literal key")
-                path = _lit("$." + key_expr.value)
+                path = _lit(self.dialect,"$." + key_expr.value)
                 if is_json_v:
                     return f"JSON_QUERY({base}, {path})"
                 return f"CAST(JSON_VALUE({base}, {path}) AS {vtarget})"
@@ -310,7 +298,7 @@ class Translator:
             assert base_t.fields is not None
             if d == "duckdb":
                 inner = ", ".join(
-                    f"{_lit(fname)}: {self.expr(e.args[2 * i + 1])}"
+                    f"{_lit(self.dialect,fname)}: {self.expr(e.args[2 * i + 1])}"
                     for i, (fname, _) in enumerate(base_t.fields)
                 )
                 return f"{{{inner}}}"
@@ -322,7 +310,7 @@ class Translator:
                 return f"STRUCT({inner})"
             # PG / Snowflake: JSON object
             inner = ", ".join(
-                f"{_lit(fname)}, {self.expr(e.args[2 * i + 1])}"
+                f"{_lit(self.dialect,fname)}, {self.expr(e.args[2 * i + 1])}"
                 for i, (fname, _) in enumerate(base_t.fields)
             )
             if d == "postgres":
@@ -335,7 +323,7 @@ class Translator:
             field_expr = e.args[1]
             if d == "duckdb":
                 if isinstance(field_expr, ast.Literal) and isinstance(field_expr.value, str):
-                    return f"struct_extract({base}, {_lit(field_expr.value)})"
+                    return f"struct_extract({base}, {_lit(self.dialect,field_expr.value)})"
                 return f"struct_extract({base}, {self.expr(field_expr)})"
             if d == "bigquery":
                 if isinstance(field_expr, ast.Literal) and isinstance(field_expr.value, str):
@@ -345,13 +333,13 @@ class Translator:
                     "use a literal field name")
             if d == "postgres":
                 if isinstance(field_expr, ast.Literal) and isinstance(field_expr.value, str):
-                    return f"({base} ->> {_lit(field_expr.value)})"
+                    return f"({base} ->> {_lit(self.dialect,field_expr.value)})"
                 raise RuntimeError(
                     "dialect 'postgres' cannot take a dynamic field in struct_get(): "
                     "use a literal field name")
             # Snowflake: GET on VARIANT
             if isinstance(field_expr, ast.Literal) and isinstance(field_expr.value, str):
-                return f"GET({base}, {_lit(field_expr.value)})"
+                return f"GET({base}, {_lit(self.dialect,field_expr.value)})"
             raise RuntimeError(
                 "dialect 'snowflake' cannot take a dynamic field in struct_get(): "
                 "use a literal field name")
@@ -387,7 +375,7 @@ class Translator:
                 if literal is None:
                     path = f"NULLIF({key_sql}, '')"
                 else:
-                    path = _lit("$." + literal)
+                    path = _lit(self.dialect,"$." + literal)
                 value = f"JSON_EXTRACT({base}, {path})"
                 scalar = f"JSON_EXTRACT_STRING({base}, {path})"
                 kind = f"JSON_TYPE({value})"
@@ -397,8 +385,8 @@ class Translator:
                     value = f"({base} -> NULLIF({key_sql}, ''))"
                     scalar = f"({base} ->> NULLIF({key_sql}, ''))"
                 else:
-                    value = f"({base} -> {_lit(literal)})"
-                    scalar = f"({base} ->> {_lit(literal)})"
+                    value = f"({base} -> {_lit(self.dialect,literal)})"
+                    scalar = f"({base} ->> {_lit(self.dialect,literal)})"
                 kind = f"JSONB_TYPEOF({value})"
                 allowed = "'string', 'boolean', 'number'"
             elif d == "bigquery":
@@ -407,7 +395,7 @@ class Translator:
                         f"dialect 'bigquery' cannot take a dynamic key in {name}(): the "
                         "engine requires the JSONPath to be a string literal or query "
                         "parameter; use a literal key or json_path()")
-                return f"{'JSON_QUERY' if name == 'json_get' else 'JSON_VALUE'}({base}, {_lit('$.' + literal)})"
+                return f"{'JSON_QUERY' if name == 'json_get' else 'JSON_VALUE'}({base}, {_lit(self.dialect,'$.' + literal)})"
             else:
                 # Snowflake GET(<variant>, <field_name>) is a *key* lookup, not a
                 # path, which is exactly the contract of json_get/json_value:
@@ -415,7 +403,7 @@ class Translator:
                 # (only structured OBJECTs require a constant) and "must not be
                 # an empty string", so NULLIF maps the empty key to NULL as in
                 # the other warehouses.
-                key_expr = f"NULLIF({key_sql}, '')" if literal is None else _lit(literal)
+                key_expr = f"NULLIF({key_sql}, '')" if literal is None else _lit(self.dialect,literal)
                 value = f"GET({base}, {key_expr})"
                 scalar = f"CAST({value} AS VARCHAR)"
                 kind = f"TYPEOF({value})"
@@ -441,16 +429,16 @@ class Translator:
             base = self.expr(e.args[0])
             d = self.dialect.name
             if d == "duckdb":
-                return f"JSON_EXTRACT({base}, {_lit(path)})"
+                return f"JSON_EXTRACT({base}, {_lit(self.dialect,path)})"
             if d == "bigquery":
-                return f"JSON_QUERY({base}, {_lit(path)})"
+                return f"JSON_QUERY({base}, {_lit(self.dialect,path)})"
             if d == "postgres":
                 # SQL/JSON path syntax. An empty vars object is passed explicitly
                 # because a NULL vars would make the whole function return NULL;
                 # `silent => true` suppresses the structural errors (a scalar
                 # where the path expects an object) so Postgres returns NULL like
                 # the other dialects instead of raising.
-                return (f"jsonb_path_query_first({base}::jsonb, {_lit(path)}, "
+                return (f"jsonb_path_query_first({base}::jsonb, {_lit(self.dialect,path)}, "
                         f"'{{}}'::jsonb, TRUE)")
             if d == "snowflake":
                 # GET_PATH takes a JavaScript-notation path *without* the
@@ -465,7 +453,7 @@ class Translator:
                         "the column itself")
                 sub = path[1:]
                 sub = sub.removeprefix(".")
-                return f"GET_PATH({base}, {_lit(sub)})"
+                return f"GET_PATH({base}, {_lit(self.dialect,sub)})"
             raise RuntimeError(f"dialect {d!r} cannot express {name}()")
 
         # --- array functions: determine base (array) and other (non-array) ---

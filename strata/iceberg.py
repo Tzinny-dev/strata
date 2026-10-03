@@ -37,6 +37,8 @@ from typing import Any
 
 MANIFEST_NAME = "_strata_manifest.json"
 _RUN_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+# Matches the output of _safe_dirname: alphanumeric + underscore only
+_SAFE_REL_RE = re.compile(r"^runs/[0-9a-f]{12}/[A-Za-z0-9_]+$")
 
 
 class IcebergUnavailable(RuntimeError):
@@ -45,6 +47,24 @@ class IcebergUnavailable(RuntimeError):
 
 class IcebergExportError(RuntimeError):
     """A committed snapshot could not be written as Iceberg (fail-loud)."""
+
+
+def _validate_rel(rel: str, catalog_dir: Path) -> Path:
+    """Validate a manifest `rel` path and return the resolved path under catalog_dir.
+
+    - Must match the expected pattern: runs/<12-hex>/<safe_model_name>
+    - Must resolve to a path inside catalog_dir (no traversal)
+    """
+    if not _SAFE_REL_RE.match(rel):
+        raise IcebergExportError(
+            f"unsafe rel path in manifest: {rel!r} (expected runs/<run_id>/<safe_name>)")
+    path = (catalog_dir / rel).resolve()
+    try:
+        path.relative_to(catalog_dir.resolve())
+    except ValueError:
+        raise IcebergExportError(
+            f"rel path escapes catalog dir: {rel!r}")
+    return path
 
 
 def ensure_iceberg(con: Any) -> None:
@@ -199,7 +219,7 @@ def verify_catalog_run(con: Any, catalog_dir: Path, run_id: str) -> dict[str, An
     mf = _require_run(catalog_dir, run_id)
     out = {"run_id": run_id, "models": {}, "rows": {}}
     for model, rel in sorted(mf["runs"][run_id].items()):
-        tbl = catalog_dir / rel
+        tbl = _validate_rel(rel, catalog_dir)
         if not (tbl / "metadata").exists():
             raise IcebergExportError(
                 f"run {run_id!r}: model {model!r} Iceberg table {tbl} missing "
@@ -247,7 +267,7 @@ def verify_catalog_run_pyiceberg(catalog_dir: Path, run_id: str,
     mf = _require_run(catalog_dir, run_id)
     out = {"run_id": run_id, "models": {}, "rows": {}}
     for model, rel in sorted(mf["runs"][run_id].items()):
-        tbl = catalog_dir / rel
+        tbl = _validate_rel(rel, catalog_dir)
         metas = sorted((tbl / "metadata").glob("*.metadata.json"))
         if not metas:
             raise IcebergExportError(
@@ -275,7 +295,8 @@ def rollback_run(catalog_dir: Path, run_id: str) -> dict[str, Any]:
     """
     mf = _require_run(catalog_dir, run_id)
     for model, rel in mf["runs"][run_id].items():
-        if not (catalog_dir / rel / "metadata").exists():
+        tbl = _validate_rel(rel, catalog_dir)
+        if not (tbl / "metadata").exists():
             raise IcebergExportError(
                 f"run {run_id!r}: model {model!r} Iceberg table {rel} has no "
                 "metadata (was it collected by gc?) — rollback refuses")
@@ -305,7 +326,7 @@ def gc_catalog(catalog_dir: Path, keep: int = 2, keep_days: float | None = None,
     # Recency is tracked by the run dirs' mtime (manifest is written with
     # sort_keys, so dict insertion order is NOT preserved on disk).
     def _mtime(rid: str) -> float:
-        d = catalog_dir / "runs" / rid
+        d = _validate_rel(f"runs/{rid}/_", catalog_dir).parent  # just to validate rid
         return d.stat().st_mtime_ns if d.exists() else -1.0
     newest = sorted(runs, key=_mtime, reverse=True)[:keep] if keep > 0 else []
     protected.update(newest)
@@ -315,7 +336,7 @@ def gc_catalog(catalog_dir: Path, keep: int = 2, keep_days: float | None = None,
         now = datetime.datetime.now(datetime.timezone.utc)
         cutoff = now - datetime.timedelta(days=keep_days)
         for rid, _entry in runs.items():
-            d = catalog_dir / "runs" / rid
+            d = _validate_rel(f"runs/{rid}/_", catalog_dir).parent
             if d.exists():
                 import datetime as _dt
                 mtime = _dt.datetime.fromtimestamp(d.stat().st_mtime,
@@ -327,7 +348,7 @@ def gc_catalog(catalog_dir: Path, keep: int = 2, keep_days: float | None = None,
             keep_runs.append(rid)
         else:
             drop_runs.append(rid)
-    drop_dirs = [str(catalog_dir / "runs" / rid) for rid in drop_runs]
+    drop_dirs = [str(_validate_rel(f"runs/{rid}/_", catalog_dir).parent) for rid in drop_runs]
     plan = {
         "keep_runs": keep_runs,
         "drop_runs": drop_runs,
@@ -336,7 +357,7 @@ def gc_catalog(catalog_dir: Path, keep: int = 2, keep_days: float | None = None,
     }
     if apply and drop_runs:
         for rid in drop_runs:
-            shutil.rmtree(catalog_dir / "runs" / rid, ignore_errors=True)
+            shutil.rmtree(_validate_rel(f"runs/{rid}/_", catalog_dir).parent, ignore_errors=True)
             runs.pop(rid, None)
         _atomic_write_manifest(catalog_dir, runs, default)
         plan["applied"] = True

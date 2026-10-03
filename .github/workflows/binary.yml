@@ -208,6 +208,13 @@ jobs:
             fi
           done
           ls -lh release/
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Attest build provenance (SLSA)
         uses: actions/attest-build-provenance@v2
         with:

@@ -337,13 +337,15 @@ class TestDateTimeLiterals(unittest.TestCase):
     def test_date_literal(self):
         import datetime
         from strata.sqlgen import _lit
-        self.assertEqual(_lit(datetime.date(2026, 1, 1)), "DATE '2026-01-01'")
+        from strata.dialects import DUCKDB
+        self.assertEqual(_lit(DUCKDB, datetime.date(2026, 1, 1)), "DATE '2026-01-01'")
 
     def test_datetime_literal_keeps_time_component(self):
         import datetime
         from strata.sqlgen import _lit
+        from strata.dialects import DUCKDB
         self.assertEqual(
-            _lit(datetime.datetime(2026, 1, 1, 10, 30, 0)),
+            _lit(DUCKDB, datetime.datetime(2026, 1, 1, 10, 30, 0)),
             "TIMESTAMP '2026-01-01 10:30:00'")
 
 

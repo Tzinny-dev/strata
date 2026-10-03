@@ -12,8 +12,23 @@ present as a production testing framework.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from typing import Any
+
+
+# Safe identifier pattern for DuckDB (alphanumeric + underscore)
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _quote_ident(name: str) -> str:
+    """Quote an identifier for DuckDB (double quotes with escaping).
+
+    Validates the identifier is safe first; raises ValueError if not.
+    """
+    if not _IDENT_RE.match(name):
+        raise ValueError(f"invalid identifier {name!r}: must match ^[A-Za-z_][A-Za-z0-9_]*$")
+    return f'"{name.replace(chr(34), chr(34) * 2)}"'
 
 
 def create_test_source(
@@ -140,13 +155,14 @@ def create_stale_data(
         timestamp_column: Column to use for timestamp (if None, uses current time)
     """
     # Create the table
-    cols = ", ".join(f"{col} VARCHAR" for col in columns)
-    con.execute(f"CREATE TABLE IF NOT EXISTS {table_name} ({cols})")
+    safe_table = _quote_ident(table_name)
+    safe_cols = ", ".join(f"{_quote_ident(col)} VARCHAR" for col in columns)
+    con.execute(f"CREATE TABLE IF NOT EXISTS {safe_table} ({safe_cols})")
 
     # Insert rows
     for row in rows:
         placeholders = ", ".join(["?" for _ in row])
-        con.execute(f"INSERT INTO {table_name} VALUES ({placeholders})", row)
+        con.execute(f"INSERT INTO {safe_table} VALUES ({placeholders})", row)
 
 
 def create_fresh_data(
@@ -180,9 +196,10 @@ def simulate_source_change(
         new_rows: New rows to insert
         columns: List of column names
     """
+    safe_table = _quote_ident(table_name)
     for row in new_rows:
         placeholders = ", ".join(["?" for _ in row])
-        con.execute(f"INSERT INTO {table_name} VALUES ({placeholders})", row)
+        con.execute(f"INSERT INTO {safe_table} VALUES ({placeholders})", row)
 
 
 class FreshnessTestHelper:
@@ -199,7 +216,7 @@ class FreshnessTestHelper:
         """Clean up test tables."""
         for table in self.tables_created:
             try:
-                self.con.execute(f"DROP TABLE IF EXISTS {table}")
+                self.con.execute(f"DROP TABLE IF EXISTS {_quote_ident(table)}")
             except Exception:
                 pass
         self.tables_created.clear()
@@ -211,14 +228,15 @@ class FreshnessTestHelper:
         rows: list[tuple] | None = None,
     ) -> None:
         """Create a source table for testing."""
-        cols = ", ".join(f"{col} {typ}" for col, typ in columns.items())
-        self.con.execute(f"CREATE TABLE IF NOT EXISTS {name} ({cols})")
+        safe_name = _quote_ident(name)
+        safe_cols = ", ".join(f"{_quote_ident(col)} {typ}" for col, typ in columns.items())
+        self.con.execute(f"CREATE TABLE IF NOT EXISTS {safe_name} ({safe_cols})")
         self.tables_created.append(name)
 
         if rows:
             for row in rows:
                 placeholders = ", ".join(["?" for _ in row])
-                self.con.execute(f"INSERT INTO {name} VALUES ({placeholders})", row)
+                self.con.execute(f"INSERT INTO {safe_name} VALUES ({placeholders})", row)
 
     def assert_model_is_stale(self, model_name: str, expected_stale: bool = True) -> None:
         """Assert that a model is stale or fresh."""
@@ -230,12 +248,12 @@ class FreshnessTestHelper:
 
     def get_table_row_count(self, table_name: str) -> int:
         """Get the row count of a table."""
-        result = self.con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+        result = self.con.execute(f"SELECT COUNT(*) FROM {_quote_ident(table_name)}").fetchone()
         return result[0] if result else 0
 
     def get_table_columns(self, table_name: str) -> list[str]:
         """Get the column names of a table."""
-        result = self.con.execute(f"DESCRIBE {table_name}").fetchall()
+        result = self.con.execute(f"DESCRIBE {_quote_ident(table_name)}").fetchall()
         return [row[0] for row in result]
 
 

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from . import ast, functions
+from .ast import Node
 from .types import (
     BOOL,
     DATE,

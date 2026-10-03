@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,26 @@ from .diagnostic import format_diagnostic
 from .dialects import Dialect, get_dialect
 from .lexer import LexError
 from .parser import ParseError, parse_strata
+
+
+def _mask_dsn(dsn: str) -> str:
+    """Mask password in DSN for safe logging."""
+    # postgres://user:password@host/db -> postgres://user:***@host/db
+    return re.sub(r'(postgres(?:ql)?://[^:]+:)([^@]+)(@)', r'\1***\3', dsn)
+
+
+def _is_dsn(output: str) -> bool:
+    """Check if output is a postgres DSN."""
+    return output.startswith(("postgres://", "postgresql://"))
+
+
+# Valid SQL identifier pattern: starts with letter/underscore, followed by alphanumeric/underscore
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _valid_ident(name: str) -> bool:
+    """Check if a string is a valid SQL identifier."""
+    return bool(_IDENT_RE.match(name))
 
 
 def load(path: str,
@@ -62,8 +83,36 @@ def open_warehouse(output: str | None, read_only: bool = False) -> Any:
         except ImportError:
             raise RuntimeError(
                 "postgres driver not available; pip install psycopg2-binary")
+        from urllib.parse import parse_qs, urlparse
         from . import dbcompat
-        return dbcompat.PGConn(psycopg2.connect(output))
+
+        # Parse TLS parameters from query string
+        # Default to sslmode=verify-full for security (fail-loud if TLS not available)
+        parsed = urlparse(output)
+        qs = parse_qs(parsed.query)
+        connect_params = {}
+        if parsed.username:
+            connect_params["user"] = parsed.username
+        if parsed.password:
+            connect_params["password"] = parsed.password
+        if parsed.hostname:
+            connect_params["host"] = parsed.hostname
+        if parsed.port:
+            connect_params["port"] = parsed.port
+        if parsed.path:
+            connect_params["dbname"] = parsed.path.lstrip("/")
+        
+        # TLS configuration - default to verify-full for security
+        sslmode = qs.get("sslmode", ["verify-full"])[0]
+        connect_params["sslmode"] = sslmode
+        if "sslrootcert" in qs:
+            connect_params["sslrootcert"] = qs["sslrootcert"][0]
+        if "sslcert" in qs:
+            connect_params["sslcert"] = qs["sslcert"][0]
+        if "sslkey" in qs:
+            connect_params["sslkey"] = qs["sslkey"][0]
+        
+        return dbcompat.PGConn(psycopg2.connect(**connect_params))
     if output and output.startswith("bigquery://"):
         try:
             from google.cloud import bigquery as bq  # type: ignore
@@ -911,9 +960,8 @@ def cmd_branches(args: argparse.Namespace) -> int:
     if not getattr(args, "output", None):
         print("(no warehouse: pass -o FILE.duckdb; an in-memory warehouse is always empty)")
         return 0
-    is_dsn = args.output.startswith(("postgres://", "postgresql://"))
-    if not is_dsn and not Path(args.output).exists():
-        print(f"error: E083: warehouse {args.output!r} not found", file=sys.stderr)
+    if not _is_dsn(args.output) and not Path(args.output).exists():
+        print(f"error: E083: warehouse {_mask_dsn(args.output)!r} not found", file=sys.stderr)
         return 1
     try:
         con = open_warehouse(args.output, read_only=True)
@@ -1076,10 +1124,15 @@ def cmd_backfill(args: argparse.Namespace) -> int:
             print(f"error: E085: --source expects src=table, got {spec!r}", file=sys.stderr)
             return 1
         src, table = spec.split("=", 1)
+        table = table.strip()
         if src not in proj.sources:
             print(f"error: E085: unknown source {src!r}", file=sys.stderr)
             return 1
-        overrides[src] = {"dataset": table.strip()}
+        if not _valid_ident(table):
+            print(f"error: E085: source override table {table!r} is not a valid identifier "
+                  f"(must match ^[A-Za-z_][A-Za-z0-9_]*$)", file=sys.stderr)
+            return 1
+        overrides[src] = {"dataset": table}
     branch = getattr(args, "branch", None) or rec.get("branch", "main")
     if not getattr(args, "output", None):
         print("warning: no -o given; this warehouse is in-memory and will "
@@ -1133,9 +1186,8 @@ def cmd_rollback(args: argparse.Namespace) -> int:
         return 1
     fps = e.get("fingerprints", {})
     if getattr(args, "output", None):
-        is_dsn = args.output.startswith(("postgres://", "postgresql://"))
-        if not is_dsn and not Path(args.output).exists():
-            print(f"error: E083: warehouse {args.output!r} not found "
+        if not _is_dsn(args.output) and not Path(args.output).exists():
+            print(f"error: E083: warehouse {_mask_dsn(args.output)!r} not found "
                   "(nothing to repoint)", file=sys.stderr)
             return 1
         try:
@@ -1216,9 +1268,8 @@ def cmd_gc(args: argparse.Namespace) -> int:
         print("error: E084: --output <warehouse.duckdb> is required "
               "(snapshots live in the warehouse)", file=sys.stderr)
         return 1
-    is_dsn = args.output.startswith(("postgres://", "postgresql://"))
-    if not is_dsn and not Path(args.output).exists():
-        print(f"error: E083: warehouse {args.output!r} not found", file=sys.stderr)
+    if not _is_dsn(args.output) and not Path(args.output).exists():
+        print(f"error: E083: warehouse {_mask_dsn(args.output)!r} not found", file=sys.stderr)
         return 1
     try:
         con = open_warehouse(args.output)

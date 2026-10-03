@@ -20,6 +20,8 @@ from __future__ import annotations
 import abc
 from typing import Any
 
+from .dialects import BIGQUERY, SNOWFLAKE, Dialect, get_dialect
+
 
 class AdapterNotAvailable(Exception):
     def __init__(self, dialect: str, package: str, msg: str) -> None:
@@ -47,6 +49,12 @@ class Warehouse(abc.ABC):
     def fetch(self, sql: str) -> list[tuple]:
         """Run a query and return all result rows."""
         ...
+
+    @property
+    def dialect(self) -> Dialect:
+        """Dialect for identifier quoting. Subclasses should override."""
+        from .dialects import DUCKDB
+        return DUCKDB
 
     @abc.abstractmethod
     def materialize(self, name: str, sql: str, partition_by: list[str] | None = None) -> None:
@@ -205,6 +213,10 @@ class BigQueryWarehouse(Warehouse):
         self._conn = BigQueryConn(self.client, self.dataset)
         self.con = self._conn  # alias for exec.py is_* checks (is_bigquery checks BigQueryConn, but also handle Warehouse)
 
+    @property
+    def dialect(self) -> Dialect:
+        return BIGQUERY
+
     def connect(self) -> None:
         pass
 
@@ -231,16 +243,12 @@ class BigQueryWarehouse(Warehouse):
 
     def materialize(self, name: str, sql: str, partition_by: list[str] | None = None) -> None:
         # BigQuery CREATE OR REPLACE TABLE `dataset.name` AS (sql) — partition_by ignored for now (requires PARTITION BY clause)
-        tbl = f"`{self.dataset}.{name}`" if self.dataset and "." not in name else f"`{name}`"
-        # Use backticks, handle already-qualified name
-        if self.dataset and "." not in name:
-            tbl = f"`{self.dataset}.{name}`"
-        else:
-            tbl = name if "." in name else f"`{name}`"
+        # Use dialect.ident() for proper identifier quoting with backtick escaping
+        tbl = self.dialect.ident(name) if not self.dataset else f"{self.dialect.ident(self.dataset)}.{self.dialect.ident(name)}"
         self._conn.execute(f"CREATE OR REPLACE TABLE {tbl} AS {sql}")
 
     def drop(self, name: str) -> None:
-        tbl = f"`{self.dataset}.{name}`" if self.dataset and "." not in name else f"`{name}`" if "." not in name else name
+        tbl = self.dialect.ident(name) if not self.dataset else f"{self.dialect.ident(self.dataset)}.{self.dialect.ident(name)}"
         try:
             self._conn.execute(f"DROP TABLE IF EXISTS {tbl}")
         except Exception:
@@ -248,8 +256,9 @@ class BigQueryWarehouse(Warehouse):
 
     def list_views(self) -> list[str]:
         try:
+            dataset_ident = self.dialect.ident(self.dataset)
             return list(self._conn.execute(
-                f"SELECT table_name FROM `{self.dataset}.INFORMATION_SCHEMA.VIEWS`"
+                f"SELECT table_name FROM `{dataset_ident}.INFORMATION_SCHEMA.VIEWS`"
             ).fetchall())
         except Exception:
             return []
@@ -276,6 +285,10 @@ class SnowflakeWarehouse(Warehouse):
         self._conn = SnowflakeConn(self.raw)
         self.con = self._conn
 
+    @property
+    def dialect(self) -> Dialect:
+        return SNOWFLAKE
+
     def connect(self) -> None:
         pass
 
@@ -300,11 +313,12 @@ class SnowflakeWarehouse(Warehouse):
 
     def materialize(self, name: str, sql: str, partition_by: list[str] | None = None) -> None:
         # Snowflake CREATE OR REPLACE TABLE name AS sql
-        self._conn.execute(f"CREATE OR REPLACE TABLE {name} AS {sql}")
+        # Use dialect.ident() for proper identifier quoting with double-quote escaping
+        self._conn.execute(f"CREATE OR REPLACE TABLE {self.dialect.ident(name)} AS {sql}")
 
     def drop(self, name: str) -> None:
         try:
-            self._conn.execute(f"DROP TABLE IF EXISTS {name}")
+            self._conn.execute(f"DROP TABLE IF EXISTS {self.dialect.ident(name)}")
         except Exception:
             pass
 

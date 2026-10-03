@@ -24,6 +24,18 @@ try:
 except ImportError:
     fcntl = None  # type: ignore[assignment]  # Windows: no POSIX flock
 
+# Valid SQL identifier pattern: starts with letter/underscore, followed by alphanumeric/underscore
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Valid run_id prefix: 1-12 hex characters (for prefix matching in find_run)
+_RUN_ID_PREFIX_RE = re.compile(r"^[0-9a-f]{1,12}$")
+
+
+def _valid_ident(name: str) -> bool:
+    """Check if a string is a valid SQL identifier."""
+    return bool(_IDENT_RE.match(name))
+
+
 from . import ast, dbcompat, sqlgen
 from .analysis import Plan, Project, StrataError, TypedModel, contract_field_col
 from .dialects import DUCKDB, Dialect, get_dialect, physical_type
@@ -81,9 +93,51 @@ def parse_freshness_threshold(freshness: str) -> datetime.timedelta | None:
 
     # Custom expression (contains SQL-like syntax)
     if "(" in freshness or "interval" in freshness.lower():
+        _validate_freshness_expression(freshness)
         return CUSTOM_FRESHNESS_MARKER  # Needs warehouse evaluation
 
     return None  # Unknown format, skip time-based staleness
+
+
+def _validate_freshness_expression(expr: str) -> None:
+    """Validate a custom freshness expression for safety.
+
+    Allows only a restricted subset of SQL expressions:
+    - Function calls: now(), current_timestamp, current_date
+    - Interval arithmetic: - interval '...'
+    - No semicolons, comments, or other dangerous constructs
+    """
+    # Reject obviously dangerous patterns
+    dangerous = [
+        ";",        # Statement separator
+        "--",       # SQL comment
+        "/*",       # C-style comment
+        "*/",
+        "union",    # UNION injection
+        "select",   # Subquery injection (case-insensitive check below)
+        "insert",
+        "update",
+        "delete",
+        "drop",
+        "create",
+        "alter",
+        "grant",
+        "revoke",
+    ]
+    lower = expr.lower()
+    for d in dangerous:
+        if d in lower:
+            raise StrataError(
+                f"freshness expression contains forbidden keyword/pattern: {d!r}",
+                "E085",
+            )
+    # Allow only alphanumeric, parentheses, quotes, spaces, hyphens, colons
+    # This is a simple allowlist for expressions like "now() - interval '1 day'"
+    if not re.match(r"^[A-Za-z0-9_()'\-\s:,]+$", expr):
+        raise StrataError(
+            f"freshness expression contains invalid characters: {expr!r}",
+            "E085",
+        )
 
 
 # Sentinel value indicating a custom freshness expression that needs
@@ -191,7 +245,7 @@ def _module_lock(module_path: str) -> Iterator[None]:
                 _module_lock._warned_no_lock = True  # type: ignore[attr-defined]
             yield
             return
-    fd = os.open(str(_lock_path(module_path)), os.O_CREAT | os.O_RDWR, 0o644)
+    fd = os.open(str(_lock_path(module_path)), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)  # type: ignore[union-attr]
         yield
@@ -278,7 +332,14 @@ def find_run(module_path: str, run_id: str) -> dict | None:
     """Resolve a (possibly prefix) run_id to its history entry, or None.
 
     Prefers the latest non-pending phase: a pending record was superseded by
-    its completion (or abandoned by recovery)."""
+    its completion (or abandoned by recovery).
+    
+    Validates run_id format: must be 1-12 hex characters (prefix match allowed)."""
+    if not _RUN_ID_PREFIX_RE.match(run_id):
+        raise StrataError(
+            f"invalid run_id {run_id!r}: must be 1-12 hex characters",
+            "E085",
+        )
     matches = [e for e in load_history(module_path)
                if e.get("run_id", "").startswith(run_id)]
     # Prefer the latest non-pending phase: a pending record was superseded by
@@ -388,7 +449,7 @@ def check_join_cardinality(con: Any, project: Project, tm: TypedModel,
 
 
 def runtime_pins(con: Any, project: Project, tm: TypedModel, view: str,
-                 report: list[str]) -> None:
+                 report: list[str], dialect: Dialect = DUCKDB) -> None:
     """Phase-C runtime pins: verify the materialized view's physical schema
     against the model's declared contract. Raises PinError on any mismatch
     and appends one `ok` line per field to `report`."""
@@ -417,7 +478,7 @@ def runtime_pins(con: Any, project: Project, tm: TypedModel, view: str,
                 bad(f"expected nonnull but {n} NULL rows")
             report.append(f"  ok  {tm.name}.{f.name}: nonnull")
         if f.enum:
-            vals = ", ".join("'" + v.replace("'", "''") + "'" for v in f.enum)
+            vals = ", ".join(dialect.literal(v) for v in f.enum)
             n = con.execute(
                 f"SELECT count(*) FROM {view} WHERE {f.name} IS NOT NULL "
                 f"AND {f.name} NOT IN ({vals})").fetchone()[0]
@@ -479,13 +540,15 @@ STAGED_PREFIX = "stg_"
 
 def staged_name(name: str, branch: str = "main") -> str:
     """Staging view per model+branch: stg_<branch>__<model>."""
-    safe = "".join(c if (c.isalnum() or c == "_") else "_" for c in branch)
-    return f"{STAGED_PREFIX}{safe}{BRANCH_SEP}{name}"
+    safe_branch = "".join(c if (c.isalnum() or c == "_") else "_" for c in branch)
+    safe_name = "".join(c if (c.isalnum() or c == "_") else "_" for c in name)
+    return f"{STAGED_PREFIX}{safe_branch}{BRANCH_SEP}{safe_name}"
 
 
 def promoted_name(name: str) -> str:
     """Live view name for a model: `v_<name>`."""
-    return f"{PROMOTED_PREFIX}{name}"
+    safe_name = "".join(c if (c.isalnum() or c == "_") else "_" for c in name)
+    return f"{PROMOTED_PREFIX}{safe_name}"
 
 
 def list_branches(con: Any) -> list[str]:
@@ -597,7 +660,7 @@ def materialize(con: Any, project: Project, tms: dict[str, TypedModel],
             if pushdown_pred is not None:
                 plan.preds.remove(pushdown_pred)
         applied.append(name)
-        runtime_pins(con, project, tm, staged_name(name, branch), pins)
+        runtime_pins(con, project, tm, staged_name(name, branch), pins, dialect)
         check_join_cardinality(con, project, tm, order, branch, source_overrides, pins)
     if not stage_only:
         # Publish into run-addressed snapshot TABLES (data frozen at this
@@ -607,7 +670,7 @@ def materialize(con: Any, project: Project, tms: dict[str, TypedModel],
             def validate_snapshots() -> None:
                 """Validate every published snapshot's pins and declarative tests."""
                 for name in order:
-                    runtime_pins(con, project, tms[name], snapshot_name(run_id, name), [])
+                    runtime_pins(con, project, tms[name], snapshot_name(run_id, name), [], dialect)
                 run_tests(con, project, tms, order, dialect, branch)
             publish_snapshots(con, order, run_id, branch, validate=validate_snapshots,
                               manage_transaction=manage_transaction)
@@ -927,7 +990,7 @@ def run_tests(con: Any, project: Project, tms: dict[str, TypedModel],
                     sql = (
                         f"SELECT count(*) FROM {view} "
                         f"WHERE NOT ({check.col} {check.op} "
-                        f"{sqlgen._lit(check.value)})"
+                        f"{sqlgen._lit(dialect, check.value)})"
                     )
                     n_bad = con.execute(sql).fetchone()[0]
                     total = con.execute(
@@ -964,13 +1027,39 @@ def _apply_source_overrides(sql: str, project: Project,
         default = src  # Match gen_base_subquery, not source metadata.
         if default == target:
             continue
-        for frm, to in ((f"FROM {default} ", f"FROM {target} "),
-                        (f"FROM {default}\n", f"FROM {target}\n"),
-                        (f"JOIN {default} ", f"JOIN {target} "),
-                        (f" {default} t", f" {target} t")):
-            if frm in sql:
-                sql = sql.replace(frm, to)
-                n += 1
+        # Validate target is a safe identifier to prevent SQL injection
+        if not _valid_ident(target):
+            raise StrataError(
+                f"source override target {target!r} for source {src!r} is not a "
+                f"valid identifier (must match ^[A-Za-z_][A-Za-z0-9_]*$)",
+                "E085",
+            )
+        # Validate default (source name) is also a safe identifier
+        if not _valid_ident(default):
+            raise StrataError(
+                f"source name {default!r} is not a valid identifier "
+                f"(must match ^[A-Za-z_][A-Za-z0-9_]*$)",
+                "E085",
+            )
+        # Quote identifiers safely (standard SQL double-quote escaping)
+        safe_target = '"' + target.replace('"', '""') + '"'
+        safe_default = '"' + default.replace('"', '""') + '"'
+        # Replace table references: FROM/JOIN <default> [alias]
+        # Match both unquoted and already-quoted forms, with any alias
+        import re
+        # Pattern: FROM <default> followed by space/newline/alias
+        # Handle both quoted and unquoted
+        patterns = [
+            (rf'FROM\s+{re.escape(default)}\b', f'FROM {safe_target}'),
+            (rf'JOIN\s+{re.escape(default)}\b', f'JOIN {safe_target}'),
+            (rf'FROM\s+{re.escape(safe_default)}\b', f'FROM {safe_target}'),
+            (rf'JOIN\s+{re.escape(safe_default)}\b', f'JOIN {safe_target}'),
+        ]
+        for pattern, replacement in patterns:
+            new_sql, count = re.subn(pattern, replacement, sql)
+            if count > 0:
+                sql = new_sql
+                n += count
     return sql, n
 
 
@@ -1432,14 +1521,7 @@ def _run_locked(con: Any, project: Project, tms: dict[str, TypedModel], module_p
         names = [n for n in names if n in stale]
         if not names:
             elapsed = (datetime.datetime.now() - start).total_seconds() * 1000
-            try:
-                n_rows = sum(
-                    con.execute(f"SELECT COUNT(*) FROM {('v_' if not stage_only else 'stg_main__')}{n}").fetchone()[0]
-                    for n in []
-                )
-            except Exception:
-                n_rows = 0
-            get_metrics().record_materialization(", ".join(names) if names else "unknown", elapsed, n_rows)
+            get_metrics().record_materialization("unknown", elapsed, 0)
             return [], [], "everything up to date (nothing to do)"
     # Identity includes data; snapshots are never overwritten on a repeated id.
     entry = {
@@ -1450,18 +1532,6 @@ def _run_locked(con: Any, project: Project, tms: dict[str, TypedModel], module_p
         "branch": branch,
         "source_fingerprints": source_fps,
     }
-    elapsed = (datetime.datetime.now() - start).total_seconds() * 1000
-    n_rows = 0
-    if not names:
-        try:
-            n_rows = sum(
-                con.execute(f"SELECT COUNT(*) FROM {('v_' if not stage_only else 'stg_main__')}{n}").fetchone()[0]
-                for n in []
-            )
-        except Exception:
-            n_rows = 0
-        get_metrics().record_materialization(", ".join(names) if names else "unknown", elapsed, n_rows)
-        return [], [], "everything up to date (nothing to do)"
     if reason is not None:
         entry["reason"] = reason
     if backfill_of is not None:
@@ -1478,6 +1548,17 @@ def _run_locked(con: Any, project: Project, tms: dict[str, TypedModel], module_p
                                                  module_path=module_path)
     entry["applied"] = applied
     entry["pins"] = pins
+    # Calculate metrics AFTER materialization
+    elapsed = (datetime.datetime.now() - start).total_seconds() * 1000
+    n_rows = 0
+    if applied:
+        try:
+            n_rows = sum(
+                con.execute(f"SELECT COUNT(*) FROM {('v_' if not stage_only else 'stg_main__')}{n}").fetchone()[0]
+                for n in applied
+            )
+        except Exception:
+            n_rows = 0
     get_metrics().record_materialization(
         ", ".join(names) if names else "unknown",
         elapsed,

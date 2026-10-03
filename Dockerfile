@@ -12,6 +12,9 @@ LABEL org.opencontainers.image.licenses="MIT"
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
+# Create non-root user for security
+RUN useradd --no-create-home --uid 1000 --shell /bin/bash strata
+
 WORKDIR /app
 
 # Install from PyPI (reproducible, no local wheel needed).
@@ -23,6 +26,9 @@ RUN pip install --no-cache-dir --upgrade pip \
 # Copy examples for smoke test / demo (not required at runtime)
 COPY examples/ ./examples/
 COPY README.md ./
+
+# Run as non-root user
+USER strata
 
 # Default entry
 ENTRYPOINT ["strata"]

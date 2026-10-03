@@ -23,7 +23,8 @@ class Dialect:
                  array: Callable[[str], str], supports_anti_semi: bool,
                  function_map: dict[str, str] | None = None,
                  supports_partitioning: bool = False,
-                 partition_clause: Callable[[list[str]], str] | None = None) -> None:
+                 partition_clause: Callable[[list[str]], str] | None = None,
+                 escape_literal: Callable[[str], str] | None = None) -> None:
         self.name = name
         self._quote = quote_ident
         self.type_map = type_map
@@ -34,6 +35,7 @@ class Dialect:
         self.function_map = function_map or {}
         self.supports_partitioning = supports_partitioning
         self._partition_clause = partition_clause
+        self._escape_literal = escape_literal or self._default_escape_literal
 
     # -- identifiers --------------------------------------------------
     def ident(self, name: str) -> str:
@@ -83,6 +85,30 @@ class Dialect:
             return self._partition_clause(columns)
         return ""
 
+    # -- literals -------------------------------------------------------
+    @staticmethod
+    def _default_escape_literal(value: str) -> str:
+        """Standard SQL escaping: double single quotes."""
+        return value.replace("'", "''")
+
+    def literal(self, value: object) -> str:
+        """Render a Python value as a SQL literal for this dialect."""
+        if isinstance(value, bool):
+            return "TRUE" if value else "FALSE"
+        if value is None:
+            return "NULL"
+        if isinstance(value, str):
+            escaped = self._escape_literal(value)
+            return f"'{escaped}'"
+        # datetime is a date subclass; check it first or a timestamp watermark
+        # (e.g. from an incremental cdc_column pushdown predicate) would lose
+        # its time component and silently become a bare DATE literal.
+        if isinstance(value, __import__('datetime').datetime):
+            return f"TIMESTAMP '{value.isoformat(sep=' ')}'"
+        if isinstance(value, __import__('datetime').date):
+            return f"DATE '{value.isoformat()}'"
+        return str(value)
+
 
 def _backtick(name: str) -> str:
     return f"`{name}`"
@@ -96,6 +122,25 @@ def _dquote(name: str) -> str:
 
 def _bare(name: str) -> str:
     return name
+
+
+def _escape_bq_literal(value: str) -> str:
+    """BigQuery: escape backslashes first, then double single quotes.
+
+    BigQuery processes backslash escapes inside string literals, so a value
+    containing \' would terminate the literal early. We must double backslashes
+    before doubling quotes.
+    """
+    return value.replace("\\", "\\\\").replace("'", "''")
+
+
+def _escape_sf_literal(value: str) -> str:
+    """Snowflake: escape backslashes first, then double single quotes.
+
+    Snowflake also processes backslash escapes by default (unless
+    ESCAPE_UNESCAPED is disabled). Same approach as BigQuery.
+    """
+    return value.replace("\\", "\\\\").replace("'", "''")
 
 
 def _dec(p: int, s: int) -> str:
@@ -162,6 +207,7 @@ BIGQUERY = Dialect(
     function_map={**_UNIVERSAL_FNS, "startswith": "LIKE_PREFIX",
                   "split_part": "SPLIT", "lpad": "LPAD_UNAVAILABLE",
                   "rpad": "RPAD_UNAVAILABLE"},
+    escape_literal=_escape_bq_literal,
 )
 
 SNOWFLAKE = Dialect(
@@ -171,6 +217,7 @@ SNOWFLAKE = Dialect(
     _sf_dec, "NUMBER(38,2)", _sf_array, supports_anti_semi=False,
     # Snowflake names startswith STARTSWITH (no underscore).
     function_map={**_UNIVERSAL_FNS, "startswith": "STARTSWITH"},
+    escape_literal=_escape_sf_literal,
 )
 
 def _pg_dec(p: int, s: int) -> str:

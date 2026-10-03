@@ -1,0 +1,30 @@
+# requirements.lock - Hash-pinned dependencies for Strata
+# Generated from pyproject.toml with pip-tools / uv
+# Update with: uv pip compile pyproject.toml --output-file requirements.lock
+#
+# Core dependencies
+duckdb==1.5.6 \
+    --hash=sha256:bc9619ed7d4ffa117b5155d84b44794366bb6635178d78ed5e13a6024845c757
+PyYAML==6.0.3 \
+    --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc
+
+# Dev dependencies
+pytest==9.1.1 \
+    --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c
+pytest-cov==7.1.0 \
+    --hash=sha256:a0461110b7865f9a271aa1b51e516c9a95de9d696734a2f71e3e78f46e1d4678
+coverage==7.16.2 \
+    --hash=sha256:5375ebd99038021b35e99dc88255022912c06565d316212f4a576e4b08d30f5d
+ruff==0.16.6 \
+    --hash=sha256:d72c591a96986ee4268860e2b7235082129ca5e4cb9cbba653a4b57c11893757
+mypy==2.4.0 \
+    --hash=sha256:29eb0b9427a6b11b992e452f6cceb8af724f4dceb47e779d0b35e405e996ea5e
+
+# Optional dependencies (pin when used)
+# postgres: psycopg2-binary>=2.9,<3.0
+# bigquery: google-cloud-bigquery>=3.0,<4.0
+# snowflake: snowflake-connector-python>=3.0,<4.0
+# airflow: apache-airflow>=2.8,<3.0
+# prefect: prefect>=2.14,<3.0
+# portalocker: portalocker>=2.8,<3.0
+# iceberg: pyiceberg[pyarrow]>=0.7,<1.0
