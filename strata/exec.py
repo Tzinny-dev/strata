@@ -31,6 +31,28 @@ _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RUN_ID_PREFIX_RE = re.compile(r"^[0-9a-f]{1,12}$")
 
 
+def _canonical_module_path(module_path: str, require_exists: bool = True) -> Path:
+    """Canonicalize and validate a module path.
+
+    - Resolves to absolute path (handles symlinks, .., etc.)
+    - Validates the file exists and is a .strata file (if require_exists=True)
+    - Returns a Path object for safe filesystem operations
+    """
+    path = Path(module_path).resolve()
+    if require_exists:
+        if not path.exists():
+            raise StrataError(
+                f"module not found: {module_path!r}",
+                "E080",
+            )
+        if path.suffix != ".strata":
+            raise StrataError(
+                f"module must be a .strata file, got: {module_path!r}",
+                "E080",
+            )
+    return path
+
+
 def _valid_ident(name: str) -> bool:
     """Check if a string is a valid SQL identifier."""
     return bool(_IDENT_RE.match(name))
@@ -153,19 +175,19 @@ ID_SUFFIX = ".strata-id"
 
 def history_path(module_path: str) -> Path:
     """Path to the module's run-history sidecar (`.strata-history.jsonl`)."""
-    p = Path(module_path)
+    p = _canonical_module_path(module_path, require_exists=False)
     return p.parent / (p.stem + HISTORY_SUFFIX)
 
 
 def _lock_path(module_path: str) -> Path:
     """Path to the module's writer-lock sidecar (`.strata-lock`)."""
-    p = Path(module_path)
+    p = _canonical_module_path(module_path, require_exists=False)
     return p.parent / (p.stem + LOCK_SUFFIX)
 
 
 def _id_path(module_path: str) -> Path:
     """Path to the module's stable-identity sidecar (`.strata-id`)."""
-    p = Path(module_path)
+    p = _canonical_module_path(module_path, require_exists=False)
     return p.parent / (p.stem + ID_SUFFIX)
 
 
@@ -352,7 +374,7 @@ def find_run(module_path: str, run_id: str) -> dict | None:
 
 def manifest_path(module_path: str) -> Path:
     """Path to the module's manifest sidecar (`.strata-manifest.json`)."""
-    p = Path(module_path)
+    p = _canonical_module_path(module_path, require_exists=False)
     return p.parent / (p.stem + MANIFEST_SUFFIX)
 
 
@@ -1111,6 +1133,11 @@ def recover_metadata(con: Any, module_path: str) -> list[str]:
     deduplicates that retry. Corrupt legacy history fails loudly. No registry
     is created by a read; legacy warehouses remain untouched.
     """
+    # If module doesn't exist, there's nothing to recover (scope isolation)
+    try:
+        _canonical_module_path(module_path, require_exists=True)
+    except StrataError:
+        return []
     exists = con.execute("SELECT count(*) FROM information_schema.tables "
                          "WHERE table_schema = ? AND table_name=?",
                          [dbcompat.db_schema(con), COMMIT_REGISTRY]).fetchone()[0]
@@ -1584,7 +1611,7 @@ def verify_run(module_path: str, run_id: str) -> dict:
     from .analysis import Checker as _Checker
     from .analysis import Project as _Project
     from .parser import parse_strata as _parse
-    src = Path(module_path).read_text()
+    src = _canonical_module_path(module_path).read_text()
     proj = _Project(_parse(src, module_path))
     _Checker(proj).check_all()
     fps = e.get("fingerprints", {})
