@@ -1602,6 +1602,70 @@ def run(con: Any, project: Project, tms: dict[str, TypedModel], module_path: str
                            backfill_of=backfill_of, freshness_override=freshness_override)
 
 
+def _build_run_entry(tms: dict[str, TypedModel], names: list[str], dialect: Dialect,
+                     source_overrides: dict[str, dict[str, str]] | None,
+                     branch: str, source_fps: dict[str, str],
+                     reason: str | None = None, backfill_of: str | None = None,
+                     stage_only: bool = False) -> dict:
+    """Build the run entry dictionary from execution parameters."""
+    entry = {
+        "fingerprints": {n: tm.fingerprint for n, tm in tms.items()},
+        "names": names,
+        "dialect": getattr(dialect, "name", str(dialect)),
+        "source_overrides": source_overrides or {},
+        "branch": branch,
+        "source_fingerprints": source_fps,
+    }
+    if reason is not None:
+        entry["reason"] = reason
+    if backfill_of is not None:
+        entry["backfill_of"] = backfill_of
+    if stage_only:
+        entry["run_id"] = _run_id(entry)
+    return entry
+
+
+def _collect_materialization_metrics(con: Any, applied: list[str], names: list[str],
+                                     start: datetime.datetime, stage_only: bool) -> tuple[float, int]:
+    """Collect materialization metrics (elapsed time, row count)."""
+    elapsed = (datetime.datetime.now() - start).total_seconds() * 1000
+    n_rows = 0
+    if applied:
+        try:
+            prefix = "v_" if not stage_only else "stg_main__"
+            n_rows = sum(
+                con.execute(f"SELECT COUNT(*) FROM {prefix}{n}").fetchone()[0]
+                for n in applied
+            )
+        except Exception:
+            n_rows = 0
+    return elapsed, n_rows
+
+
+def _finalize_run(con: Any, module_path: str, entry: dict, applied: list[str],
+                  pins: list[str], stage_only: bool) -> None:
+    """Finalize run: record metrics, save manifest, record run."""
+    entry["applied"] = applied
+    entry["pins"] = pins
+    elapsed, n_rows = _collect_materialization_metrics(
+        con, applied, entry["names"], 
+        datetime.datetime.fromisoformat(entry.get("at", datetime.datetime.now().isoformat())),
+        stage_only
+    )
+    get_metrics().record_materialization(
+        ", ".join(entry["names"]) if entry["names"] else "unknown",
+        elapsed,
+        n_rows,
+    )
+    if not applied:
+        get_metrics().record_error("run", "no_models_applied")
+    if stage_only:
+        save_manifest(module_path, entry["fingerprints"])
+        record_run(module_path, entry, run_id=entry["run_id"])
+    else:
+        recover_metadata(con, module_path)
+
+
 def _run_locked(con: Any, project: Project, tms: dict[str, TypedModel], module_path: str,
                 only_stale: bool = False, names: list[str] | None = None,
                 dialect: Dialect = DUCKDB,
@@ -1635,54 +1699,27 @@ def _run_locked(con: Any, project: Project, tms: dict[str, TypedModel], module_p
             get_metrics().record_materialization("unknown", elapsed, 0)
             return [], [], "everything up to date (nothing to do)"
 
-    # Identity includes data; snapshots are never overwritten on a repeated id.
-    entry = {
-        "fingerprints": {n: tm.fingerprint for n, tm in tms.items()},
-        "names": names,
-        "dialect": getattr(dialect, "name", str(dialect)),
-        "source_overrides": source_overrides or {},
-        "branch": branch,
-        "source_fingerprints": source_fps,
-    }
-    if reason is not None:
-        entry["reason"] = reason
-    if backfill_of is not None:
-        entry["backfill_of"] = backfill_of
+    # Build run entry
+    entry = _build_run_entry(
+        tms=tms, names=names, dialect=dialect,
+        source_overrides=source_overrides, branch=branch,
+        source_fps=source_fps, reason=reason,
+        backfill_of=backfill_of, stage_only=stage_only
+    )
+
+    # Materialize
     if stage_only:
-        rid = _run_id(entry)
         applied, pins = materialize(con, project, tms, names, dialect=dialect,
                                     source_overrides=source_overrides, branch=branch,
                                     stage_only=True)
     else:
-        applied, pins, rid = _frozen_materialize(con, project, tms, entry,
-                                                 source_overrides,
-                                                 dialect=dialect,
-                                                 module_path=module_path)
-    entry["applied"] = applied
-    entry["pins"] = pins
-    # Calculate metrics AFTER materialization
-    elapsed = (datetime.datetime.now() - start).total_seconds() * 1000
-    n_rows = 0
-    if applied:
-        try:
-            n_rows = sum(
-                con.execute(f"SELECT COUNT(*) FROM {('v_' if not stage_only else 'stg_main__')}{n}").fetchone()[0]
-                for n in applied
-            )
-        except Exception:
-            n_rows = 0
-    get_metrics().record_materialization(
-        ", ".join(names) if names else "unknown",
-        elapsed,
-        n_rows,
-    )
-    if not applied:
-        get_metrics().record_error("run", "no_models_applied")
-    if stage_only:
-        save_manifest(module_path, entry["fingerprints"])
-        record_run(module_path, entry, run_id=rid)
-    else:
-        recover_metadata(con, module_path)
+        applied, pins, _rid = _frozen_materialize(con, project, tms, entry,
+                                                  source_overrides,
+                                                  dialect=dialect,
+                                                  module_path=module_path)
+
+    # Finalize
+    _finalize_run(con, module_path, entry, applied, pins, stage_only)
     return applied, pins, None
 
 
