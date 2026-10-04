@@ -20,6 +20,11 @@ from pathlib import Path
 from typing import Optional
 
 
+class PostgresNotAvailable(RuntimeError):
+    """Raised when no local Postgres server installation is found."""
+    pass
+
+
 def find_pgbin() -> Optional[Path]:
     import shutil
     for cand in (shutil.which("initdb"),
@@ -32,13 +37,19 @@ def find_pgbin() -> Optional[Path]:
 @contextlib.contextmanager
 def ephemeral_postgres(port: int = 55434, dbname: str = "strata_test"):
     """Yields a `dbcompat.PGConn` to a throwaway database on a private,
-    just-started Postgres cluster, or `None` if no Postgres server
-    installation is found (same skip criterion as TestPostgresLiveE2E).
-    Tears the whole cluster down on exit, however the test finished."""
+    just-started Postgres cluster.
+
+    Raises PostgresNotAvailable if no Postgres server installation is found
+    (instead of silently yielding None). Tears the whole cluster down on
+    exit, however the test finished.
+    """
     pgbin = find_pgbin()
     if pgbin is None:
-        yield None
-        return
+        raise PostgresNotAvailable(
+            "No Postgres server installation found (initdb not in PATH and "
+            "no /usr/lib/postgresql/*/bin/initdb). "
+            "Install postgresql-16 or equivalent to run integration tests."
+        )
     import psycopg2
     from strata.dbcompat import PGConn
 

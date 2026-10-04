@@ -286,23 +286,25 @@ class TestCliPostgres(unittest.TestCase):
     Postgres connection end to end, via strata.cli.open_warehouse."""
 
     def test_cli_run_against_a_postgres_dsn(self):
-        with ephemeral_postgres(port=55439) as con:
-            if con is None:
-                self.skipTest("no postgres server installation found")
-            con.execute("CREATE TABLE s (id BIGINT)")
-            con.execute("INSERT INTO s VALUES (1), (2)")
-            # main() opens ITS OWN connection via open_warehouse(); this
-            # setup must be committed on `con` first or it stays invisible
-            # in that other session (PGConn disables autocommit).
-            con.raw.commit()
-            d = tempfile.mkdtemp()
-            path = write_module(
-                d, 'source s(ns: "n", dataset: "s") { columns: { id: int64 } }\n'
-                   'model m { from s }\n')
-            rc = main(["run", path, "--dialect", "postgres", "-o", con.dsn])
-            self.assertEqual(rc, 0)
-            rows = con.execute("SELECT * FROM v_m ORDER BY id").fetchall()
-            self.assertEqual(rows, [(1,), (2,)])
+        from tests.pg_harness import PostgresNotAvailable
+        try:
+            with ephemeral_postgres(port=55439) as con:
+                con.execute("CREATE TABLE s (id BIGINT)")
+                con.execute("INSERT INTO s VALUES (1), (2)")
+                # main() opens ITS OWN connection via open_warehouse(); this
+                # setup must be committed on `con` first or it stays invisible
+                # in that other session (PGConn disables autocommit).
+                con.raw.commit()
+                d = tempfile.mkdtemp()
+                path = write_module(
+                    d, 'source s(ns: "n", dataset: "s") { columns: { id: int64 } }\n'
+                       'model m { from s }\n')
+                rc = main(["run", path, "--dialect", "postgres", "-o", con.dsn])
+                self.assertEqual(rc, 0)
+                rows = con.execute("SELECT * FROM v_m ORDER BY id").fetchall()
+                self.assertEqual(rows, [(1,), (2,)])
+        except PostgresNotAvailable:
+            self.skipTest("no postgres server installation found")
 
 
 if __name__ == "__main__":
