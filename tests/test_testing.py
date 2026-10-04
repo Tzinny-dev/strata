@@ -5,7 +5,6 @@ from strata.testing import (
     create_test_model,
     create_test_module,
     create_test_fixtures,
-    FreshnessTestHelper,
 )
 
 
@@ -86,16 +85,6 @@ class TestFixtures(unittest.TestCase):
         self.assertIn("models", fixtures)
         self.assertIn("events", fixtures["sources"])
         self.assertIn("daily_events", fixtures["models"])
-
-
-class TestFreshnessTestHelper(unittest.TestCase):
-    def test_helper_initialization(self):
-        """Initialize FreshnessTestHelper."""
-        import duckdb
-        con = duckdb.connect(":memory:")
-        helper = FreshnessTestHelper(con)
-        self.assertEqual(helper.con, con)
-        self.assertEqual(helper.tables_created, [])
 
 
 if __name__ == "__main__":

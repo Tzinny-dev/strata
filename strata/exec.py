@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import contextlib
 import datetime
+import functools
 import hashlib
 import json
 import os
 import re
 import sys
 import tempfile
+import threading
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -213,6 +215,19 @@ def _module_id(module_path: str) -> str:
     return token
 
 
+# Thread-level locks per module_path (for intra-process concurrency)
+_thread_locks: dict[str, threading.Lock] = {}
+_thread_locks_lock = threading.Lock()
+
+
+def _get_thread_lock(module_path: str) -> threading.Lock:
+    """Get or create a thread-level lock for a module_path."""
+    with _thread_locks_lock:
+        if module_path not in _thread_locks:
+            _thread_locks[module_path] = threading.Lock()
+        return _thread_locks[module_path]
+
+
 @contextlib.contextmanager
 def _module_lock(module_path: str) -> Iterator[None]:
     """Mutual exclusion across PROCESSES for anything that reads or writes
@@ -274,6 +289,45 @@ def _module_lock(module_path: str) -> Iterator[None]:
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)  # type: ignore[union-attr]
         os.close(fd)
+
+
+def with_lock(module_path_arg: str = "module_path"):
+    """Decorator that wraps a function with _module_lock.
+
+    Args:
+        module_path_arg: Name of the parameter that holds the module_path string.
+                         Defaults to "module_path". Can also be an index (int)
+                         for positional args.
+    """
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # Resolve module_path from args/kwargs
+            if isinstance(module_path_arg, int):
+                module_path = args[module_path_arg]
+            else:
+                module_path = kwargs.get(module_path_arg)
+                if module_path is None:
+                    # Try positional - assume it's the last or second-to-last arg
+                    # based on the four entry points' signatures
+                    import inspect
+                    sig = inspect.signature(func)
+                    params = list(sig.parameters.keys())
+                    if module_path_arg in params:
+                        idx = params.index(module_path_arg)
+                        if idx < len(args):
+                            module_path = args[idx]
+
+            if module_path is None:
+                # No module_path provided, run without lock (e.g., gc_plan)
+                return func(*args, **kwargs)
+
+            # Acquire thread lock first (intra-process), then process lock (inter-process)
+            thread_lock = _get_thread_lock(module_path)
+            with thread_lock, _module_lock(module_path):
+                return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 def _run_id(entry: dict) -> str:
@@ -873,14 +927,13 @@ def publish_snapshots(con: Any, names: list[str], run_id: str,
     return done
 
 
+@with_lock()
 def rollback_to_run(con: Any, e: dict,
                     module_path: str | None = None) -> list[str]:
     """Public entry point: holds the module lock for the whole operation
     (see _module_lock) when `module_path` is given — no history file to
     protect without one."""
-    lock = _module_lock(module_path) if module_path is not None else contextlib.nullcontext()
-    with lock:
-        return _rollback_to_run_locked(con, e, module_path)
+    return _rollback_to_run_locked(con, e, module_path)
 
 
 def _rollback_to_run_locked(con: Any, e: dict,
@@ -1277,6 +1330,7 @@ def gc_plan(con: Any, module_path: str, keep: int = 2,
             "keep_days": keep_days, "applied": False}
 
 
+@with_lock()
 def gc_snapshots(con: Any, module_path: str, keep: int = 2,
                  keep_days: float | None = None,
                  apply: bool = False) -> dict:
@@ -1285,8 +1339,7 @@ def gc_snapshots(con: Any, module_path: str, keep: int = 2,
     reflects a consistent snapshot instead of racing a concurrent run(),
     and so a concurrent run() can never publish a new run in the window
     between this plan and its apply."""
-    with _module_lock(module_path):
-        return _gc_snapshots_locked(con, module_path, keep, keep_days, apply)
+    return _gc_snapshots_locked(con, module_path, keep, keep_days, apply)
 
 
 def _gc_snapshots_locked(con: Any, module_path: str, keep: int = 2,
@@ -1395,6 +1448,145 @@ def _downstream_models(tms: dict[str, TypedModel], seeds: set[str]) -> set[str]:
     return out
 
 
+def compute_stale(
+    con: Any,
+    tms: dict[str, TypedModel],
+    module_path: str,
+    names: list[str],
+    branch: str,
+    source_overrides: dict[str, dict[str, str]] | None,
+    project: Project,
+    dialect: Dialect,
+    freshness_override: str | None = None,
+) -> set[str]:
+    """Compute the set of stale models based on fingerprints, source changes, and freshness.
+
+    This is the core staleness detection logic, extracted for testability.
+    Returns a set of model names that are stale and need rematerialization.
+    """
+    from . import dbcompat
+
+    history = load_history(module_path)
+    previous = next((e for e in reversed(history)
+                     if e.get("snapshots") and e.get("branch") == branch), None)
+
+    source_fps = source_fingerprints(con, project, source_overrides)
+
+    if previous is None:
+        stale: set[str] = set(tms)
+    else:
+        # Per-source staleness: only models downstream of changed sources
+        # rebuild (plus code-changed models, transitive via fingerprints).
+        # Override changes surface as hash changes since fingerprints
+        # resolve through the overrides, so identical content still skips.
+        prev_fps = previous.get("source_fingerprints", {})
+        changed = {s for s, h in source_fps.items() if prev_fps.get(s) != h}
+        changed |= {s for s in prev_fps if s not in source_fps}
+        stale = set(stale_models(tms, module_path)) | _downstream_models(tms, changed)
+
+    # §2 freshness-based staleness: check if data is older than any threshold
+    if previous and "committed_at" in previous:
+        prev_time = datetime.datetime.fromisoformat(previous["committed_at"])
+        now = datetime.datetime.now()
+        for name in names:
+            tm = tms.get(name)
+            if tm and tm.plan.freshness:
+                # Use freshness_override if specified, otherwise use model's freshness
+                freshness_specs = [freshness_override] if freshness_override else tm.plan.freshness
+                # Check each freshness threshold
+                for freshness_spec in freshness_specs:
+                    threshold = parse_freshness_threshold(freshness_spec)
+                    if threshold is not None:
+                        # Handle custom freshness expressions
+                        if threshold == CUSTOM_FRESHNESS_MARKER:
+                            try:
+                                # Evaluate the custom expression against the warehouse
+                                view_name = promoted_name(name)
+                                result = con.execute(
+                                    f"SELECT {freshness_spec} FROM {view_name} LIMIT 1"
+                                ).fetchone()
+                                if result and result[0] is not None:
+                                    # Result should be a datetime or interval
+                                    custom_threshold = result[0]
+                                    if isinstance(custom_threshold, datetime.timedelta):
+                                        threshold = custom_threshold
+                                    elif isinstance(custom_threshold, datetime.datetime):
+                                        # If result is a datetime, use it as the cutoff
+                                        age = now - custom_threshold
+                                        if age > datetime.timedelta(0):
+                                            stale.add(name)
+                                            break
+                                    else:
+                                        # Unknown type, skip this check
+                                        continue
+                                else:
+                                    # Expression returned NULL, skip this check
+                                    continue
+                            except Exception:
+                                # If we can't evaluate the expression, skip it
+                                continue
+                        # If freshness_column is specified, check max value of that column
+                        if tm.plan.freshness_column:
+                            try:
+                                view_name = promoted_name(name)
+                                max_val = con.execute(
+                                    f"SELECT MAX({tm.plan.freshness_column}) FROM {view_name}"
+                                ).fetchone()[0]
+                                if max_val is not None:
+                                    # Convert to datetime if it's a string
+                                    if isinstance(max_val, str):
+                                        max_val = datetime.datetime.fromisoformat(max_val)
+                                    # Check if the data is older than threshold
+                                    if isinstance(max_val, datetime.datetime):
+                                        age = now - max_val
+                                        if age > threshold:
+                                            stale.add(name)
+                                            break  # No need to check other thresholds
+                                    else:
+                                        # Not a datetime column, use time-based staleness
+                                        age = now - prev_time
+                                        if age > threshold:
+                                            stale.add(name)
+                                            break
+                                else:
+                                    # No data, mark as stale
+                                    stale.add(name)
+                                    break
+                            except Exception:
+                                # If we can't check the column, fall back to time-based
+                                age = now - prev_time
+                                if age > threshold:
+                                    stale.add(name)
+                                    break
+                        else:
+                            # No freshness_column, use time-based staleness
+                            age = now - prev_time
+                            if age > threshold:
+                                stale.add(name)
+                                break  # No need to check other thresholds
+    # Cascade staleness to downstream models
+    # If a model is stale, all models that depend on it should also be stale
+    freshness_stale = set(stale)  # Models stale due to freshness
+    if freshness_stale:
+        stale |= _downstream_models(tms, freshness_stale)
+    # A rollback (or a different warehouse) may not expose the last run.
+    live = dbcompat.live_view_defs(con)
+    if previous:
+        for name in names:
+            snap = previous.get("snapshots", {}).get(name)
+            if not snap or snap not in live.get(promoted_name(name), ""):
+                stale.add(name)
+# Exclude models with staleness_ok attribute from stale set
+        for name in list(stale):
+            tm = tms.get(name)
+            if tm:
+                val = tm.attrs.get("staleness_ok")
+                if val and str(val).lower() == "true":
+                    stale.discard(name)
+    return stale
+
+
+@with_lock()
 def run(con: Any, project: Project, tms: dict[str, TypedModel], module_path: str,
         only_stale: bool = False, names: list[str] | None = None,
         dialect: Dialect = DUCKDB,
@@ -1404,8 +1596,7 @@ def run(con: Any, project: Project, tms: dict[str, TypedModel], module_path: str
         freshness_override: str | None = None) -> tuple[list[str], list[str], str | None]:
     """Public entry point: holds the module lock for the whole operation
     (see _module_lock) around the actual implementation below."""
-    with _module_lock(module_path):
-        return _run_locked(con, project, tms, module_path, only_stale=only_stale,
+    return _run_locked(con, project, tms, module_path, only_stale=only_stale,
                            names=names, dialect=dialect, source_overrides=source_overrides,
                            branch=branch, stage_only=stage_only, reason=reason,
                            backfill_of=backfill_of, freshness_override=freshness_override)
@@ -1434,122 +1625,16 @@ def _run_locked(con: Any, project: Project, tms: dict[str, TypedModel], module_p
         recover_metadata(con, module_path)
     source_fps = source_fingerprints(con, project, source_overrides)
     if only_stale:
-        history = load_history(module_path)
-        previous = next((e for e in reversed(history)
-                         if e.get("snapshots") and e.get("branch") == branch), None)
-        if previous is None:
-            stale = set(tms)
-        else:
-            # Per-source staleness: only models downstream of changed sources
-            # rebuild (plus code-changed models, transitive via fingerprints).
-            # Override changes surface as hash changes since fingerprints
-            # resolve through the overrides, so identical content still skips.
-            prev_fps = previous.get("source_fingerprints", {})
-            changed = {s for s, h in source_fps.items() if prev_fps.get(s) != h}
-            changed |= {s for s in prev_fps if s not in source_fps}
-            stale = set(stale_models(tms, module_path)) | _downstream_models(tms, changed)
-        # §2 freshness-based staleness: check if data is older than any threshold
-        if previous and "committed_at" in previous:
-            prev_time = datetime.datetime.fromisoformat(previous["committed_at"])
-            now = datetime.datetime.now()
-            for name in names:
-                tm = tms.get(name)
-                if tm and tm.plan.freshness:
-                    # Use freshness_override if specified, otherwise use model's freshness
-                    freshness_specs = [freshness_override] if freshness_override else tm.plan.freshness
-                    # Check each freshness threshold
-                    for freshness_spec in freshness_specs:
-                        threshold = parse_freshness_threshold(freshness_spec)
-                        if threshold is not None:
-                            # Handle custom freshness expressions
-                            if threshold == CUSTOM_FRESHNESS_MARKER:
-                                try:
-                                    # Evaluate the custom expression against the warehouse
-                                    view_name = promoted_name(name)
-                                    result = con.execute(
-                                        f"SELECT {freshness_spec} FROM {view_name} LIMIT 1"
-                                    ).fetchone()
-                                    if result and result[0] is not None:
-                                        # Result should be a datetime or interval
-                                        custom_threshold = result[0]
-                                        if isinstance(custom_threshold, datetime.timedelta):
-                                            threshold = custom_threshold
-                                        elif isinstance(custom_threshold, datetime.datetime):
-                                            # If result is a datetime, use it as the cutoff
-                                            age = now - custom_threshold
-                                            if age > datetime.timedelta(0):
-                                                stale.add(name)
-                                                break
-                                        else:
-                                            # Unknown type, skip this check
-                                            continue
-                                    else:
-                                        # Expression returned NULL, skip this check
-                                        continue
-                                except Exception:
-                                    # If we can't evaluate the expression, skip it
-                                    continue
-                            # If freshness_column is specified, check max value of that column
-                            if tm.plan.freshness_column:
-                                try:
-                                    view_name = promoted_name(name)
-                                    max_val = con.execute(
-                                        f"SELECT MAX({tm.plan.freshness_column}) FROM {view_name}"
-                                    ).fetchone()[0]
-                                    if max_val is not None:
-                                        # Convert to datetime if it's a string
-                                        if isinstance(max_val, str):
-                                            max_val = datetime.datetime.fromisoformat(max_val)
-                                        # Check if the data is older than threshold
-                                        if isinstance(max_val, datetime.datetime):
-                                            age = now - max_val
-                                            if age > threshold:
-                                                stale.add(name)
-                                                break  # No need to check other thresholds
-                                        else:
-                                            # Not a datetime column, use time-based staleness
-                                            age = now - prev_time
-                                            if age > threshold:
-                                                stale.add(name)
-                                                break
-                                    else:
-                                        # No data, mark as stale
-                                        stale.add(name)
-                                        break
-                                except Exception:
-                                    # If we can't check the column, fall back to time-based
-                                    age = now - prev_time
-                                    if age > threshold:
-                                        stale.add(name)
-                                        break
-                            else:
-                                # No freshness_column, use time-based staleness
-                                age = now - prev_time
-                                if age > threshold:
-                                    stale.add(name)
-                                    break  # No need to check other thresholds
-        # Cascade staleness to downstream models
-        # If a model is stale, all models that depend on it should also be stale
-        freshness_stale = set(stale)  # Models stale due to freshness
-        if freshness_stale:
-            stale |= _downstream_models(tms, freshness_stale)
-        # A rollback (or a different warehouse) may not expose the last run.
-        live = dbcompat.live_view_defs(con)
-        if previous:
-            for name in names:
-                snap = previous.get("snapshots", {}).get(name)
-                if not snap or snap not in live.get(promoted_name(name), ""):
-                    stale.add(name)
-        # Exclude models with staleness_ok attribute from stale set
-        for name in list(stale):
-            tm = tms.get(name)
-            if tm and tm.attrs.get("staleness_ok"):
-                stale.discard(name)
+        stale = compute_stale(
+            con, tms, module_path, names, branch,
+            source_overrides, project, dialect, freshness_override
+        )
         names = [n for n in names if n in stale]
         if not names:
             elapsed = (datetime.datetime.now() - start).total_seconds() * 1000
             get_metrics().record_materialization("unknown", elapsed, 0)
             return [], [], "everything up to date (nothing to do)"
+
     # Identity includes data; snapshots are never overwritten on a repeated id.
     entry = {
         "fingerprints": {n: tm.fingerprint for n, tm in tms.items()},
@@ -1625,13 +1710,13 @@ def verify_run(module_path: str, run_id: str) -> dict:
     return e
 
 
+@with_lock()
 def execute_run(con: Any, project: Project, tms: dict[str, TypedModel], module_path: str,
                 run_id: str,
                 dialect: Dialect = DUCKDB) -> tuple[list[str], list[str], dict | None]:
     """Public entry point: holds the module lock for the whole operation
     (see _module_lock) around the actual implementation below."""
-    with _module_lock(module_path):
-        return _execute_run_locked(con, project, tms, module_path, run_id, dialect=dialect)
+    return _execute_run_locked(con, project, tms, module_path, run_id, dialect=dialect)
 
 
 def _execute_run_locked(con: Any, project: Project, tms: dict[str, TypedModel],

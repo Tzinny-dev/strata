@@ -1,7 +1,7 @@
 """Testing utilities — internal fixture helpers, not a public runtime API.
 
 Status: helper library for *authoring* tests/fixtures (create_test_source,
-create_test_model, FreshnessTestHelper, etc.). Not wired to the executor
+create_test_model, create_test_module, etc.). Not wired to the executor
 for end-to-end orchestration; the real freshness/staleness gate lives in
 `strata.exec` (`stale_models`, `run --only-stale`). These helpers just
 emit `.strata` text or create temp DuckDB tables.
@@ -200,61 +200,6 @@ def simulate_source_change(
     for row in new_rows:
         placeholders = ", ".join(["?" for _ in row])
         con.execute(f"INSERT INTO {safe_table} VALUES ({placeholders})", row)
-
-
-class FreshnessTestHelper:
-    """Helper class for testing freshness and staleness detection."""
-
-    def __init__(self, con: Any) -> None:
-        self.con = con
-        self.tables_created: list[str] = []
-
-    def setup(self) -> None:
-        """Set up test tables."""
-
-    def teardown(self) -> None:
-        """Clean up test tables."""
-        for table in self.tables_created:
-            try:
-                self.con.execute(f"DROP TABLE IF EXISTS {_quote_ident(table)}")
-            except Exception:
-                pass
-        self.tables_created.clear()
-
-    def create_source_table(
-        self,
-        name: str,
-        columns: dict[str, str],
-        rows: list[tuple] | None = None,
-    ) -> None:
-        """Create a source table for testing."""
-        safe_name = _quote_ident(name)
-        safe_cols = ", ".join(f"{_quote_ident(col)} {typ}" for col, typ in columns.items())
-        self.con.execute(f"CREATE TABLE IF NOT EXISTS {safe_name} ({safe_cols})")
-        self.tables_created.append(name)
-
-        if rows:
-            for row in rows:
-                placeholders = ", ".join(["?" for _ in row])
-                self.con.execute(f"INSERT INTO {safe_name} VALUES ({placeholders})", row)
-
-    def assert_model_is_stale(self, model_name: str, expected_stale: bool = True) -> None:
-        """Assert that a model is stale or fresh."""
-        # This would need to be implemented with actual staleness checking
-
-    def assert_freshness_threshold(self, model_name: str, expected_hours: float) -> None:
-        """Assert that a model has the expected freshness threshold."""
-        # This would need to be implemented with actual threshold checking
-
-    def get_table_row_count(self, table_name: str) -> int:
-        """Get the row count of a table."""
-        result = self.con.execute(f"SELECT COUNT(*) FROM {_quote_ident(table_name)}").fetchone()
-        return result[0] if result else 0
-
-    def get_table_columns(self, table_name: str) -> list[str]:
-        """Get the column names of a table."""
-        result = self.con.execute(f"DESCRIBE {_quote_ident(table_name)}").fetchall()
-        return [row[0] for row in result]
 
 
 def create_test_fixtures() -> dict[str, Any]:

@@ -95,15 +95,21 @@ def open_warehouse(output: str | None, read_only: bool = False) -> Any:
             connect_params["user"] = parsed.username
         if parsed.password:
             connect_params["password"] = parsed.password
-        if parsed.hostname:
-            connect_params["host"] = parsed.hostname
-        if parsed.port:
-            connect_params["port"] = parsed.port
+        # Handle host: can be in hostname (TCP) or in query string (Unix socket)
+        host = parsed.hostname or qs.get("host", [None])[0]
+        if host:
+            connect_params["host"] = host
+        # Handle port: can be in port or in query string
+        port = parsed.port or qs.get("port", [None])[0]
+        if port:
+            connect_params["port"] = int(port) if isinstance(port, str) else port
         if parsed.path:
             connect_params["dbname"] = parsed.path.lstrip("/")
         
         # TLS configuration - default to verify-full for security
-        sslmode = qs.get("sslmode", ["verify-full"])[0]
+        # For Unix socket connections, default to disable TLS since it's local
+        default_sslmode = "disable" if host and host.startswith("/") else "verify-full"
+        sslmode = qs.get("sslmode", [default_sslmode])[0]
         connect_params["sslmode"] = sslmode
         if "sslrootcert" in qs:
             connect_params["sslrootcert"] = qs["sslrootcert"][0]
