@@ -429,3 +429,161 @@ class TestFmtLintReplayRollback(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertEqual(ex.load_manifest(str(src))["daily_orders"],
                              hist[0]["fingerprints"]["daily_orders"])
+
+    def test_replay_subcommand_list_runs(self):
+        """Test `strata replay` lists recorded runs."""
+        import duckdb
+        from strata import exec as ex
+        from strata.cli import cmd_replay
+        from types import SimpleNamespace
+        import io, contextlib
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "h.strata"
+            src.write_text((EX / "daily_orders.strata").read_text())
+            proj = Project(parse_strata(src.read_text(), str(src)))
+            Checker(proj).check_all()
+            con = duckdb.connect()
+            for stmt in __import__("strata.seed", fromlist=["seed_sql"]).seed_sql()[0].split(";"):
+                if stmt.strip():
+                    con.execute(stmt)
+            ex.run(con, proj, proj.typed, str(src))
+            hist = ex.load_history(str(src))
+            rid = hist[0]["run_id"]
+            
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cmd_replay(SimpleNamespace(file=str(src), run_id=None, last="10",
+                                                verify=None, execute=False, seed=False,
+                                                output=None, search_dir=None,
+                                                iceberg_dir=None, verify_reader="duckdb"))
+            self.assertEqual(rc, 0)
+            out = buf.getvalue()
+            self.assertIn(rid, out)
+
+    def test_replay_subcommand_verify_run(self):
+        """Test `strata replay --verify` verifies a run without re-execution."""
+        import duckdb
+        from strata import exec as ex
+        from strata.cli import cmd_replay
+        from types import SimpleNamespace
+        import io, contextlib
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "h.strata"
+            src.write_text((EX / "daily_orders.strata").read_text())
+            proj = Project(parse_strata(src.read_text(), str(src)))
+            Checker(proj).check_all()
+            con = duckdb.connect()
+            for stmt in __import__("strata.seed", fromlist=["seed_sql"]).seed_sql()[0].split(";"):
+                if stmt.strip():
+                    con.execute(stmt)
+            ex.run(con, proj, proj.typed, str(src))
+            hist = ex.load_history(str(src))
+            rid = hist[0]["run_id"]
+            
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cmd_replay(SimpleNamespace(file=str(src), run_id=rid, last="10",
+                                                verify=rid, execute=False, seed=False,
+                                                output=None, search_dir=None,
+                                                iceberg_dir=None, verify_reader="duckdb"))
+            self.assertEqual(rc, 0)
+            out = buf.getvalue()
+            self.assertIn("verify OK", out)
+            self.assertIn(rid, out)
+
+    def test_replay_subcommand_unknown_run(self):
+        """Test `strata replay` fails with unknown run_id."""
+        from strata.cli import cmd_replay
+        from types import SimpleNamespace
+        import io, contextlib
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "h.strata"
+            src.write_text((EX / "daily_orders.strata").read_text())
+            buf = io.StringIO()
+            err = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+                rc = cmd_replay(SimpleNamespace(file=str(src), run_id="deadbeef0000", last="10",
+                                                verify=None, execute=False, seed=False,
+                                                output=None, search_dir=None,
+                                                iceberg_dir=None, verify_reader="duckdb"))
+            self.assertEqual(rc, 1)
+            out = buf.getvalue()
+            self.assertIn("unknown run", err.getvalue())
+
+    def test_backfill_subcommand(self):
+        """Test `strata backfill` re-runs a past run against current sources."""
+        import duckdb
+        from strata import exec as ex
+        from strata.cli import cmd_backfill, cmd_replay
+        from types import SimpleNamespace
+        import io, contextlib
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "h.strata"
+            src.write_text((EX / "daily_orders.strata").read_text())
+            proj = Project(parse_strata(src.read_text(), str(src)))
+            Checker(proj).check_all()
+            con = duckdb.connect()
+            for stmt in __import__("strata.seed", fromlist=["seed_sql"]).seed_sql()[0].split(";"):
+                if stmt.strip():
+                    con.execute(stmt)
+            ex.run(con, proj, proj.typed, str(src))
+            hist = ex.load_history(str(src))
+            rid = hist[0]["run_id"]
+            con.close()
+            
+            # backfill requires output warehouse and reason
+            # seed the backfill warehouse with the same source data
+            w = os.path.join(d, "backfill.duckdb")
+            con2 = duckdb.connect(w)
+            for stmt in __import__("strata.seed", fromlist=["seed_sql"]).seed_sql()[0].split(";"):
+                if stmt.strip():
+                    con2.execute(stmt)
+            con2.close()
+            
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cmd_backfill(SimpleNamespace(file=str(src), run_id=rid,
+                                                  models=None, source=[], reason="correction",
+                                                  branch=None, stage_only=False,
+                                                  search_dir=None, output=w))
+            self.assertEqual(rc, 0)
+            out = buf.getvalue()
+            self.assertIn("backfilled", out)
+            self.assertIn("correction", out)
+
+    def test_catalog_subcommand(self):
+        """Test `strata catalog` lists Iceberg catalog runs."""
+        # This requires iceberg - skip if not available
+        try:
+            import pyiceberg  # noqa: F401
+        except ImportError:
+            self.skipTest("pyiceberg not available")
+        
+        import duckdb
+        from strata import exec as ex
+        from strata.cli import cmd_catalog
+        from types import SimpleNamespace
+        import io, contextlib
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "h.strata"
+            src.write_text((EX / "daily_orders.strata").read_text())
+            proj = Project(parse_strata(src.read_text(), str(src)))
+            Checker(proj).check_all()
+            con = duckdb.connect()
+            for stmt in __import__("strata.seed", fromlist=["seed_sql"]).seed_sql()[0].split(";"):
+                if stmt.strip():
+                    con.execute(stmt)
+            catalog_dir = os.path.join(d, "lakehouse")
+            ex.run(con, proj, proj.typed, str(src), branch="main", iceberg_dir=catalog_dir)
+            
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cmd_catalog(SimpleNamespace(catalog=catalog_dir, run=None,
+                                                  verify_reader="duckdb", json=False))
+            self.assertEqual(rc, 0)
+            out = buf.getvalue()
+            self.assertIn("run(s)", out)
+
+
+if __name__ == "__main__":
+    unittest.main()
