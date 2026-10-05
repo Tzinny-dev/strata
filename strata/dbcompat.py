@@ -25,7 +25,27 @@ from typing import Any
 from .types import StrataType
 
 
-class PGConn:
+class _ConnBase:
+    """Base class for dialect connection wrappers providing common fetch* chaining."""
+
+    def fetchone(self) -> tuple | None:
+        raise NotImplementedError
+
+    def fetchall(self) -> list[tuple]:
+        raise NotImplementedError
+
+    def fetchmany(self, n: int) -> list[tuple]:
+        raise NotImplementedError
+
+    @property
+    def description(self) -> Any | None:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        raise NotImplementedError
+
+
+class PGConn(_ConnBase):
     """Wraps a psycopg2 connection so `con.execute(sql, params).fetchone()`
     chains the same way DuckDB's connection already does natively. `?`
     placeholders (DuckDB's style, used throughout exec.py) are translated to
@@ -102,7 +122,7 @@ class PGConn:
         self.raw.close()
 
 
-class BigQueryConn:
+class BigQueryConn(_ConnBase):
     """Wraps a bigquery.Client so `con.execute(sql, params).fetchone()` chains like DuckDB/PGConn.
 
     BigQuery has no `?` placeholder — params are inlined as quoted literals
@@ -171,7 +191,7 @@ class BigQueryConn:
             pass
 
 
-class SnowflakeConn:
+class SnowflakeConn(_ConnBase):
     """Wraps a snowflake.connector connection like PGConn ( ? → %s )."""
 
     def __init__(self, raw: Any) -> None:
