@@ -121,6 +121,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="with --gc: most recent runs to retain (default: 2)")
     p.add_argument("--gc-keep-days", type=float, default=None,
                    help="with --gc: also retain runs newer than this many days")
+    p.add_argument("--metrics-format", default=None,
+                   choices=["prometheus", "statsd", "json"],
+                   help="export metrics after run in specified format (prometheus|statsd|json)")
     p.set_defaults(fn=execute.cmd_run)
 
     p = sub.add_parser("bench", help="golden-file artifacts: supervision + regression")

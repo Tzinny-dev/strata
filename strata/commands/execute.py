@@ -122,6 +122,29 @@ def cmd_run(args: Any) -> int:
               f"kept {len(gc['keep_tables'])}")
     if getattr(args, "output", None):
         con.close()
+    # Export metrics if requested
+    metrics_format = getattr(args, "metrics_format", None)
+    if metrics_format:
+        from ..observability import (
+            MetricsCollector,
+            PrometheusExporter,
+            StatsDExporter,
+            JsonExporter,
+        )
+        collector = exec_mod.get_metrics()
+        if collector is not None:
+            if metrics_format == "prometheus":
+                exporter = PrometheusExporter(collector)
+            elif metrics_format == "statsd":
+                exporter = StatsDExporter(collector)
+            elif metrics_format == "json":
+                exporter = JsonExporter(collector)
+            else:
+                print(f"error: unknown metrics format {metrics_format}", file=sys.stderr)
+                return 1
+            print(exporter.export())
+        else:
+            print("(no metrics collected)")
     return 0
 
 
