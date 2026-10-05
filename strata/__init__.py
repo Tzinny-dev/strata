@@ -94,6 +94,9 @@ from strata.exec import (
     staged_name,
     promoted_name,
     physical_schema,
+    RunResult,
+    run,
+    execute_run,
 )
 
 # Formatter
@@ -195,6 +198,9 @@ __all__ = [
     "staged_name",
     "promoted_name",
     "physical_schema",
+    "RunResult",
+    "run",
+    "execute_run",
     # Formatter
     "format_module",
     # Seed

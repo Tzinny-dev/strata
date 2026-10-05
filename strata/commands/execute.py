@@ -61,13 +61,16 @@ def cmd_run(args: Any) -> int:
             return 2
     if args.seed:
         _run_seed(con, args.file)
-    applied, pins, note = exec_mod.run(con, proj, tms, args.file,
-                                       only_stale=args.only_stale,
-                                       names=wanted,
-                                       source_overrides=overrides or None,
-                                       branch=getattr(args, "branch", "main"),
-                                       stage_only=getattr(args, "stage_only", False),
-                                       freshness_override=getattr(args, "freshness", None))
+    result = exec_mod.run(con, proj, tms, args.file,
+                           only_stale=args.only_stale,
+                           names=wanted,
+                           source_overrides=overrides or None,
+                           branch=getattr(args, "branch", "main"),
+                           stage_only=getattr(args, "stage_only", False),
+                           freshness_override=getattr(args, "freshness", None))
+    applied = result.applied
+    pins = result.pins
+    note = result.note
     if note:
         print(note)
     else:
@@ -204,7 +207,7 @@ def cmd_replay(args: Any) -> int:
         if getattr(args, "seed", False):
             _run_seed(con, args.file)
         try:
-            applied, pins, orig = exec_mod.execute_run(con, proj, tms, args.file, args.run_id)
+            result = exec_mod.execute_run(con, proj, tms, args.file, args.run_id)
         except exec_mod.PinError as pe:
             print(f"error: E082: {pe}", file=sys.stderr)
             return 1
@@ -213,6 +216,9 @@ def cmd_replay(args: Any) -> int:
             return 1
         if getattr(args, "output", None):
             con.close()
+        applied = result.applied
+        pins = result.pins
+        orig = result.run_entry
         print(f"replayed {orig['run_id']} -> new run recorded "
               f"(branch {orig.get('branch', 'main')}, {len(applied)} model(s) re-materialized)")
         for p in pins:
@@ -284,7 +290,7 @@ def cmd_backfill(args: Any) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
     try:
-        applied, pins, note = exec_mod.run(
+        result = exec_mod.run(
             con, proj, tms, args.file, only_stale=True, names=names,
             source_overrides=overrides or None, branch=branch,
             stage_only=getattr(args, "stage_only", False),
@@ -294,6 +300,9 @@ def cmd_backfill(args: Any) -> int:
         return 1
     if getattr(args, "output", None):
         con.close()
+    applied = result.applied
+    pins = result.pins
+    note = result.note
     if note:
         print(note)
         return 0

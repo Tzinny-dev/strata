@@ -18,6 +18,7 @@ import tempfile
 import threading
 import uuid
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -31,6 +32,19 @@ _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Valid run_id prefix: 1-12 hex characters (for prefix matching in find_run)
 _RUN_ID_PREFIX_RE = re.compile(r"^[0-9a-f]{1,12}$")
+
+
+@dataclass(frozen=True)
+class RunResult:
+    """Result of a Strata run operation."""
+    applied: list[str]
+    pins: list[str]
+    note: str | None = None
+    run_entry: dict | None = None
+
+    def __iter__(self):
+        """Backward compatibility: allow tuple unpacking."""
+        return iter((self.applied, self.pins, self.note))
 
 
 def _canonical_module_path(module_path: str, require_exists: bool = True) -> Path:
@@ -1635,13 +1649,14 @@ def run(con: Any, project: Project, tms: dict[str, TypedModel], module_path: str
         source_overrides: dict[str, dict[str, str]] | None = None,
         branch: str = "main", stage_only: bool = False,
         reason: str | None = None, backfill_of: str | None = None,
-        freshness_override: str | None = None) -> tuple[list[str], list[str], str | None]:
+        freshness_override: str | None = None) -> RunResult:
     """Public entry point: holds the module lock for the whole operation
     (see _module_lock) around the actual implementation below."""
-    return _run_locked(con, project, tms, module_path, only_stale=only_stale,
+    result = _run_locked(con, project, tms, module_path, only_stale=only_stale,
                            names=names, dialect=dialect, source_overrides=source_overrides,
                            branch=branch, stage_only=stage_only, reason=reason,
                            backfill_of=backfill_of, freshness_override=freshness_override)
+    return result
 
 
 def _build_run_entry(tms: dict[str, TypedModel], names: list[str], dialect: Dialect,
@@ -1714,7 +1729,7 @@ def _run_locked(con: Any, project: Project, tms: dict[str, TypedModel], module_p
                 source_overrides: dict[str, dict[str, str]] | None = None,
                 branch: str = "main", stage_only: bool = False,
                 reason: str | None = None, backfill_of: str | None = None,
-                freshness_override: str | None = None) -> tuple[list[str], list[str], str | None]:
+                freshness_override: str | None = None) -> RunResult:
     """Body of `run()` while holding the module writer lock: computes staleness,
     materializes the selected models, records the run, and collects metrics."""
     global _metrics_collector
@@ -1763,7 +1778,7 @@ def _run_locked(con: Any, project: Project, tms: dict[str, TypedModel], module_p
 
     # Finalize
     _finalize_run(con, module_path, entry, applied, pins, stage_only)
-    return applied, pins, None
+    return RunResult(applied=applied, pins=pins, note=None)
 
 
 def verify_run(module_path: str, run_id: str) -> dict:
@@ -1793,15 +1808,16 @@ def verify_run(module_path: str, run_id: str) -> dict:
 @with_lock()
 def execute_run(con: Any, project: Project, tms: dict[str, TypedModel], module_path: str,
                 run_id: str,
-                dialect: Dialect = DUCKDB) -> tuple[list[str], list[str], dict | None]:
+                dialect: Dialect = DUCKDB) -> RunResult:
     """Public entry point: holds the module lock for the whole operation
     (see _module_lock) around the actual implementation below."""
-    return _execute_run_locked(con, project, tms, module_path, run_id, dialect=dialect)
+    applied, pins, e = _execute_run_locked(con, project, tms, module_path, run_id, dialect=dialect)
+    return RunResult(applied=applied, pins=pins, run_entry=e)
 
 
 def _execute_run_locked(con: Any, project: Project, tms: dict[str, TypedModel],
                         module_path: str, run_id: str,
-                        dialect: Dialect = DUCKDB) -> tuple[list[str], list[str], dict | None]:
+                        dialect: Dialect = DUCKDB) -> tuple[list[str], list[str], dict]:
     """Replay WITH re-execution (spec §5): re-materialize a recorded run from
     its content-addressed record. The record must verify first (same gate as
     `verify_run`) — a drifted module never re-executes (fail-loud). Branch,
