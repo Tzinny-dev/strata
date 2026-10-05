@@ -1195,16 +1195,24 @@ def _apply_source_overrides(sql: str, project: Project,
 def _dep_order(tms: dict[str, TypedModel], names: list[str]) -> list[str]:
     """Topologically sort `names` so every dependency precedes its dependents."""
     done: set = set()
+    visiting: set = set()
     out: list[str] = []
 
     def visit(n: str) -> None:
         """Depth-first helper: append n after its (in-set) dependencies."""
         if n in done:
             return
+        if n in visiting:
+            raise StrataError(
+                f"model dependency cycle involving {n!r}",
+                "F001",
+            )
+        visiting.add(n)
         tm = tms[n]
         for d in tm.deps:
             if d in tms:
                 visit(d)
+        visiting.discard(n)
         done.add(n)
         out.append(n)
 
