@@ -41,6 +41,7 @@ dev = [
   "psycopg2-binary>=2.9,<3.0",
   "ruff>=0.16.0,<1.0",
   "mypy>=1.10.0,<2.0",
+  "hypothesis>=6.90,<7.0",
 ]
 all = [
   "psycopg2-binary>=2.9,<3.0",

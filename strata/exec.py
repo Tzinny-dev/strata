@@ -528,11 +528,17 @@ def runtime_pins(con: Any, project: Project, tm: TypedModel, view: str,
                  report: list[str], dialect: Dialect = DUCKDB) -> None:
     """Phase-C runtime pins: verify the materialized view's physical schema
     against the model's declared contract. Raises PinError on any mismatch
-    and appends one `ok` line per field to `report`."""
+    and appends one `ok` line per field to `report`.
+
+    Optimized: runs a single query per model to check all constraints
+    (nonnull, enum, unique/primary) instead of 3 queries per field.
+    """
     if not tm.contract:
         return
     cd = _contract_decl(project, tm)
     physical = physical_schema(con, view)
+
+    # First, validate schema compatibility (no query needed)
     for f in cd.fields:
         exp = contract_field_col(f, project.domain_types)
 
@@ -548,24 +554,58 @@ def runtime_pins(con: Any, project: Project, tm: TypedModel, view: str,
             bad(f"physical type {physical[f.name]!r} incompatible with contract {exp.t}")
         report.append(f"  ok  {tm.name}.{f.name}: {physical[f.name]} (schema)")
 
-        if f.nonnull:
-            n = con.execute(f"SELECT count(*) FROM {view} WHERE {f.name} IS NULL").fetchone()[0]
+    # Collect fields that need data-quality checks
+    nonnull_fields = [f for f in cd.fields if f.nonnull]
+    enum_fields = [f for f in cd.fields if f.enum]
+    unique_fields = [f for f in cd.fields if f.unique or f.primary]
+
+    # Build and execute a single batched query for all data-quality checks
+    if nonnull_fields or enum_fields or unique_fields:
+        checks = []
+
+        # Nonnull checks: count NULLs per field
+        for f in nonnull_fields:
+            checks.append(
+                f"sum(case when {f.name} IS NULL then 1 else 0 end) as nn_{f.name}"
+            )
+
+        # Enum checks: count rows outside allowed values per field
+        for f in enum_fields:
+            vals = ", ".join(dialect.literal(v) for v in f.enum)
+            checks.append(
+                f"sum(case when {f.name} IS NOT NULL AND {f.name} NOT IN ({vals}) then 1 else 0 end) as en_{f.name}"
+            )
+
+        # Unique/primary checks: count duplicates per field
+        for f in unique_fields:
+            checks.append(
+                f"(count(*) - count(DISTINCT {f.name})) as uq_{f.name}"
+            )
+
+        query = f"SELECT {', '.join(checks)} FROM {view}"
+        row = con.execute(query).fetchone()
+
+        # Validate results
+        idx = 0
+        for f in nonnull_fields:
+            n = row[idx]
+            idx += 1
             if n:
                 bad(f"expected nonnull but {n} NULL rows")
             report.append(f"  ok  {tm.name}.{f.name}: nonnull")
-        if f.enum:
-            vals = ", ".join(dialect.literal(v) for v in f.enum)
-            n = con.execute(
-                f"SELECT count(*) FROM {view} WHERE {f.name} IS NOT NULL "
-                f"AND {f.name} NOT IN ({vals})").fetchone()[0]
+
+        for f in enum_fields:
+            n = row[idx]
+            idx += 1
             if n:
                 bad(f"enum violation: {n} rows outside {{{','.join(f.enum)}}}")
             report.append(f"  ok  {tm.name}.{f.name}: enum")
-        if f.unique or f.primary:
-            dups = con.execute(
-                f"SELECT count(*) - count(DISTINCT {f.name}) FROM {view}").fetchone()[0]
-            if dups:
-                bad(f"expected {('primary_key' if f.primary else 'unique')} but {dups} duplicate values")
+
+        for f in unique_fields:
+            n = row[idx]
+            idx += 1
+            if n:
+                bad(f"expected {('primary_key' if f.primary else 'unique')} but {n} duplicate values")
             report.append(f"  ok  {tm.name}.{f.name}: {'primary_key' if f.primary else 'unique'}")
 
     # §2 warehouse semantics: freshness validation
@@ -1458,6 +1498,7 @@ def compute_stale(
     project: Project,
     dialect: Dialect,
     freshness_override: str | None = None,
+    source_fps: dict[str, str] | None = None,
 ) -> set[str]:
     """Compute the set of stale models based on fingerprints, source changes, and freshness.
 
@@ -1470,7 +1511,8 @@ def compute_stale(
     previous = next((e for e in reversed(history)
                      if e.get("snapshots") and e.get("branch") == branch), None)
 
-    source_fps = source_fingerprints(con, project, source_overrides)
+    if source_fps is None:
+        source_fps = source_fingerprints(con, project, source_overrides)
 
     if previous is None:
         stale: set[str] = set(tms)
@@ -1691,7 +1733,8 @@ def _run_locked(con: Any, project: Project, tms: dict[str, TypedModel], module_p
     if only_stale:
         stale = compute_stale(
             con, tms, module_path, names, branch,
-            source_overrides, project, dialect, freshness_override
+            source_overrides, project, dialect, freshness_override,
+            source_fps
         )
         names = [n for n in names if n in stale]
         if not names:

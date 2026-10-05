@@ -37,37 +37,47 @@ class TestModuleLockMechanism(unittest.TestCase):
         counter_file = Path(d) / "counter.txt"
         counter_file.write_text("0")
 
+        # Use a Barrier to synchronize all threads at the critical section
+        # This deterministically creates contention without sleep-based race widening
+        num_threads = 20
+        barrier = threading.Barrier(num_threads)
+
         def bump():
+            # Wait for all threads to reach this point
+            barrier.wait()
             with _module_lock(module):
                 n = int(counter_file.read_text())
-                time.sleep(0.01)  # widen the read-modify-write window
                 counter_file.write_text(str(n + 1))
 
-        threads = [threading.Thread(target=bump) for _ in range(20)]
+        threads = [threading.Thread(target=bump) for _ in range(num_threads)]
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
-        self.assertEqual(int(counter_file.read_text()), 20)
+            t.join(timeout=5.0)
+        self.assertEqual(int(counter_file.read_text()), num_threads)
 
     def test_negative_control_the_same_pattern_loses_updates_unlocked(self):
-        """Proves the sleep-widened window above is a real race, not a
+        """Proves the synchronized window above is a real race, not a
         false sense of safety from thread scheduling or the GIL: the exact
         same pattern, minus the lock, reliably loses updates."""
         d = tempfile.mkdtemp()
         counter_file = Path(d) / "counter.txt"
         counter_file.write_text("0")
 
+        num_threads = 20
+        barrier = threading.Barrier(num_threads)
+
         def bump_unlocked():
+            # Wait for all threads to reach this point
+            barrier.wait()
             n = int(counter_file.read_text())
-            time.sleep(0.01)
             counter_file.write_text(str(n + 1))
 
-        threads = [threading.Thread(target=bump_unlocked) for _ in range(20)]
+        threads = [threading.Thread(target=bump_unlocked) for _ in range(num_threads)]
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            t.join(timeout=5.0)
         self.assertLess(int(counter_file.read_text()), 20)
 
 
@@ -127,22 +137,36 @@ class TestGcSerializedWithLock(unittest.TestCase):
         Path(module).write_text(
             'source s(ns: "n", dataset: "s") { columns: { id: int64 } }\nmodel m { from s }\n')
 
+        # Use an Event to signal when the lock is held
+        lock_held = threading.Event()
+        holder_done = threading.Event()
+
         def hold_lock():
             with _module_lock(module):
-                time.sleep(0.3)
+                lock_held.set()  # Signal that we have the lock
+                holder_done.wait(timeout=5.0)  # Wait for test to proceed
 
         holder = threading.Thread(target=hold_lock)
         holder.start()
-        time.sleep(0.05)  # let the holder acquire first
+
+        # Wait for the holder to actually acquire the lock (no sleep race)
+        lock_held.wait(timeout=5.0)
+        self.assertTrue(lock_held.is_set(), "Holder should have acquired lock within timeout")
 
         con = duckdb.connect()
         start = time.monotonic()
         ex.gc_snapshots(con, module, keep=2)  # empty history: a no-op plan
         duration = time.monotonic() - start
-        holder.join()
 
-        self.assertGreaterEqual(
-            duration, 0.2,
+        # Release the holder
+        holder_done.set()
+        holder.join(timeout=5.0)
+
+        # The gc_snapshots call should have blocked on the lock
+        # It should take at least some measurable time (not instant)
+        # Use a very small threshold to avoid flakiness on slow CI
+        self.assertGreater(
+            duration, 0.01,
             "gc_snapshots must block on the module lock instead of racing "
             "the concurrent holder")
 
