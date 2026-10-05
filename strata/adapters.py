@@ -23,6 +23,17 @@ from typing import Any
 from .dialects import BIGQUERY, SNOWFLAKE, Dialect, get_dialect
 
 
+__all__ = [
+    "Warehouse",
+    "DuckDBWarehouse",
+    "PostgresWarehouse",
+    "BigQueryWarehouse",
+    "SnowflakeWarehouse",
+    "get_adapter",
+    "AdapterNotAvailable",
+]
+
+
 class AdapterNotAvailable(Exception):
     def __init__(self, dialect: str, package: str, msg: str) -> None:
         super().__init__(msg)
@@ -183,6 +194,62 @@ class DuckDBWarehouse(Warehouse):
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema='main' AND table_type='VIEW'").fetchall()
         return [r[0] for r in rows]
+
+
+class PostgresWarehouse(Warehouse):
+    """Warehouse backed by psycopg2. Also acts as DB-API conn via PGConn."""
+
+    def __init__(self, con: Any) -> None:
+        from .dbcompat import PGConn
+
+        self._conn = PGConn(con)
+        self.con = self._conn  # alias for exec.py is_* checks
+
+    @property
+    def dialect(self) -> Dialect:
+        from .dialects import POSTGRES
+        return POSTGRES
+
+    def connect(self) -> None:
+        pass
+
+    def execute(self, sql: str, params: Any | None = None) -> Any:  # type: ignore
+        return self._conn.execute(sql, params)
+
+    def fetch(self, sql: str) -> list[tuple]:
+        return self._conn.execute(sql).fetchall()
+
+    def fetchone(self) -> tuple | None:
+        return self._conn.fetchone()
+
+    def fetchall(self) -> list[tuple]:
+        return self._conn.fetchall()
+
+    @property
+    def description(self) -> Any | None:
+        return self._conn.description
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def materialize(self, name: str, sql: str, partition_by: list[str] | None = None) -> None:
+        # Postgres CREATE TABLE name AS sql
+        self._conn.execute(f"CREATE TABLE {self.dialect.ident(name)} AS {sql}")
+
+    def drop(self, name: str) -> None:
+        try:
+            self._conn.execute(f"DROP TABLE IF EXISTS {self.dialect.ident(name)}")
+        except Exception:
+            pass
+
+    def list_views(self) -> list[str]:
+        try:
+            rows = self._conn.execute(
+                "SELECT table_name FROM information_schema.views WHERE table_schema = 'public'"
+            ).fetchall()
+            return [r[0] for r in rows]
+        except Exception:
+            return []
 
 
 class BigQueryWarehouse(Warehouse):

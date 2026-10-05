@@ -106,7 +106,7 @@ from strata.fmt import format_module
 from strata.seed import seed_sql
 
 # Adapters
-from strata.adapters import get_adapter, Warehouse
+from strata.adapters import get_adapter, Warehouse, PostgresWarehouse
 
 # Import DBT
 from strata.importdbt import import_dbt_schema
@@ -208,6 +208,7 @@ __all__ = [
     # Adapters
     "get_adapter",
     "Warehouse",
+    "PostgresWarehouse",
     # Import DBT
     "import_dbt_schema",
     # Observability
