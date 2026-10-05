@@ -7,7 +7,7 @@ model daily_orders -> contract OrderMetrics
   lineage country <- orders.country [grouped]
   lineage order_day <- orders.order_day [grouped]
   lineage gross_amount <- orders.gross_amount_usd [aggregated]
-  lineage net_amount <- orders.gross_amount_usd [aggregated], refunds.discount_usd [aggregated]
+  lineage net_amount <- orders.gross_amount_usd [aggregated], daily_orders.<coalesce> [aggregated]
   reads        [('daily_orders', 'country'), ('daily_orders', 'discount'), ('daily_orders', 'gross'), ('orders', 'country'), ('orders', 'customer_id'), ('orders', 'gross_amount_usd'), ('orders', 'is_test'), ('orders', 'order_day'), ('orders', 'order_id'), ('refunds', 'discount_usd'), ('refunds', 'order_id')]
 
 # sql: duckdb
