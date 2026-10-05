@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vitepress dev",
     "build": "vitepress build",
-    "preview": "vitepress preview"
+    "preview": "vitepress preview",
+    "sync-docs": "bash sync-docs.sh"
   },
   "devDependencies": {
     "vitepress": "^1.4.0",

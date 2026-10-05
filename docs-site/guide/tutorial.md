@@ -4,9 +4,11 @@
 flowchart LR
   S1[(orders)] --> M1[paid_orders]
   S2[(refunds)] --> M1
-  M1 --> M2[daily_orders]
-  M2 --> V1[(v_daily_orders)]
+  M1 --> M2[daily_revenue]
+  M2 --> M3[revenue_summary]
+  M3 --> V1[(v_revenue_summary)]
   style S1 fill:#0ea5e9,stroke:#fff,color:#fff
+  style S2 fill:#0ea5e9,stroke:#fff,color:#fff
   style V1 fill:#10b981,stroke:#fff,color:#fff
 ```
 

@@ -1,5 +1,17 @@
 # Tutorial: from a source to a windowed summary
 
+```mermaid
+flowchart LR
+  S1[(orders)] --> M1[paid_orders]
+  S2[(refunds)] --> M1
+  M1 --> M2[daily_revenue]
+  M2 --> M3[revenue_summary]
+  M3 --> V1[(v_revenue_summary)]
+  style S1 fill:#0ea5e9,stroke:#fff,color:#fff
+  style S2 fill:#0ea5e9,stroke:#fff,color:#fff
+  style V1 fill:#10b981,stroke:#fff,color:#fff
+```
+
 We build a real pipeline, step by step, over the same data from
 `strata/seed.py` (`--seed`): an `orders` table with 5 rows (one marked
 `is_test`) and `refunds` with 2 refunds. Each step adds code to the same
