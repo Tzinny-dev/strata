@@ -983,6 +983,27 @@ class TypeInferrer:
         elif isinstance(e, ast.UnOp):
             self._reject_nested_window(e.operand, span)
 
+    def _find_window(self, e: ast.Node) -> str | None:
+        """Find a window function call in the expression tree."""
+        if isinstance(e, ast.WindowCall):
+            return e.name
+        if isinstance(e, ast.Call):
+            for a in e.args:
+                found = self._find_window(a)
+                if found:
+                    return found
+        elif isinstance(e, ast.BinOp):
+            found = self._find_window(e.left)
+            if found:
+                return found
+            return self._find_window(e.right)
+        elif isinstance(e, ast.Kwarg):
+            return self._find_window(e.value)
+        elif isinstance(e, ast.UnOp):
+            return self._find_window(e.operand)
+        return None
+
+
     def infer_call(self, e: ast.Call, window_allowed: bool = False) -> Inf:
         """Typecheck a function call (casts, date and json functions get special handling)."""
         name = e.name
@@ -1154,10 +1175,47 @@ class StatementProcessor:
         return self.state.origin_of(e)
 
     def origin_of_expr(self, e: ast.Node) -> list[Origin]:
-        return self.state.origin_of_expr(e)
+        return self._origin_of_expr(e)
+
+    
+    def _origin_of_expr(self, e: ast.Node) -> list[Origin]:
+        if isinstance(e, ast.ColumnRef):
+            return self.origin_of(e)
+        if isinstance(e, ast.WindowCall):
+            # Windows see one row per group (they run after GROUP BY), so the
+            # windowed expression keeps its kind on the argument origins while
+            # recording that a window produced them.
+            kind = "windowed"
+            out: list[Origin] = []
+            for a in e.args:
+                out.extend(self._origin_of_expr(a))
+            for p in e.over.partition_by:
+                out.extend(self._origin_of_expr(p))
+            for k, _desc in e.over.sort:
+                out.extend(self._origin_of_expr(k))
+            if not out:
+                out = [Origin(self.tm.name, f"<{e.name}>", "windowed")]
+            return [Origin(o.node, o.col, kind) for o in out]
+        if isinstance(e, ast.Call):
+            kind = "aggregated" if e.name in AGGREGATES else "derived"
+            out: list[Origin] = []
+            for a in e.args:
+                out.extend(self._origin_of_expr(a))
+            if not out:
+                out = [Origin(self.tm.name, f"<{e.name}>", "derived")]
+            return [Origin(o.node, o.col, kind) for o in out]
+        if isinstance(e, ast.Kwarg):
+            # Keyword argument (date unit): lineage follows the value; the
+            # unit name itself is compile-time vocabulary, not data.
+            return self._origin_of_expr(e.value)
+        if isinstance(e, ast.BinOp):
+            return self._origin_of_expr(e.left) + self._origin_of_expr(e.right)
+        if isinstance(e, ast.UnOp):
+            return self._origin_of_expr(e.operand)
+        return []
 
     def _find_window(self, e: ast.Node) -> str | None:
-        return self.state._find_window(e)
+        return self.inferrer._find_window(e)
 
     def stmt(self, s: ast.Stmt) -> None:
         """Dispatch one model-body statement to its handler."""
@@ -1344,7 +1402,7 @@ class StatementProcessor:
         inf = self.inferrer.infer(s.expr)
         self.cols[s.name] = Col(name=s.name, t=inf.t, nullable=inf.nullable)
         self.own[s.name] = self.tm.name
-        self.origins[s.name] = self.state.origin_of_expr(s.expr)
+        self.origins[s.name] = self.origin_of_expr(s.expr)
         self.base_cols.append(BaseCol(name=s.name, expr=s.expr))
 
     def do_expand(self, s: ast.ExpandStmt) -> None:
@@ -1416,7 +1474,7 @@ class StatementProcessor:
                            where: str) -> None:
         """Windows run after grouping in the outer query, so `let` (inner
         subquery), `filter`, group keys and `sort` must not contain them."""
-        found = self.state._find_window(e)
+        found = self._find_window(e)
         if found is not None:
             raise self._err(functions.E_WINDOW_PLACEMENT,
                       f"over(...) is only allowed in select/derive/aggregate "
@@ -1447,7 +1505,7 @@ class StatementProcessor:
         else:
             self.outputs.append(PlanOut(name=a.name, expr=a.expr))
         self.cols[a.name] = col
-        self.origins[a.name] = self.state.origin_of_expr(a.expr)
+        self.origins[a.name] = self.origin_of_expr(a.expr)
 
     def do_group(self, s: ast.GroupStmt) -> None:
         """Register group keys, infer the grouped body and record planned group expressions."""
@@ -1464,7 +1522,7 @@ class StatementProcessor:
             self.cols[name] = Col(name=name, t=inf.t, nullable=inf.nullable)
             if isinstance(k, ast.ColumnRef):
                 self.origins[name] = [Origin(o.node, o.col, "grouped")
-                                      for o in self.state.origin_of_expr(k)]
+                                      for o in self.origin_of_expr(k)]
             else:
                 self.origins[name] = [Origin(self.tm.name, name, "grouped")]
             self.tm.plan.group_exprs.append(k)
@@ -1730,259 +1788,6 @@ class StatementProcessor:
         self.tm.plan.date_arg_types[id(e)] = base.t
         return fn.ret(args)
 
-    # -- statements -----------------------------------------------------
-    def stmt(self, s: ast.Stmt) -> None:
-        """Dispatch one model-body statement to its handler."""
-        if not isinstance(s, ast.SetOpStmt):
-            # Any non-set-op statement ends a set-op chain: a later set-op
-            # would no longer be consecutive with the previous one.
-            self._setop_chain_open = False
-        if isinstance(s, ast.FromStmt):
-            self.do_from(s)
-        elif isinstance(s, ast.JoinStmt):
-            self.do_join(s)
-        elif isinstance(s, ast.FilterStmt):
-            self._require_no_window(s.cond, s.span,
-                                    "having" if self.in_group else "filter")
-            if self.in_group:
-                self.tm.plan.having.append(s.cond)
-            else:
-                self.tm.plan.preds.append(s.cond)
-            self.infer(s.cond)
-        elif isinstance(s, ast.LetStmt):
-            self.do_let(s)
-        elif isinstance(s, ast.DeriveStmt) or isinstance(s, ast.AggregateStmt):
-            for a in s.assigns:
-                self.do_output(a)
-        elif isinstance(s, ast.GroupStmt):
-            self.do_group(s)
-        elif isinstance(s, ast.SortStmt):
-            for e, desc in s.keys:
-                self._require_no_window(e, s.span, "sort")
-                self.infer(e)
-                self.tm.plan.sorts.append((e, desc))
-        elif isinstance(s, ast.TakeStmt):
-            self.tm.plan.limit = (s.start, s.end)
-        elif isinstance(s, ast.ExpandStmt):
-            self.do_expand(s)
-        elif isinstance(s, ast.SetOpStmt):
-            self.do_setop(s)
-        elif isinstance(s, ast.DedupStmt):
-            self.do_dedup(s)
-        elif isinstance(s, ast.SelectStmt):
-            for a in s.assigns:
-                self.do_output(a)
-        else:
-            raise self._err("E060", f"unsupported statement {type(s).__name__}", s.span)
-
-    def do_from(self, s: ast.FromStmt) -> None:
-        """Register the from input: columns, ownership and passthrough lineage."""
-        if self.tm.plan.set_ops:
-            raise self._err("E076", "a set model combines the from input with "
-                          "named models only; join further inputs downstream", s.span)
-        cols, is_src, node = self.checker.p.input_schema(s.table)
-        inp = InputSpec(alias=s.table, node=node, is_source=is_src,
-                        cols=OrderedDict((k, c.clone()) for k, c in cols.items()))
-        self.inputs.append(inp)
-        self.tm.plan.inputs.append(inp)
-        for name, col in inp.cols.items():
-            self.cols[name] = col
-            self.own[name] = node
-            self.origins[name] = [Origin(node, name, "passthrough")]
-            self.base_cols.append(BaseCol(name=name, expr=None))
-
-    def do_join(self, s: ast.JoinStmt) -> None:
-        """Register a join input and extract expect-cardinality keys when annotated.
-
-        Joins over a set model's combined rows are allowed after the set-op
-        chain (the union is wrapped in a subquery and joined there); a join
-        before the first set-op is still rejected at the set-op itself.
-        """
-        idx = len(self.inputs)
-        cols, is_src, node = self.checker.p.input_schema(s.table)
-        inp = InputSpec(alias=s.table, node=node, is_source=is_src,
-                        cols=OrderedDict((k, c.clone()) for k, c in cols.items()))
-        self.inputs.append(inp)
-        js = JoinSpec(index=idx, alias=s.table, node=node, kind=s.kind, on=s.on)
-        self.tm.plan.inputs.append(inp)
-        self.tm.plan.joins.append(js)
-        self._require_no_window(s.on, s.span, "join condition")
-        self.infer(s.on)
-        if s.expect is not None:
-            js.expect, js.left_keys, js.right_keys = self._join_cardinality(s, inp)
-        for name, col in inp.cols.items():
-            key = f"__j{idx}_{name}"
-            self.cols[key] = col
-            self.own[key] = node
-            self.origins[key] = [Origin(node, name, "joined")]
-            self.base_cols.append(BaseCol(name=key, expr=None))
-
-    def _join_cardinality(self, s: ast.JoinStmt, inp: InputSpec) -> tuple[str | None, list[str], list[str]]:
-        """Validate an `expect many_to_one|one_to_one` annotation and extract
-        the equi-join key columns per side for the materialize-time check.
-
-        many_to_one needs keys on the right side only (their uniqueness bounds
-        every left row to at most one match); one_to_one needs at least one
-        key pair relating a left column to a right column. Conjuncts that only
-        filter left rows are safely ignored (AND-semantics: they remove
-        matches, never create them); anything touching the right table outside
-        a clean `right_col == <non-right-expr>` equi-pair fails loudly, since
-        the upstream uniqueness probe cannot cover it.
-        """
-        if s.kind in ("anti", "semi"):
-            raise self._err("E079", f"expect {s.expect} does not apply to a {s.kind} "
-                              f"join (it never multiplies rows)", s.span)
-        left_alias = self.inputs[0].alias
-        true_pairs: list[tuple[str, str]] = []
-        right_only: list[str] = []
-
-        def l_plain(e: ast.Node) -> str | None:
-            if not isinstance(e, ast.ColumnRef):
-                return None
-            if e.qualifier:
-                return e.name if e.qualifier == left_alias else None
-            if e.name in self.inputs[0].cols and \
-                    self.cols.get(e.name) is self.inputs[0].cols.get(e.name):
-                return e.name
-            return None
-
-        def r_plain(e: ast.Node) -> str | None:
-            if isinstance(e, ast.ColumnRef) and e.qualifier == inp.alias:
-                return e.name
-            return None
-
-        def refs_right(e: ast.Node) -> bool:
-            if isinstance(e, ast.ColumnRef):
-                return e.qualifier == inp.alias
-            if isinstance(e, ast.BinOp):
-                return refs_right(e.left) or refs_right(e.right)
-            if isinstance(e, ast.UnOp):
-                return refs_right(e.operand)
-            if isinstance(e, ast.Call):
-                return any(refs_right(a) for a in e.args)
-            if isinstance(e, ast.WindowCall):
-                return any(refs_right(a) for a in e.args)
-            if isinstance(e, ast.Kwarg):
-                return refs_right(e.value)
-            return False
-
-        def walk(e: ast.Node) -> None:
-            if isinstance(e, ast.BinOp) and e.op == "and":
-                walk(e.left); walk(e.right); return
-            if isinstance(e, ast.BinOp) and e.op == "==":
-                ln, rn = l_plain(e.left), r_plain(e.right)
-                if ln is not None and rn is not None:
-                    true_pairs.append((ln, rn)); return
-                ln, rn = l_plain(e.right), r_plain(e.left)
-                if ln is not None and rn is not None:
-                    true_pairs.append((ln, rn)); return
-                rn = r_plain(e.left) or r_plain(e.right)
-                if rn is not None:
-                    other = e.right if r_plain(e.left) else e.left
-                    if not refs_right(other):
-                        right_only.append(rn); return
-                if refs_right(e.left) or refs_right(e.right):
-                    raise self._err("E079", f"expect {s.expect} needs the right side "
-                                      f"referenced only through equi-join keys "
-                                      f"(found an exotic condition)", s.span)
-                return  # left-local filter or tautology: removes matches only
-            if refs_right(e):
-                raise self._err("E079", f"expect {s.expect} needs equi-join keys on plain "
-                                  f"columns (top-level AND of col == col)", s.span)
-            return  # left-local filter: ignore
-
-        walk(s.on)
-
-        def ordered(keys: list[str]) -> list[str]:
-            out = []
-            for k in keys:
-                if k not in out:
-                    out.append(k)
-            return out
-
-        left_keys = ordered([l for l, _ in true_pairs])
-        right_keys = ordered([r for _, r in true_pairs] + right_only)
-        if not right_keys:
-            raise self._err("E079", f"expect {s.expect} needs at least one equi-join key "
-                              f"on {inp.alias}", s.span)
-        if s.expect == "one_to_one" and not true_pairs:
-            raise self._err("E079", "expect one_to_one needs at least one equi-join key "
-                              "pair relating a left column to a right column", s.span)
-        return s.expect, left_keys, right_keys
-
-    def do_let(self, s: ast.LetStmt) -> None:
-        """Register a named let expression: infer, add col and lineage."""
-        self._require_no_window(s.expr, s.span, "let")
-        inf = self.infer(s.expr)
-        self.cols[s.name] = Col(name=s.name, t=inf.t, nullable=inf.nullable)
-        self.own[s.name] = self.tm.name
-        self.origins[s.name] = self._origin_of_expr(s.expr)
-        self.base_cols.append(BaseCol(name=s.name, expr=s.expr))
-
-    def do_expand(self, s: ast.ExpandStmt) -> None:
-        """One row per element of the primary input's typed array column.
-
-        Expansion runs in the base (pre-aggregation) subquery as a lateral
-        unnest, so it must come before any grouping, and the source must be a
-        row-preserving column of the ``from`` table (joined columns already
-        lost the row context; deriving over an array is a different shape).
-        ``expand xs`` replaces ``xs`` with its nullable element column;
-        ``expand xs as e`` keeps ``xs`` and adds ``e``.
-        """
-        if self.in_group:
-            raise self._err("E075", "expand is only allowed before grouping, "
-                              "not inside a group body", s.span)
-        if self.tm.plan.expand is not None:
-            raise self._err("E075", "only one expand per model (a second lateral "
-                              "unnest would cross-multiply rows)", s.span)
-        if self.tm.plan.set_ops:
-            raise self._err("E076", "expand after a set operation is not supported; "
-                              "expand a branch before combining, or the combined "
-                              "rows in a downstream model", s.span)
-        if not self.inputs:
-            raise self._err("E075", "expand requires a from first", s.span)
-        if s.name not in self.inputs[0].cols:
-            raise self._err("E075", f"expand source {s.name!r} must be a column of "
-                              "the from table", s.span)
-        src = self.inputs[0].cols[s.name]
-        if src.t.name != "array":
-            raise self._err("E075", f"expand source {s.name!r} must be a typed array "
-                              f"column, got {src.t}", s.span)
-        elem = src.t.elem
-        if elem is None or elem.name == "array":
-            raise self._err("E075", f"expand source {s.name!r} must be a "
-                              "one-dimensional array of scalar elements", s.span)
-        if s.as_name in self.inputs[0].cols and s.as_name != s.name:
-            raise self._err("E075", f"expand output {s.as_name!r} collides with an "
-                              "existing column of the from table", s.span)
-        self.tm.plan.expand = (s.name, s.as_name, elem.name)
-        self.cols[s.as_name] = Col(name=s.as_name, t=elem, nullable=True)
-        self.own[s.as_name] = self.tm.name
-        self.origins[s.as_name] = [Origin(self.inputs[0].node, s.name, "expanded")]
-
-    def do_dedup(self, s: ast.DedupStmt) -> None:
-        """Full-row DISTINCT (no `by`) or deterministic one-row-per-key.
-
-        `dedup by k1, k2` keeps one row per key group deterministically
-        (ROW_NUMBER partitioned by the keys, ordered by the remaining output
-        columns, rn = 1), so it is portable across all four engines; the keys
-        must name output columns (validated at finish, when outputs are set).
-        """
-        plan = self.tm.plan
-        if not s.by:
-            plan.distinct = True
-            return
-        if plan.distinct:
-            raise self._err("E076", "dedup by keys and full-row dedup cannot "
-                              "both apply to the same model", s.span)
-        for k in s.by:
-            self._require_no_window(k, s.span, "dedup")
-            self.infer(k)
-            if not (isinstance(k, ast.ColumnRef) and k.qualifier is None):
-                raise self._err("E076", "dedup by keys must be plain output "
-                                  "columns (unqualified references)", s.span)
-            plan.dedup_keys.append(k)
-
     def do_setop(self, s: ast.SetOpStmt) -> None:
         """Combine the current rows with a same-shaped upstream model.
 
@@ -2001,7 +1806,7 @@ class StatementProcessor:
         if plan.joins:
             raise self._err("E076", f"{s.op} combines single-table row sets; join "
                               "the combined rows after the set operation", s.span)
-        if plan.set_ops and not self._setop_chain_open:
+        if plan.set_ops and not self.state._setop_chain_open:
             raise self._err("E076", "set operations must be consecutive; put "
                               "lets/filters/joins before the first or after the "
                               "last set operation", s.span)
@@ -2019,23 +1824,22 @@ class StatementProcessor:
                               f"right {list(cols)})", s.span)
         for n in names:
             lt, rt = self.cols[n].t, cols[n].t
-            if n in self._setop_branches:
-                # chain continuation: unify the running combined type with this branch
-                u = self._setop_unified[n]
+            if n in self.state._setop_branches:
+                u = self.state._setop_unified[n]
                 u2 = u if u == rt else unify(u, rt)
                 if u2.name == "unknown" or (u2.name == "money" and u != rt):
                     raise self._err("E077", f"{s.op} column {n!r} cannot align {u} "
-                                      f"with {rt}", s.span)
-                self._setop_unified[n] = u2
-                self._setop_branches[n].append(rt)
+                                          f"with {rt}", s.span)
+                self.state._setop_unified[n] = u2
+                self.state._setop_branches[n].append(rt)
             else:
                 u = lt if lt == rt else unify(lt, rt)
                 if u.name == "unknown" or (u.name == "money" and lt != rt):
                     raise self._err("E077", f"{s.op} column {n!r} cannot align {lt} "
-                                      f"with {rt}", s.span)
-                self._setop_branches[n] = [lt, rt]
-                self._setop_unified[n] = u
-            self.cols[n] = Col(name=n, t=self._setop_unified[n],
+                                          f"with {rt}", s.span)
+                self.state._setop_branches[n] = [lt, rt]
+                self.state._setop_unified[n] = u
+            self.cols[n] = Col(name=n, t=self.state._setop_unified[n],
                                nullable=self.cols[n].nullable or cols[n].nullable)
             self.own[n] = self.tm.name
             self.origins[n] = list(self.origins.get(n, [])) + [Origin(node, n, "set")]
@@ -2046,126 +1850,11 @@ class StatementProcessor:
             plan.setop_pred_split = len(plan.preds)
         plan.set_ops.append((s.op, s.all, node))
         plan.setop_right[s.table] = node
-        self.setop_right[s.table] = node
-        plan.setop_cols = [(n, self._setop_branches[n], self._setop_unified[n])
+        self.state.setop_right[s.table] = node
+        plan.setop_cols = [(n, self.state._setop_branches[n], self.state._setop_unified[n])
                            for n in names]
-        self._setop_chain_open = True
+        self.state._setop_chain_open = True
 
-    def _require_no_window(self, e: ast.Node,
-                           span: tuple[int, int, int, int] | None,
-                           where: str) -> None:
-        """Windows run after grouping in the outer query, so `let` (inner
-        subquery), `filter`, group keys and `sort` must not contain them."""
-        found = self._find_window(e)
-        if found is not None:
-            raise self._err(functions.E_WINDOW_PLACEMENT,
-                      f"over(...) is only allowed in select/derive/aggregate "
-                      f"outputs, not in {where} (found {found})", span)
-
-    def _find_window(self, e: ast.Node) -> str | None:
-        if isinstance(e, ast.WindowCall):
-            return e.name
-        if isinstance(e, ast.Call):
-            for a in e.args:
-                hit = self._find_window(a)
-                if hit:
-                    return hit
-        elif isinstance(e, ast.BinOp):
-            return self._find_window(e.left) or self._find_window(e.right)
-        elif isinstance(e, ast.Kwarg):
-            return self._find_window(e.value)
-        elif isinstance(e, ast.UnOp):
-            return self._find_window(e.operand)
-        return None
-
-    def do_output(self, a: ast.OutAssign) -> None:
-        """Handle a projection output assignment, enforcing group-body aggregate rules."""
-        inf = self.infer(a.expr)
-        col = Col(name=a.name, t=inf.t, nullable=inf.nullable)
-        if self.in_group:
-            if isinstance(a.expr, ast.ColumnRef) and a.expr.qualifier is None \
-                    and a.expr.name in self.group_keys:
-                self.outputs.append(PlanOut(name=a.name, expr=a.expr, group_key=True))
-                self.cols[a.name] = self.cols[a.expr.name].clone(name=a.name)
-                self.origins[a.name] = [Origin(o.node, o.col, "grouped")
-                                        for o in self.origins.get(a.expr.name, [])]
-                return
-            if not (isinstance(a.expr, ast.Call) and a.expr.name in AGGREGATES):
-                if isinstance(a.expr, ast.WindowCall):
-                    # Aggregates already reduced the group here; window the
-                    # upstream model's output instead (same rule as infer_window).
-                    raise self._err(functions.E_WINDOW_PLACEMENT,
-                              f"over(...) is not allowed inside a group body "
-                              f"(found {a.expr.name}); window over an upstream model", a.span)
-                raise self._err("E050", f"output {a.name!r} in group body must be an aggregate "
-                                  f"or reference a group key", a.span)
-            self.outputs.append(PlanOut(name=a.name, expr=a.expr))
-        else:
-            self.outputs.append(PlanOut(name=a.name, expr=a.expr))
-        self.cols[a.name] = col
-        self.origins[a.name] = self._origin_of_expr(a.expr)
-
-    def _origin_of_expr(self, e: ast.Node) -> list[Origin]:
-        if isinstance(e, ast.ColumnRef):
-            return self.origin_of(e)
-        if isinstance(e, ast.WindowCall):
-            # Windows see one row per group (they run after GROUP BY), so the
-            # windowed expression keeps its kind on the argument origins while
-            # recording that a window produced them.
-            kind = "windowed"
-            out: list[Origin] = []
-            for a in e.args:
-                out.extend(self._origin_of_expr(a))
-            for p in e.over.partition_by:
-                out.extend(self._origin_of_expr(p))
-            for k, _desc in e.over.sort:
-                out.extend(self._origin_of_expr(k))
-            if not out:
-                out = [Origin(self.tm.name, f"<{e.name}>", "windowed")]
-            return [Origin(o.node, o.col, kind) for o in out]
-        if isinstance(e, ast.Call):
-            kind = "aggregated" if e.name in AGGREGATES else "derived"
-            out: list[Origin] = []
-            for a in e.args:
-                out.extend(self._origin_of_expr(a))
-            if not out:
-                out = [Origin(self.tm.name, f"<{e.name}>", "derived")]
-            return [Origin(o.node, o.col, kind) for o in out]
-        if isinstance(e, ast.Kwarg):
-            # Keyword argument (date unit): lineage follows the value; the
-            # unit name itself is compile-time vocabulary, not data.
-            return self._origin_of_expr(e.value)
-        if isinstance(e, ast.BinOp):
-            return self._origin_of_expr(e.left) + self._origin_of_expr(e.right)
-        if isinstance(e, ast.UnOp):
-            return self._origin_of_expr(e.operand)
-        return []
-
-    def do_group(self, s: ast.GroupStmt) -> None:
-        """Register group keys, infer the grouped body and record planned group expressions."""
-        self.in_group = True
-        for k in s.keys:
-            self._require_no_window(k, s.span, "group keys")
-            inf = self.infer(k)
-            if isinstance(k, ast.ColumnRef):
-                name = k.name
-            else:
-                name = f"g{len(self.group_keys)}"
-            self.group_keys.add(name)
-            self.outputs.append(PlanOut(name=name, expr=k, group_key=True))
-            self.cols[name] = Col(name=name, t=inf.t, nullable=inf.nullable)
-            if isinstance(k, ast.ColumnRef):
-                self.origins[name] = [Origin(o.node, o.col, "grouped")
-                                      for o in self._origin_of_expr(k)]
-            else:
-                self.origins[name] = [Origin(self.tm.name, name, "grouped")]
-            self.tm.plan.group_exprs.append(k)
-        for b in s.body:
-            self.stmt(b)
-        self.state.in_group = False
-
-
-# ------------------------------------------------------------------ set operations
 
 class SetOpManager:
     """Handles set operation (union/intersect/except) processing.

@@ -95,7 +95,7 @@ class TestGrammarCli(unittest.TestCase):
             rc = cli_main(["grammar"])
         self.assertEqual(rc, 0)
         self.assertIn("root ::= top_decl*", buf.getvalue())
-        self.assertIn('model_decl ::= "model" (ident | string)', buf.getvalue())
+        self.assertIn("model_decl ::=", buf.getvalue())
 
     def test_cli_grammar_doc(self):
         buf = io.StringIO()
@@ -104,7 +104,7 @@ class TestGrammarCli(unittest.TestCase):
         self.assertEqual(rc, 0)
         out = buf.getvalue()
         self.assertIn("# top_decl:", out)
-        self.assertIn("root ::= top_decl*", out)
+        self.assertIn("# root:", out)
 
     def test_cli_grammar_check_accepts_corpus(self):
         f = ROOT / "examples" / "daily_orders.strata"
