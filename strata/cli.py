@@ -124,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--metrics-format", default=None,
                    choices=["prometheus", "statsd", "json"],
                    help="export metrics after run in specified format (prometheus|statsd|json)")
+    p.add_argument("--metrics-file", default=None,
+                   help="write metrics to file instead of stdout")
     p.set_defaults(fn=execute.cmd_run)
 
     p = sub.add_parser("bench", help="golden-file artifacts: supervision + regression")

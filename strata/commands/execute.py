@@ -127,6 +127,7 @@ def cmd_run(args: Any) -> int:
         con.close()
     # Export metrics if requested
     metrics_format = getattr(args, "metrics_format", None)
+    metrics_file = getattr(args, "metrics_file", None)
     if metrics_format:
         from ..observability import (
             MetricsCollector,
@@ -145,9 +146,19 @@ def cmd_run(args: Any) -> int:
             else:
                 print(f"error: unknown metrics format {metrics_format}", file=sys.stderr)
                 return 1
-            print(exporter.export())
+            output = exporter.export()
+            if metrics_file:
+                with open(metrics_file, "w") as f:
+                    f.write(output)
+            else:
+                print(output)
         else:
-            print("(no metrics collected)")
+            msg = "(no metrics collected)"
+            if metrics_file:
+                with open(metrics_file, "w") as f:
+                    f.write(msg)
+            else:
+                print(msg)
     return 0
 
 
