@@ -856,7 +856,22 @@ class ModelState:
         return col
 
     def origin_of(self, e: ast.ColumnRef) -> list[Origin]:
-        return list(self.origins.get(e.name, []))
+        """Lineage [Origin] entries backing a column reference.
+
+        Qualified refs resolve against the registered inputs (the ``from``
+        input is a passthrough, later joins are joined, set-op right models
+        are set); unqualified refs use the recorded ``origins`` map and fall
+        back to a derived placeholder owned by this model.
+        """
+        if e.qualifier:
+            for i, inp in enumerate(self.inputs):
+                if inp.alias == e.qualifier:
+                    if i == 0:
+                        return [Origin(inp.node, e.name, "passthrough")]
+                    return [Origin(inp.node, e.name, "joined")]
+            if e.qualifier in self.setop_right:
+                return [Origin(self.setop_right[e.qualifier], e.name, "set")]
+        return list(self.origins.get(e.name, [Origin(self.tm.name, e.name, "derived")]))
 
     def origin_of_expr(self, e: ast.Node) -> list[Origin]:
         # For non-ColumnRef expressions, collect origins from all referenced columns.

@@ -43,8 +43,18 @@ class RunResult:
     run_entry: dict | None = None
 
     def __iter__(self):
-        """Backward compatibility: allow tuple unpacking."""
-        return iter((self.applied, self.pins, self.note))
+        """Backward compatibility: allow tuple unpacking.
+
+        The legacy 3rd element is whatever the old API returned there: the
+        note string for `run()`, the original record dict for `execute_run()`
+        (which stores it in `run_entry` and leaves `note=None`), or `None`.
+        """
+        return iter((self.applied, self.pins,
+                     self.note if self.note is not None else self.run_entry))
+
+    def __getitem__(self, idx):
+        """Backward compatibility: legacy callers index the result (`res[0]`)."""
+        return tuple(self)[idx]
 
 
 def _canonical_module_path(module_path: str, require_exists: bool = True) -> Path:
@@ -1763,7 +1773,8 @@ def _run_locked(con: Any, project: Project, tms: dict[str, TypedModel], module_p
         if not names:
             elapsed = (datetime.datetime.now() - start).total_seconds() * 1000
             get_metrics().record_materialization("unknown", elapsed, 0)
-            return [], [], "everything up to date (nothing to do)"
+            return RunResult(applied=[], pins=[],
+                             note="everything up to date (nothing to do)")
 
     # Build run entry
     entry = _build_run_entry(

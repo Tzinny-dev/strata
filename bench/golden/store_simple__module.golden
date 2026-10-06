@@ -3,7 +3,7 @@ model customer_revenue -> contract OrderRevenue
   fingerprint  41aecf4a9a798e5e
   outputs      customer_id: int64 nonnull, country: string nonnull, revenue: money(USD) nonnull, orders: int64 nonnull
   lineage customer_id <- orders.customer_id [grouped]
-  lineage country <- 
+  lineage country <- customers.country [grouped]
   lineage revenue <- orders.gross_usd [aggregated]
   lineage orders <- orders.order_id [aggregated]
   reads        [('customer_revenue', 'country'), ('customers', 'country'), ('customers', 'customer_id'), ('orders', 'customer_id'), ('orders', 'gross_usd'), ('orders', 'order_id')]

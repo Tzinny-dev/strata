@@ -59,5 +59,10 @@
       "model": "customers"
     }
   ],
-  "radius": []
+  "radius": [
+    [
+      "customer_revenue",
+      "country"
+    ]
+  ]
 }
