@@ -14,7 +14,6 @@ import os
 import shutil
 import subprocess
 import time
-from pathlib import Path
 from typing import Optional
 
 from strata.adapters import get_adapter

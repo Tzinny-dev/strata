@@ -19,7 +19,7 @@ def cmd_run(args: Any) -> int:
     proj = load(args.file, search_dirs=search or None)
     tms = check(proj)
     try:
-        dialect_obj = get_dialect(getattr(args, "dialect", "duckdb"))
+        get_dialect(getattr(args, "dialect", "duckdb"))
     except ValueError as ve:
         print(str(ve), file=sys.stderr)
         return 4
@@ -31,7 +31,6 @@ def cmd_run(args: Any) -> int:
             for iss in issues:
                 print(f"error: E070: {dialect_name}: model {name}: {iss}", file=sys.stderr)
         return 4
-    dialect = dialect_obj
     pipeline = proj.pipeline_by_name(getattr(args, "pipeline", None))
     wanted = proj.model_names_for(pipeline, include_generated=True) if pipeline else None
     overrides = proj.pipeline_sources(pipeline.name if pipeline else None)
@@ -130,7 +129,6 @@ def cmd_run(args: Any) -> int:
     metrics_file = getattr(args, "metrics_file", None)
     if metrics_format:
         from ..observability import (
-            MetricsCollector,
             PrometheusExporter,
             StatsDExporter,
             JsonExporter,
@@ -327,7 +325,7 @@ def cmd_backfill(args: Any) -> int:
 def cmd_seed(args: Any) -> int:
     """`strata seed <file>`: load demo source fixtures into a warehouse."""
     proj = load(args.file)
-    tms = check(proj)
+    check(proj)
     try:
         con = open_warehouse(getattr(args, "output", None))
     except RuntimeError as e:

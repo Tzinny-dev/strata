@@ -1,6 +1,5 @@
 # -- dialects -------------------------------------------------
 import unittest
-from pathlib import Path
 
 from strata.dialects import get_dialect, DUCKDB, BIGQUERY, SNOWFLAKE
 

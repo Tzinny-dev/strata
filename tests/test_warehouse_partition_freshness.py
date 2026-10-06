@@ -13,7 +13,7 @@ from pathlib import Path
 import duckdb
 
 from strata.analysis import Checker, Project
-from strata.exec import materialize, PinError
+from strata.exec import materialize
 from strata.parser import parse_strata
 from strata import sqlgen
 

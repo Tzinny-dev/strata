@@ -1,11 +1,9 @@
 """Minimal LSP server: diagnostics, hover, completion, definition."""
-import sys
 import unittest
 from pathlib import Path
-import tempfile, os
 
 from strata.lsp import (LSPServer, LSPContext, diag_from_error,
-                        Diagnostic, Range, Position, SEVERITY_ERROR)
+                        SEVERITY_ERROR)
 from strata.parser import ParseError
 from strata.lexer import LexError
 from strata.analysis import err

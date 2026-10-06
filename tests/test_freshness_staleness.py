@@ -16,9 +16,7 @@ import duckdb
 
 from strata.analysis import Checker, Project
 from strata.exec import (
-    materialize,
     compute_stale,
-    parse_freshness_threshold,
     CUSTOM_FRESHNESS_MARKER,
 )
 from strata.dialects import DUCKDB
@@ -95,7 +93,7 @@ class TestCustomFreshnessEvaluation(unittest.TestCase):
                     f.write(json.dumps(entry) + "\n")
 
         # Now compute staleness - custom expression should be evaluated
-        stale = compute_stale(con, proj.typed, d + "/m.strata", ["m"], "main", None, proj, DUCKDB)
+        compute_stale(con, proj.typed, d + "/m.strata", ["m"], "main", None, proj, DUCKDB)
         # The custom expression "now() - interval '1 day'" returns a timestamp
         # Since data is from 2024 and now is 2026, it should be stale
         # (Note: actual result depends on DuckDB's now() at test runtime)
@@ -117,7 +115,7 @@ class TestCustomFreshnessEvaluation(unittest.TestCase):
         }, committed_at="2024-01-01T00:00:00")
         self.addCleanup(con.close)
 
-        stale = compute_stale(con, proj.typed, d + "/m.strata", ["m"], "main", None, proj, DUCKDB)
+        compute_stale(con, proj.typed, d + "/m.strata", ["m"], "main", None, proj, DUCKDB)
         # Should not crash
 
 

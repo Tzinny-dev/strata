@@ -108,7 +108,6 @@ def test_fail_loud_when_extension_unavailable(tmp_path):
 
     def _no_iceberg_exec(sql: str, *a, **k):
         raise duckdb.Error("binder error: extension 'iceberg' not found")
-    con = duckdb.connect(":memory:")
 
     class _Broken:
         def execute(self, sql, *a, **k):
@@ -295,7 +294,7 @@ def test_cmd_catalog_run_shows_row_counts(tmp_path, capsys, monkeypatch):
 
 
 def test_cmd_catalog_run_via_pyiceberg(tmp_path, capsys, monkeypatch):
-    px = pytest.importorskip("pyiceberg.table")
+    pytest.importorskip("pyiceberg.table")
     from strata.cli import main
     catalog = tmp_path / "lakehouse"
     entry, manifest, con = _run_full(tmp_path, catalog)

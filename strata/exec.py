@@ -1124,8 +1124,6 @@ def run_tests(con: Any, project: Project, tms: dict[str, TypedModel],
                         f"(got {got})"
                     )
                 else:
-                    col = tm.schema[check.col]
-                    # SELECT count(*) WHERE NOT (col op lit) — nonzero means violation
                     sql = (
                         f"SELECT count(*) FROM {view} "
                         f"WHERE NOT ({check.col} {check.op} "

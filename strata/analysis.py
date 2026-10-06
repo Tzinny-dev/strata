@@ -1401,7 +1401,7 @@ class StatementProcessor:
                     out.append(k)
             return out
 
-        left_keys = ordered([l for l, _ in true_pairs])
+        left_keys = ordered([k for k, _ in true_pairs])
         right_keys = ordered([r for _, r in true_pairs] + right_only)
         if not right_keys:
             raise self._err("E079", f"expect {s.expect} needs at least one equi-join key "

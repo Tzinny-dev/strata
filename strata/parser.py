@@ -1020,8 +1020,8 @@ class Parser:
                 while not self.at("SYM", "}"):
                     src = self.expect("ID").value
                     if self.at("SYM", ":"):
-                        self.advance()
-                        fn = self.advance().value  # 'from'
+                        self.advance()      # consume ':'
+                        self.advance()      # consume 'from'
                         self.expect("SYM", "(")
                         kv = {}
                         while not self.at("SYM", ")"):

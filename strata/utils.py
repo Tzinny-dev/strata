@@ -8,10 +8,9 @@ from strata import analysis
 from strata.analysis import (
     Checker,
     Project,
-    StrataError,
     TypedModel,
 )
-from strata.dialects import get_dialect
+from strata.dialects import get_dialect as get_dialect  # re-export: commands import it here
 from strata.parser import parse_strata
 
 

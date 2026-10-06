@@ -4,7 +4,6 @@ that must pass `build`, else fail-loud §4. Gate: a dbt model with `select *`
 and no columns contract cannot be imported (E041 fail-loud) — the untyped
 consumer would never be caught by the warehouse (spec §11)."""
 import io
-import sys
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path

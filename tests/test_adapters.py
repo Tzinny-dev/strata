@@ -1,8 +1,7 @@
 """Warehouse adapters: abstract interface and DuckDB implementation."""
 import unittest
 
-from strata.adapters import (get_adapter, DuckDBWarehouse,
-                              AdapterNotAvailable, Warehouse)
+from strata.adapters import (get_adapter, AdapterNotAvailable)
 
 
 class TestAdapterNotAvailable(unittest.TestCase):

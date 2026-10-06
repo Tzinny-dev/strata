@@ -79,7 +79,6 @@ class TestBigQueryLiveE2E(unittest.TestCase):
         self._run_with_bq(self._test_impl)
 
     def _test_impl(self, con):
-        import time
 
         # Create source tables and insert test data
         project_dataset = f"`{self.project}.{self.dataset}`"

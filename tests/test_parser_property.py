@@ -215,7 +215,7 @@ class TestParserNeverCrashes:
     @given(full_module_strategy())
     def test_generated_valid_module_parses(self, text: str):
         """Generated valid-looking modules should parse (or fail with proper errors)."""
-        result = _parse_safe(text)
+        _parse_safe(text)
         # We accept either parsing success or proper error
         # The strategies may generate invalid combinations
 
@@ -247,7 +247,7 @@ class TestParserRoundtrip:
         # Compare key structural properties
         assert len(mod1.decls) == len(mod2.decls), f"Decl count mismatch: {len(mod1.decls)} vs {len(mod2.decls)}"
         for d1, d2 in zip(mod1.decls, mod2.decls):
-            assert type(d1) == type(d2), f"Decl type mismatch: {type(d1)} vs {type(d2)}"
+            assert type(d1) is type(d2), f"Decl type mismatch: {type(d1)} vs {type(d2)}"
 
 
 class TestLexerParserIntegration:
@@ -281,7 +281,7 @@ class TestEdgeCases:
         for _ in range(depth):
             expr = f"({expr} + 1)"
         text = f"model m {{ from s\nlet x = {expr}\n}}"
-        result = _parse_safe(text)
+        _parse_safe(text)
         # Deep nesting might hit recursion limit, that's OK
         # but shouldn't cause other crashes
 

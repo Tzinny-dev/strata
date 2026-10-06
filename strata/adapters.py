@@ -20,7 +20,7 @@ from __future__ import annotations
 import abc
 from typing import Any
 
-from .dialects import BIGQUERY, SNOWFLAKE, Dialect, get_dialect
+from .dialects import BIGQUERY, SNOWFLAKE, Dialect
 
 
 __all__ = [

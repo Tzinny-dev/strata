@@ -8,7 +8,6 @@ query — the same philosophy as the 3-phase pins.
 """
 from __future__ import annotations
 
-import datetime
 from typing import Optional, Tuple
 
 from . import ast, functions

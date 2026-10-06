@@ -83,7 +83,8 @@ class TestExec(unittest.TestCase):
         from strata.cli import cmd_graph
         from types import SimpleNamespace
         for fmt in ("dot", "mermaid", "text"):
-            import io, contextlib
+            import io
+            import contextlib
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 rc = cmd_graph(SimpleNamespace(file=path, model=[], format=fmt, search_dir=None))
@@ -385,7 +386,8 @@ class TestFmtLintReplayRollback(unittest.TestCase):
     def test_lint_warns(self):
         from strata.cli import cmd_lint
         from types import SimpleNamespace
-        import io, contextlib
+        import io
+        import contextlib
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rc = cmd_lint(SimpleNamespace(file=str(EX / "daily_orders.strata"),
@@ -436,7 +438,8 @@ class TestFmtLintReplayRollback(unittest.TestCase):
         from strata import exec as ex
         from strata.cli import cmd_replay
         from types import SimpleNamespace
-        import io, contextlib
+        import io
+        import contextlib
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / "h.strata"
             src.write_text((EX / "daily_orders.strata").read_text())
@@ -466,7 +469,8 @@ class TestFmtLintReplayRollback(unittest.TestCase):
         from strata import exec as ex
         from strata.cli import cmd_replay
         from types import SimpleNamespace
-        import io, contextlib
+        import io
+        import contextlib
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / "h.strata"
             src.write_text((EX / "daily_orders.strata").read_text())
@@ -495,7 +499,8 @@ class TestFmtLintReplayRollback(unittest.TestCase):
         """Test `strata replay` fails with unknown run_id."""
         from strata.cli import cmd_replay
         from types import SimpleNamespace
-        import io, contextlib
+        import io
+        import contextlib
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / "h.strata"
             src.write_text((EX / "daily_orders.strata").read_text())
@@ -507,16 +512,16 @@ class TestFmtLintReplayRollback(unittest.TestCase):
                                                 output=None, search_dir=None,
                                                 iceberg_dir=None, verify_reader="duckdb"))
             self.assertEqual(rc, 1)
-            out = buf.getvalue()
             self.assertIn("unknown run", err.getvalue())
 
     def test_backfill_subcommand(self):
         """Test `strata backfill` re-runs a past run against current sources."""
         import duckdb
         from strata import exec as ex
-        from strata.cli import cmd_backfill, cmd_replay
+        from strata.cli import cmd_backfill
         from types import SimpleNamespace
-        import io, contextlib
+        import io
+        import contextlib
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / "h.strata"
             src.write_text((EX / "daily_orders.strata").read_text())
@@ -563,7 +568,8 @@ class TestFmtLintReplayRollback(unittest.TestCase):
         from strata import exec as ex
         from strata.cli import cmd_catalog
         from types import SimpleNamespace
-        import io, contextlib
+        import io
+        import contextlib
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / "h.strata"
             src.write_text((EX / "daily_orders.strata").read_text())

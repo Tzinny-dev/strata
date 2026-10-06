@@ -435,7 +435,6 @@ def _check_struct_operation(fn: Fn, args: list[Inf]) -> tuple[str, str] | None:
     if len(args) % 2 != 0:
         return (E_ARITY, f"{fn.name}() requires name/value pairs (even argument count)")
     names = args[0::2]
-    vals = args[1::2]
     for n in names:
         if n.t.name != "string":
             return E_ARG_TYPE, f"{fn.name}() field names must be string literals"

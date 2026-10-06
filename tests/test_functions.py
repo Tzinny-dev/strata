@@ -547,7 +547,6 @@ class TestMapCodegenByDialect(unittest.TestCase):
     """Cross-dialect SQL emission for map()/dict() and map_get()."""
 
     def assert_sql_contains(self, body, dialect, expected_frag):
-        tm = model(body)
         sql = sql_of(body, dialect=dialect)
         self.assertIn(expected_frag, sql, f"dialect {dialect.name}: missing {expected_frag!r}")
 

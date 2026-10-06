@@ -240,8 +240,6 @@ def run() -> None:
     """Run the LSP server loop on stdin/stdout."""
     ctx = LSPContext()
     server = LSPServer(ctx)
-    req_id = 0
-    initialized = False
 
     def send(method: str, params: dict[str, Any] = {}, id: int | None = None) -> None:
         msg = {"jsonrpc": "2.0", "method": method, "params": params}
@@ -267,7 +265,6 @@ def run() -> None:
         params = msg.get("params", {})
 
         if method == "initialize":
-            initialized = True
             send("initialized", {})
             reply(pid, {"capabilities": server.capabilities})
         elif method == "textDocument/didOpen":

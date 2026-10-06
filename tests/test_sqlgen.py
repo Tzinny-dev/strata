@@ -9,7 +9,6 @@ from strata.parser import parse_strata
 from strata import sqlgen
 from strata.dialects import DUCKDB, BIGQUERY, SNOWFLAKE
 from strata.dialects import get_dialect
-from strata.analysis import StrataError
 
 EX = Path(__file__).parent.parent / "examples"
 
