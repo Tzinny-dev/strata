@@ -70,7 +70,7 @@ STR_GBNF = r'"\"" ( [^"\\] | "\\" ( ["\\nt] ) )* "\""'
 # bare identifiers are rule refs, double-quoted strings are terminals, and
 # `::` is an ignorable separator token (stripped at emit time)
 # ---------------------------------------------------------------------------
-RULES: dict[str, object] = {}
+RULES: dict[str, tuple[str, list[str]]] = {}
 
 RULES["root"] = ("a .strata module: { top_decl }", ["top-decl*"])
 

@@ -61,6 +61,8 @@ def _col_changes(name: str, b: dict, h: dict) -> list[ColChange]:
     for cname in sorted(set(b) | set(h)):
         cb, ch = b.get(cname), h.get(cname)
         if cb is None:
+            if ch is None:
+                continue
             nn = "" if ch.nullable else " nonnull"
             cols.append(ColChange(name, cname, "added",
                                   f"new column {cname}: {ch.t}{nn}", False))
@@ -92,11 +94,13 @@ def diff_tms(base: dict[str, TypedModel],
     out: list[ModelChange] = []
     for name in sorted(set(base) | set(head)):
         b, h = base.get(name), head.get(name)
+        if h is None:
+            if b is None:
+                continue
+            out.append(ModelChange(name, "removed", fingerprint_old=b.fingerprint))
+            continue
         if b is None:
             out.append(ModelChange(name, "added", fingerprint_new=h.fingerprint))
-            continue
-        if h is None:
-            out.append(ModelChange(name, "removed", fingerprint_old=b.fingerprint))
             continue
         cols = _col_changes(name, b.schema, h.schema)
         if cols:

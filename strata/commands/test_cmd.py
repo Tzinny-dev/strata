@@ -40,7 +40,8 @@ def cmd_test(args: Any) -> int:
         return 2
     if getattr(args, "seed", False):
         _run_seed(con, args.file)
-    tested_models = [getattr(args, "model", None)] if getattr(args, "model", None) else None
+    model_arg = getattr(args, "model", None)
+    tested_models: list[str] | None = [str(model_arg)] if model_arg else None
     exec_mod.materialize(con, proj, tms, names=tested_models, dialect=dialect,
                          source_overrides=None, stage_only=False, branch="main")
     try:

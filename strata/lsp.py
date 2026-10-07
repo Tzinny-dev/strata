@@ -175,7 +175,7 @@ class LSPServer:
         # Column names from current model's schema
         model = self._find_model_at(line, col)
         if model and model[0] in self.ctx.models:
-            tm = self.models[model[0]]
+            tm = self.ctx.models[model[0]]
             if hasattr(tm, "schema"):
                 for cname in tm.schema:
                     items.append({"label": cname, "kind": 6,
@@ -242,7 +242,7 @@ def run() -> None:
     server = LSPServer(ctx)
 
     def send(method: str, params: dict[str, Any] = {}, id: int | None = None) -> None:
-        msg = {"jsonrpc": "2.0", "method": method, "params": params}
+        msg: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "params": params}
         if id is not None:
             msg["id"] = id
         sys.stdout.write(json.dumps(msg) + "\n")

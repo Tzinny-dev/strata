@@ -228,7 +228,7 @@ class SelectStmt(Stmt):
 class SourceDecl(Node):
     name: str = ""
     resource: dict[str, str] = field(default_factory=dict)
-    props: list[tuple[str, str]] = field(default_factory=list)
+    props: list[tuple[str, str | list[ContractField]]] = field(default_factory=list)
 
 
 @dataclass

@@ -620,7 +620,7 @@ FUNCTIONS: list[Fn] = [
                             "strings, values homogeneous and JSON-representable"),
     Fn("dict", 2, lambda a: Inf(_map_constructed_type(a), False),
        collection=True, doc="alias of map(): typed map<string, V> from key/value pairs"),
-    Fn("map_get", 2, lambda a: Inf(a[0].t.value, True),
+    Fn("map_get", 2, lambda a: Inf(a[0].t.value or UNKNOWN, True),
        max_args=2, collection=True, arg_kinds=("map", "string"),
        doc="value for the exact-key lookup; NULL when the key is absent or the "
            "map/key is NULL"),
@@ -678,7 +678,7 @@ FUNCTIONS: list[Fn] = [
     Fn("array_length", 1, lambda a: Inf(INT64, a[0].nullable), max_args=1,
        kind="array", collection=True,
        doc="number of elements, including NULL elements; empty array is zero"),
-    Fn("array_get", 2, lambda a: Inf(a[0].t.elem, True), max_args=2,
+    Fn("array_get", 2, lambda a: Inf(a[0].t.elem or UNKNOWN, True), max_args=2,
        arg_kinds=("array", "int"), collection=True,
        doc="zero-based element access; NULL, negative and out-of-range indices return NULL"),
     Fn("date_add", 2, lambda a: Inf(a[0].t, any(i.nullable for i in a)), max_args=2, kind="temporal",
@@ -735,7 +735,7 @@ def is_windowable(name: str) -> bool:
     through windowed models, never stacked inside one output.
     """
     fn = get(name)
-    return bool(fn) and fn.window
+    return fn is not None and fn.window
 
 
 def get(name: str) -> Fn | None:
@@ -778,7 +778,7 @@ def emit_sql(name: str, args_sql: str, dialect: Dialect | None = None) -> str:
                 return "SPLIT(" + args_sql + ")"
             return "SPLIT_PART(" + args_sql + ")"
         spelling = dialect.function_map.get(name)
-    if spelling is not None and spelling.endswith("_UNAVAILABLE"):
+    if spelling is not None and dialect is not None and spelling.endswith("_UNAVAILABLE"):
         raise RuntimeError(
             f"dialect {dialect.name!r} cannot express function {name}()"
             f" (rewrite the model with expressible calls)")

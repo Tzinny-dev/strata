@@ -25,7 +25,7 @@ def _type_param(p: object) -> str:
     # Array element params: bare names stay bare; parameterized or nested
     # elements are (spec, subparams) tuples rendered recursively.
     if not isinstance(p, tuple):
-        return p
+        return str(p)
     spec, sub = p
     if spec == "array":
         return f"array({_type_param(sub[0])})"
@@ -110,9 +110,9 @@ def _expr(e: ast.Node) -> str:
     if isinstance(e, ast.TemplateStr):
         parts = []
         for kind, value in e.parts:
-            if kind == "lit":
+            if kind == "lit" and value is not None:
                 parts.append(_q(value)[1:-1])
-            elif kind == "var":
+            elif kind == "var" and value is not None:
                 parts.append("${" + value + "}")
             else:
                 raise ValueError(f"unsupported template part: {kind!r}")
@@ -189,8 +189,8 @@ def format_module(mod: ast.Module) -> str:
             for k, v in d.props:
                 if k == "columns":
                     out.append("  columns: {")
-                    for f in v:
-                        out.append(f"    {_field(f)},")
+                    for field in v if isinstance(v, list) else []:
+                        out.append(f"    {_field(field)},")
                     out.append("  }")
                 elif isinstance(v, str):
                     out.append(f"  {k}: {_q(v)}")

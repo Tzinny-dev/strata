@@ -217,7 +217,7 @@ def verify_catalog_run(con: Any, catalog_dir: Path, run_id: str) -> dict[str, An
     module side stays in `exec.verify_run` (CLI chains both).
     """
     mf = _require_run(catalog_dir, run_id)
-    out = {"run_id": run_id, "models": {}, "rows": {}}
+    out: dict[str, Any] = {"run_id": run_id, "models": {}, "rows": {}}
     for model, rel in sorted(mf["runs"][run_id].items()):
         tbl = _validate_rel(rel, catalog_dir)
         if not (tbl / "metadata").exists():
@@ -265,7 +265,7 @@ def verify_catalog_run_pyiceberg(catalog_dir: Path, run_id: str,
     """
     StaticTable = engine_cls or ensure_pyiceberg()
     mf = _require_run(catalog_dir, run_id)
-    out = {"run_id": run_id, "models": {}, "rows": {}}
+    out: dict[str, Any] = {"run_id": run_id, "models": {}, "rows": {}}
     for model, rel in sorted(mf["runs"][run_id].items()):
         tbl = _validate_rel(rel, catalog_dir)
         metas = sorted((tbl / "metadata").glob("*.metadata.json"))
@@ -355,7 +355,7 @@ def gc_catalog(catalog_dir: Path, keep: int = 2, keep_days: float | None = None,
         "drop_dirs": drop_dirs,
         "applied": False,
     }
-    if apply and drop_runs:
+    if apply and drop_runs and default is not None:
         for rid in drop_runs:
             shutil.rmtree(_validate_rel(f"runs/{rid}/_", catalog_dir).parent, ignore_errors=True)
             runs.pop(rid, None)

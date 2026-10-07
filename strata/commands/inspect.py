@@ -31,8 +31,12 @@ def render_graph(tms: dict[str, TypedModel], names: list[str], fmt: str = "dot")
                     selected.add(d)
                     frontier.append(d)
     models = sorted(selected)
-    sources = sorted({inp.node for n in models
-                      for inp in tms[n].plan.inputs if inp.is_source})
+    plan_sources: list[Any] = []
+    for n in models:
+        plan = tms[n].plan
+        if plan is not None:
+            plan_sources.extend(plan.inputs)
+    sources = sorted({inp.node for inp in plan_sources if inp.is_source})
     deps = sorted({(d, n) for n in models for d in tms[n].deps
                    if d in tms and d in selected})
     reads = sorted({(s, n) for n in models for (s, _c) in tms[n].reads
@@ -94,11 +98,11 @@ def _fail_loud_contracts(proj: Project, tms: dict[str, TypedModel],
         return None
     consumed = sorted(radius)
     print("\nE030: change to protected/consumed column(s) breaks consumer contract:")
-    for n, c in breaking:
-        print(f"  producer {n}.{c} (protected/contract-bound)")
+    for node2, cname in breaking:
+        print(f"  producer {node2}.{cname} (protected/contract-bound)")
     print(f"  -> {len(consumed)} consumer column(s) depend on it:")
-    for n, c in consumed:
-        print(f"    {n}.{c}")
+    for node2, cname in consumed:
+        print(f"    {node2}.{cname}")
     print("  producer PR must NOT ship this change (cross-team contract, E030-32)")
     return breaking
 

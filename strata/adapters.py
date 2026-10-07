@@ -324,9 +324,10 @@ class BigQueryWarehouse(Warehouse):
     def list_views(self) -> list[str]:
         try:
             dataset_ident = self.dialect.ident(self.dataset)
-            return list(self._conn.execute(
+            rows = self._conn.execute(
                 f"SELECT table_name FROM `{dataset_ident}.INFORMATION_SCHEMA.VIEWS`"
-            ).fetchall())
+            ).fetchall()
+            return [r[0] for r in rows]
         except Exception:
             return []
 

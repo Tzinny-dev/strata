@@ -34,7 +34,7 @@ def cmd_run(args: Any) -> int:
     pipeline = proj.pipeline_by_name(getattr(args, "pipeline", None))
     wanted = proj.model_names_for(pipeline, include_generated=True) if pipeline else None
     overrides = proj.pipeline_sources(pipeline.name if pipeline else None)
-    if overrides:
+    if overrides and pipeline is not None:
         print(f"pipeline {pipeline.name!r} env={pipeline.env or '-'} "
               f"source overrides: {', '.join(f'{k}<-{v}' for k, v in sorted(overrides.items()))}")
     if not getattr(args, "output", None):
@@ -135,6 +135,7 @@ def cmd_run(args: Any) -> int:
         )
         collector = exec_mod.get_metrics()
         if collector is not None:
+            exporter: Any = None
             if metrics_format == "prometheus":
                 exporter = PrometheusExporter(collector)
             elif metrics_format == "statsd":
@@ -210,8 +211,8 @@ def cmd_replay(args: Any) -> int:
         tms = check(proj)
         try:
             con = open_warehouse(getattr(args, "output", None))
-        except RuntimeError as e:
-            print(f"error: {e}", file=sys.stderr)
+        except RuntimeError as ex:
+            print(f"error: {ex}", file=sys.stderr)
             return 2
         if getattr(args, "seed", False):
             _run_seed(con, args.file)
@@ -235,24 +236,24 @@ def cmd_replay(args: Any) -> int:
         return 0
     hist = exec_mod.load_history(args.file)
     if args.run_id:
-        e = exec_mod.find_run(args.file, args.run_id)
-        if e is None:
+        entry = exec_mod.find_run(args.file, args.run_id)
+        if entry is None:
             print(f"error: E080: unknown run {args.run_id!r} ({len(hist)} in history)", file=sys.stderr)
             return 1
-        print(f"run {e['run_id']} at {e.get('at', '?')}")
-        print(f"  applied      {', '.join(e.get('applied', [])) or '-'}")
-        print(f"  fingerprints {e.get('fingerprints', {})}")
-        print(f"  pins         {len(e.get('pins', []))} pin report lines")
-        if e.get("backfill_of"):
-            print(f"  backfill_of  {e['backfill_of']}")
-        if e.get("reason"):
-            print(f"  reason       {e['reason']}")
+        print(f"run {entry['run_id']} at {entry.get('at', '?')}")
+        print(f"  applied      {', '.join(entry.get('applied', [])) or '-'}")
+        print(f"  fingerprints {entry.get('fingerprints', {})}")
+        print(f"  pins         {len(entry.get('pins', []))} pin report lines")
+        if entry.get("backfill_of"):
+            print(f"  backfill_of  {entry['backfill_of']}")
+        if entry.get("reason"):
+            print(f"  reason       {entry['reason']}")
         return 0
     if not hist:
         print("no runs recorded (run strata run first)")
         return 0
-    for e in hist[-int(args.last):]:
-        print(f"{e['run_id']}  {e.get('at', '?')}  applied={','.join(e.get('applied', [])) or '-'}")
+    for entry in hist[-int(args.last):]:
+        print(f"{entry['run_id']}  {entry.get('at', '?')}  applied={','.join(entry.get('applied', [])) or '-'}")
     return 0
 
 

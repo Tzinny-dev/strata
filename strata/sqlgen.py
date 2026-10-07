@@ -985,7 +985,7 @@ def model_sql(tm: TypedModel, dialect: Dialect = DUCKDB,
     return f"-- model {tm.name}" + (f" -> contract {tm.contract}" if tm.contract else "") + "\nWITH " + ctes + "\n" + outer + "\n"
 
 
-def full_sql(tms: list[TypedModel], names: list[str], dialect: Dialect = DUCKDB,
+def full_sql(tms: dict[str, TypedModel], names: list[str], dialect: Dialect = DUCKDB,
              view_prefix: str = "v_", upstream_prefix: str = "v_") -> str:
     """One CREATE-statement string per model in `names`, in given order."""
     # One statement per view: `materialize` executes them sequentially in

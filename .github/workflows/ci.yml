@@ -38,10 +38,12 @@ jobs:
         run: |
           ruff check strata/ tests/
 
-      - name: Run mypy type check (non-blocking)
-        continue-on-error: true
+      - name: Run mypy type check (blocking)
+        # Scoped gate: mypy.ini `files=` lists the type-checked subset (the
+        # dynamically-typed AST pipeline parser/lexer/ast/types/grammar/gbnf
+        # and its consumers analysis/exec/sqlgen are excluded by design).
         run: |
-          mypy --config-file mypy.ini strata/ || true
+          mypy --config-file mypy.ini
 
       - name: Run tests with coverage gate (80%)
         # pyproject.toml already sets: --cov=strata --cov-fail-under=80

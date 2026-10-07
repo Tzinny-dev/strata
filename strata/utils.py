@@ -77,7 +77,7 @@ def open_warehouse(output: str | None, read_only: bool = False) -> Any:
         # Default to sslmode=verify-full for security (fail-loud if TLS not available)
         parsed = urlparse(output)
         qs = parse_qs(parsed.query)
-        connect_params = {}
+        connect_params: dict[str, str | int] = {}
         if parsed.username:
             connect_params["user"] = parsed.username
         if parsed.password:
@@ -87,7 +87,7 @@ def open_warehouse(output: str | None, read_only: bool = False) -> Any:
         if host:
             connect_params["host"] = host
         # Handle port: can be in port or in query string
-        port = parsed.port or qs.get("port", [None])[0]
+        port: str | int | None = parsed.port or qs.get("port", [None])[0]
         if port:
             connect_params["port"] = int(port) if isinstance(port, str) else port
         if parsed.path:
@@ -169,7 +169,7 @@ def open_warehouse(output: str | None, read_only: bool = False) -> Any:
             "duckdb not available; run with the venv interpreter "
             "(prototype/.venv/bin/python)")
     if read_only:
-        return duckdb.connect(output, read_only=True)
+        return duckdb.connect(output or ":memory:", read_only=True)
     return duckdb.connect(output or ":memory:")
 
 

@@ -9,6 +9,8 @@ artifacts, not by reading source)."""
 
 from __future__ import annotations
 
+from typing import Any
+
 from .analysis import Project, TypedModel, build_down_edges
 
 
@@ -22,7 +24,7 @@ def build_dashboard(proj: Project, tms: dict[str, TypedModel], path: str,
     manifest = manifest if manifest is not None else {}
     down = build_down_edges(tms)
 
-    models = []
+    models: list[dict[str, Any]] = []
     edges: list[list[str]] = []
     for name in sorted(tms):
         tm = tms[name]
@@ -55,7 +57,7 @@ def build_dashboard(proj: Project, tms: dict[str, TypedModel], path: str,
     for name in sorted(tms):
         tm = tms[name]
         cd = proj.contracts.get(tm.contract) if tm.contract else None
-        prot = ({f.name for f in (cd.fields if cd else []) if f.protected}
+        prot: set[str] = ({f.name for f in (cd.fields if cd else []) if f.protected}
                 | {c.name for c in tm.schema.values() if c.protected})
         for cname in sorted(prot):
             cons = sorted(f"{m}.{col}" for (m, col) in down.get((name, cname), []))
