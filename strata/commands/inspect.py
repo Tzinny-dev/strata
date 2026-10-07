@@ -192,6 +192,16 @@ def _semantic_diff(base_path: str, head_path: str,
     return 1 if brk else 0
 
 
+def cmd_diff(args: Any) -> int:
+    """`strata diff base.strata head.strata` -- column-level semantic diff
+    between two module versions (alias of `strata lineage-diff` with a
+    required second module; see _semantic_diff for the taxonomy and the
+    E030 breaking gate)."""
+    return _semantic_diff(args.file, args.head2,
+                          search_dir=getattr(args, "search_dir", None),
+                          json_mode=getattr(args, "json", False))
+
+
 def cmd_dashboard(args: Any) -> int:
     """`strata dashboard <file>`: one-screen supervision surface over a module."""
     from ..dashboard import build_dashboard, render

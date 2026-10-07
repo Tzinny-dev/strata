@@ -430,6 +430,53 @@ strata gc project.strata -o warehouse.duckdb --keep 7 --keep-days 30 --apply
 
 ---
 
+## `strata migrate` — Metadata Schema Upgrade
+
+```bash
+strata migrate <file.strata>
+```
+
+Validates and upgrades a module's metadata sidecars — the run history
+(`<module>.strata-history.jsonl`) and fingerprint manifest
+(`<module>.strata-manifest.json`) — to the current schema version (v1:
+versioned history records plus a `{"version": 1, "models": {...}}`
+manifest wrapper; legacy v0 flat files are upgraded in place).
+
+- Upgrades are **identity-preserving**: `schema_version` is excluded from
+  the content-addressed `run_id`, so stamping a legacy record never changes
+  what the run was (`strata replay`/`rollback` feel no difference).
+- **Fail-loud**: corrupt metadata aborts with `E097`; a sidecar written by a
+  *newer* build of strata aborts with `E098` (an older binary must not
+  reinterpret it) — nothing is rewritten on either failure.
+- Everyday readers (`strata run`, `replay`, `rollback`) stay **lenient**:
+  they accept both v0 and v1 sidecars, so `migrate` is an optional,
+  proactive housekeeping step, not a required gate.
+
+**Examples:**
+```bash
+# Report + upgrade legacy sidecars for a module
+strata migrate project.strata
+# module /path/project.strata
+#   run history : 12 record(s) @ schema v1 (12 upgraded)
+#   manifest    : schema v1 (upgraded)
+```
+
+---
+
+## `strata diff` — Column-Level Semantic Diff
+
+```bash
+strata diff <base.strata> <head.strata> [--json]
+```
+
+Column-level semantic diff between two module versions (alias of
+`strata lineage-diff base head`): reports added/removed/retyped/narrowed/
+widened columns per model, flags the breaking set, prints the downstream
+blast radius from the base lineage, and exits `1` (`E030`) when the change
+is breaking — `.json` for `--json`.
+
+---
+
 ## Exit Codes Summary
 
 | Code | Meaning |
@@ -448,6 +495,8 @@ strata gc project.strata -o warehouse.duckdb --keep 7 --keep-days 30 --apply
 - `strata check` — Validate artifact without materializing
 - `strata graph` — Emit module DAG (DOT/Mermaid/Text)
 - `strata lineage-diff` — Lineage + blast radius
+- `strata diff` — Column-level semantic diff between two module versions
+- `strata migrate` — Validate/upgrade run history + manifest schema version
 - `strata test` — Run declarative data tests
 - `strata plan` — Compute stale model set
 - `strata compile` — Emit SQL without executing

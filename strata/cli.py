@@ -1,6 +1,6 @@
 """strata -- command line interface.
 
-One binary: build / plan / graph / profile / compile / run / lineage-diff / bench / grammar / dashboard / init / seed / lsp.
+One binary: build / plan / graph / profile / compile / run / lineage-diff / diff / migrate / bench / grammar / dashboard / init / seed / lsp.
 """
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from .commands import (
     execute,
     grammar,
     inspect,
+    migrate,
     project,
     quality,
     test_cmd,
@@ -90,6 +91,16 @@ def main(argv: list[str] | None = None) -> int:
                    help="machine-readable diff (agent supervision artifact)")
     p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
     p.set_defaults(fn=inspect.cmd_lineage)
+
+    p = sub.add_parser("diff",
+                       help="column-level semantic diff between two module versions "
+                            "(breaking taxonomy, E030 gate; alias of lineage-diff base head)")
+    p.add_argument("file")
+    p.add_argument("head2", help="second module version to diff against")
+    p.add_argument("--json", action="store_true",
+                   help="machine-readable diff (agent supervision artifact)")
+    p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b")
+    p.set_defaults(fn=inspect.cmd_diff)
 
     # Execute commands
     p = sub.add_parser("run", help="materialize views (duckdb required)")
@@ -268,6 +279,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("lsp", help="Language Server Protocol (stdio JSON-RPC)")
     p.set_defaults(fn=test_cmd.cmd_lsp)
 
+    # Metadata commands
+    p = sub.add_parser("migrate",
+                       help="validate and upgrade the module's run history and "
+                            "fingerprint manifest to the current schema version")
+    p.add_argument("file")
+    p.set_defaults(fn=migrate.cmd_migrate)
+
     # Grammar command
     p = sub.add_parser("grammar", help="emit the Strata grammar as llama.cpp GBNF (constrained decoding)")
     p.add_argument("--doc", action="store_true",
@@ -302,7 +320,7 @@ if __name__ == "__main__":
 # Tests and external code may import: from strata.cli import cmd_build, cmd_run, etc.
 from .commands.build import cmd_build, cmd_compile, cmd_plan
 from .commands.inspect import (
-    cmd_graph, cmd_profile, cmd_dashboard, cmd_lineage,
+    cmd_graph, cmd_profile, cmd_dashboard, cmd_lineage, cmd_diff,
     _run_seed, _fail_loud_contracts, _semantic_diff,
     render_graph, _topo_order, render_profile,
 )
@@ -312,6 +330,7 @@ from .commands.project import cmd_init, cmd_import_dbt
 from .commands.warehouse import cmd_branches, cmd_rollback, cmd_gc, cmd_catalog
 from .commands.test_cmd import cmd_test, cmd_lsp
 from .commands.grammar import cmd_grammar
+from .commands.migrate import cmd_migrate
 from .utils import (
     _mask_dsn, _is_dsn, _valid_ident, load, check, open_warehouse,
     get_dialect, render_build,

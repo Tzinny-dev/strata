@@ -198,6 +198,13 @@ HISTORY_SUFFIX = ".strata-history.jsonl"
 LOCK_SUFFIX = ".strata-lock"
 ID_SUFFIX = ".strata-id"
 
+# Current schema version for the module metadata sidecars (run history and
+# fingerprint manifest). Legacy files written before versioning existed are
+# treated as v0 and upgraded by `strata migrate`; a file claiming a version
+# NEWER than this was written by a newer build and must not be re-read or
+# rewritten by an older one (E098, fail-loud).
+METADATA_SCHEMA_VERSION = 1
+
 
 def history_path(module_path: str) -> Path:
     """Path to the module's run-history sidecar (`.strata-history.jsonl`)."""
@@ -355,12 +362,15 @@ def with_lock(module_path_arg: str = "module_path"):
 
 
 def _run_id(entry: dict) -> str:
-    """Content-addressed run identity. Excludes 'run_id' itself and the
+    """Content-addressed run identity. Excludes 'run_id' itself, the
     derived/phase fields (snapshot names are derived from the id; the
-    pending/complete phase is not part of identity)."""
+    pending/complete phase is not part of identity), and 'schema_version'
+    (metadata bookkeeping that `strata migrate` may stamp onto legacy
+    records without changing what the run WAS)."""
     payload = json.dumps(
         {k: v for k, v in entry.items()
-         if k not in ("run_id", "snapshots", "input_snapshots", "status")},
+         if k not in ("run_id", "snapshots", "input_snapshots", "status",
+                      "schema_version")},
         sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
@@ -397,6 +407,7 @@ def record_run(module_path: str, entry: dict, run_id: str = None) -> dict:
     """Append a content-addressed run record; return it (with run_id)."""
     hp = history_path(module_path)
     entry = dict(entry)
+    entry["schema_version"] = METADATA_SCHEMA_VERSION
     entry["run_id"] = run_id or _run_id(entry)
     entry["at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     _atomic_write(hp, hp.read_text() + json.dumps(entry, sort_keys=True) + "\n"
@@ -457,25 +468,148 @@ def manifest_path(module_path: str) -> Path:
 
 
 def load_manifest(path: str) -> dict[str, str]:
-    """Load the module's manifest as {model_name: fingerprint}; {} if absent/corrupt."""
+    """Load the module's manifest as {model_name: fingerprint}; {} if absent/corrupt.
+
+    Reads both the versioned wrapper ({"version": 1, "models": {...}}) and
+    the legacy flat {"model": fingerprint} shape, normalizing to the inner
+    dict. Corrupt/absent degrade to {} (robustness: `strata migrate` is the
+    strict validator that fails loud on those; everyday readers just see an
+    empty manifest)."""
     mp = manifest_path(path)
-    if mp.exists():
-        try:
-            return json.loads(mp.read_text())
-        except Exception:
-            return {}
+    if not mp.exists():
+        return {}
+    try:
+        raw = json.loads(mp.read_text())
+    except Exception:
+        return {}
+    if isinstance(raw, dict) and "version" in raw and isinstance(raw.get("models"), dict):
+        return dict(raw["models"])
+    if isinstance(raw, dict) and all(isinstance(v, str) for v in raw.values()):
+        return raw
     return {}
 
 
 def save_manifest(path: str, fingerprints: dict[str, str]) -> None:
-    """Atomically persist the module's {model_name: fingerprint} manifest."""
-    _atomic_write(manifest_path(path), json.dumps(fingerprints, indent=2, sort_keys=True))
+    """Atomically persist the module's {model_name: fingerprint} manifest
+    under the current metadata schema (versioned wrapper)."""
+    payload = {"version": METADATA_SCHEMA_VERSION, "models": dict(fingerprints)}
+    _atomic_write(manifest_path(path),
+                  json.dumps(payload, indent=2, sort_keys=True))
 
 
 def stale_models(tms: dict[str, TypedModel], path: str) -> list[str]:
     """Models whose fingerprint differs from the persisted manifest (code-changed)."""
     manifest = load_manifest(path)
     return [n for n, tm in tms.items() if manifest.get(n) != tm.fingerprint]
+
+
+def _migratable_version(raw_version: object, where: str, line: int | None = None) -> int:
+    """Coerce and validate a record/manifest `schema_version` into an int.
+
+    Absent/None means legacy v0. A non-int value is corrupt metadata (E097);
+    a value above METADATA_SCHEMA_VERSION was written by a newer build (E098):
+    an older binary must not reinterpret it (that is exactly how metadata
+    corruption starts), so both fail loud and nothing gets rewritten."""
+    ctx = f"{where}" + (f" line {line}" if line is not None else "")
+    if raw_version is None:
+        return 0
+    if not isinstance(raw_version, int) or isinstance(raw_version, bool):
+        raise StrataError(
+            f"{ctx}: invalid schema_version {raw_version!r} "
+            f"(expected an integer)", "E097")
+    if raw_version > METADATA_SCHEMA_VERSION:
+        raise StrataError(
+            f"{ctx}: schema_version {raw_version} is newer than this build "
+            f"supports ({METADATA_SCHEMA_VERSION}) -- written by a newer "
+            "version of strata; refusing to read or rewrite it", "E098")
+    return raw_version
+
+
+def migrate_metadata(module_path: str) -> dict:
+    """Validate and upgrade a module's metadata sidecars to
+    METADATA_SCHEMA_VERSION: the run history (.strata-history.jsonl) and the
+    fingerprint manifest (.strata-manifest.json).
+
+    `strata migrate` is the strict counterpart to the lenient readers
+    (load_history/load_manifest, which must keep working for everyday runs):
+    it fails loud on corrupt metadata (E097) and on files claimed by a NEWER
+    build (E098), and upgrades legacy v0 files in place. Upgrades are
+    identity-preserving: history run_ids are content-addressed EXCLUDING
+    'schema_version' (_run_id), so stamping a record never changes what the
+    run was. Returns a report dict for the CLI. Takes the module's writer
+    lock: it rewrites the same sidecars record_run/save_manifest own."""
+    path = _canonical_module_path(module_path, require_exists=True)
+    report: dict = {"module": str(path)}
+    with _module_lock(module_path):
+        # ---- run history ----
+        hp = history_path(path)
+        records: list[dict] = []
+        if hp.exists():
+            for lineno, line in enumerate(hp.read_text().splitlines(), 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception as exc:
+                    raise StrataError(
+                        f"unreadable run history at {hp}: line {lineno}: {exc}",
+                        "E097") from exc
+                if not isinstance(rec, dict):
+                    raise StrataError(
+                        f"unreadable run history at {hp}: line {lineno}: "
+                        f"record is not a JSON object ({type(rec).__name__})",
+                        "E097")
+                _migratable_version(rec.get("schema_version"),
+                                    f"run history at {hp}", lineno)
+                records.append(rec)
+        upgraded = [r for r in records
+                    if _migratable_version(r.get("schema_version"),
+                                           f"run history at {hp}") != METADATA_SCHEMA_VERSION]
+        if upgraded:
+            stamped = [dict(r, schema_version=METADATA_SCHEMA_VERSION) for r in records]
+            _atomic_write(hp, "".join(json.dumps(e, sort_keys=True) + "\n" for e in stamped))
+        report["history"] = {
+            "records": len(records),
+            "schema_version": METADATA_SCHEMA_VERSION,
+            "migrated": len(upgraded),
+        }
+        # ---- fingerprint manifest ----
+        mp = manifest_path(path)
+        mf_raw: object = None
+        mf_version: int | None = None
+        mf_legacy: bool = False
+        if mp.exists():
+            try:
+                mf_raw = json.loads(mp.read_text())
+            except Exception as exc:
+                raise StrataError(
+                    f"unreadable manifest at {mp}: {exc}", "E097") from exc
+            if isinstance(mf_raw, dict) and isinstance(mf_raw.get("version"), int) \
+                    and not isinstance(mf_raw.get("version"), bool) \
+                    and isinstance(mf_raw.get("models"), dict):
+                mf_version = _migratable_version(mf_raw["version"], f"manifest at {mp}")
+            elif isinstance(mf_raw, dict) and all(
+                    isinstance(v, str) for v in mf_raw.values()):
+                mf_version = 0
+                mf_legacy = True
+            else:
+                raise StrataError(
+                    f"unreadable manifest at {mp}: not a {METADATA_SCHEMA_VERSION}"
+                    "-shaped wrapper nor a legacy {model: fingerprint} dict",
+                    "E097")
+        if mf_version is not None and mf_version != METADATA_SCHEMA_VERSION:
+            if mf_legacy:
+                models = dict(mf_raw)  # type: ignore[arg-type]
+            else:
+                models = dict(mf_raw["models"])  # type: ignore[index]
+            save_manifest(str(path), models)
+        report["manifest"] = {
+            "exists": mp.exists(),
+            "schema_version": mf_version,
+            "migrated": mf_version is not None and mf_version != METADATA_SCHEMA_VERSION,
+        }
+        return report
 
 
 def _contract_decl(project: Project, tm: TypedModel) -> ast.ContractDecl | None:
