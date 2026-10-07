@@ -5,6 +5,11 @@ TABLES; `strata/iceberg.py` copies those committed snapshots out to real
 Iceberg tables under a lakehouse catalog dir and records a deterministic
 manifest. Fail-loud: missing extension -> no side effects; missing snapshot
 -> nothing exported; partial export -> no manifest written.
+
+A Postgres run has the same physical destination: `export_run_postgres`
+bridges the run's committed snapshot tables from the Postgres warehouse
+(dbcompat.PGConn) through a throwaway DuckDB writer — the catalog layout is
+identical, so the duckdb/pyiceberg readers verify it unchanged.
 """
 from pathlib import Path
 
@@ -13,6 +18,22 @@ import pytest
 
 from strata import analysis, exec as exec_mod, parser
 from strata import iceberg as iceberg_mod
+from strata.dialects import POSTGRES
+
+try:
+    from tests.pg_harness import ephemeral_postgres, find_pgbin
+except Exception:  # pragma: no cover
+    ephemeral_postgres, find_pgbin = None, lambda: None
+
+PG_SRC = '''
+source orders(ns: "n", dataset: "orders") {
+  columns: { order_id: int64 nonnull, country: string nonnull, ts: timestamp }
+}
+
+model m {
+  from orders
+}
+'''
 
 BASE = """
 source orders(ns: "crm", dataset: "prod_orders") {
@@ -355,3 +376,150 @@ def test_export_snapshot_fails_loud_missing_table(tmp_path):
     with pytest.raises(iceberg_mod.IcebergExportError, match="not found"):
         iceberg_mod.export_snapshot(con, "no_such_snapshot", "m",
                                     "r1dead0000", tmp_path / "catalog")
+
+
+# ------------------------------------------------------- Postgres bridge (M32)
+
+def _pg_write():
+    w = duckdb.connect(":memory:")
+    w.execute("INSTALL iceberg")
+    w.execute("LOAD iceberg")
+    return w
+
+
+def _require_pg():
+    if not find_pgbin():
+        pytest.skip("no postgres server installation found")
+    return ephemeral_postgres()
+
+
+def test_export_run_postgres_bridges_snapshot_to_iceberg(tmp_path):
+    catalog = tmp_path / "lakehouse"
+    with _require_pg() as con:
+        con.execute("CREATE TABLE orders (order_id BIGINT, country TEXT, ts TIMESTAMP)")
+        con.execute(
+            "INSERT INTO orders VALUES (1, 'es', '2026-01-01 00:00:00'), "
+            "(2, 'us', '2026-01-02 00:00:00'), (3, 'de', '2026-01-03 00:00:00')")
+        proj, tms, path = _proj(tmp_path, PG_SRC)
+        applied, _pins, _note = exec_mod.run(con, proj, tms, path, dialect=POSTGRES)
+        assert applied == ["m"]
+        entry = exec_mod.load_history(path)[-1]
+        manifest = iceberg_mod.export_run_postgres(
+            con, entry["run_id"], entry["snapshots"], catalog)
+        assert manifest["default"] == entry["run_id"]
+        # Fail-loud preflight itself passes on this warehouse + environment.
+        iceberg_mod.ensure_iceberg_postgres(con)
+    # An independent DuckDB connection reads the published Iceberg table back.
+    other = duckdb.connect(":memory:")
+    other.execute("INSTALL iceberg")
+    other.execute("LOAD iceberg")
+    status = iceberg_mod.verify_catalog_run(other, catalog, entry["run_id"])
+    assert status["rows"]["m"] == 3
+    rows = other.execute(
+        f"SELECT order_id, country FROM iceberg_scan('{catalog}/runs/{entry['run_id']}/m') "
+        "ORDER BY order_id").fetchall()
+    assert rows == [(1, 'es'), (2, 'us'), (3, 'de')]
+
+
+def test_export_run_postgres_timestamp_and_array_roundtrip(tmp_path):
+    """Beyond plain scalars: timestamp round-trips as a timestamp, and a
+    Postgres text[] comes back as an Iceberg LIST, not a string (psycopg2
+    hands DuckDB the parsed list, not PG's `{...}` text)."""
+    catalog = tmp_path / "lakehouse"
+    with _require_pg() as con:
+        con.execute("CREATE TABLE s (id BIGINT, tags TEXT[], at TIMESTAMP)")
+        con.execute("INSERT INTO s VALUES (1, '{a,b}', '2026-01-05 09:30:00')")
+        proj, tms, path = _proj(tmp_path, '''
+source s(ns: "n", dataset: "s") {
+  columns: { id: int64 nonnull, tags: array(string), at: timestamp }
+}
+model m { from s }
+''')
+        exec_mod.run(con, proj, tms, path, dialect=POSTGRES)
+        entry = exec_mod.load_history(path)[-1]
+        iceberg_mod.export_run_postgres(
+            con, entry["run_id"], entry["snapshots"], catalog)
+    other = duckdb.connect(":memory:")
+    other.execute("INSTALL iceberg")
+    other.execute("LOAD iceberg")
+    t = other.execute(
+        f"SELECT tags FROM iceberg_scan('{catalog}/runs/{entry['run_id']}/m')").fetchone()[0]
+    assert list(t) == ["a", "b"]
+
+
+def test_export_run_postgres_fails_loud_missing_snapshot(tmp_path):
+    catalog = tmp_path / "lakehouse"
+    with _require_pg() as con:
+        w = _pg_write()
+        try:
+            with pytest.raises(iceberg_mod.IcebergExportError, match="not found"):
+                iceberg_mod.export_snapshot_postgres(
+                    con, w, "snap_000000000000_x", "m0", "000000000000", catalog)
+        finally:
+            w.close()
+    assert not catalog.exists()
+
+
+def test_export_run_postgres_partial_export_writes_no_manifest(tmp_path):
+    catalog = tmp_path / "lakehouse"
+    with _require_pg() as con:
+        con.execute("CREATE TABLE snap_aaaa11111111_ok AS SELECT 1 AS x")
+        with pytest.raises(iceberg_mod.IcebergExportError):
+            iceberg_mod.export_run_postgres(
+                con, "aaaa11111111",
+                {"ok": "snap_aaaa11111111_ok", "missing": "snap_bbbb22222222_nope"},
+                catalog)
+    assert not (catalog / iceberg_mod.MANIFEST_NAME).exists()
+
+
+def test_ensure_iceberg_postgres_fails_loud_unreadable_warehouse():
+    class _Unreachable:
+        def execute(self, sql, *a, **k):
+            raise RuntimeError("connection refused")
+    with pytest.raises(iceberg_mod.IcebergUnavailable, match="read the Postgres"):
+        iceberg_mod.ensure_iceberg_postgres(_Unreachable())
+
+
+def test_cmd_run_iceberg_dir_gate_allows_duckdb_and_postgres_only(
+        tmp_path, capsys, monkeypatch):
+    from strata.cli import main
+    path = tmp_path / "p.strata"
+    path.write_text(PG_SRC)
+    catalog = tmp_path / "lakehouse"
+    # A physical destination is not a SQL dialect: BigQuery is refused loud.
+    monkeypatch.setattr("sys.argv", ["strata", "run", str(path),
+                                     "--dialect", "bigquery",
+                                     "--iceberg-dir", str(catalog)])
+    assert main() == 2
+    assert "duckdb or postgres" in capsys.readouterr().err
+    # Postgres needs the DSN whose snapshots feed the catalog.
+    monkeypatch.setattr("sys.argv", ["strata", "run", str(path),
+                                     "--dialect", "postgres",
+                                     "--iceberg-dir", str(catalog)])
+    assert main() == 2
+    assert "-o postgres://" in capsys.readouterr().err
+
+
+def test_cmd_run_postgres_with_iceberg_dir_end_to_end(tmp_path):
+    """The full CLI path for a Postgres run: run + preflight + export + a
+    catalog that the duckdb reader verifies without re-execution."""
+    if not find_pgbin():
+        pytest.skip("no postgres server installation found")
+    from strata.cli import main
+    catalog = tmp_path / "lakehouse"
+    with ephemeral_postgres(port=55443) as con:
+        con.execute("CREATE TABLE s (id BIGINT)")
+        con.execute("INSERT INTO s VALUES (1), (2)")
+        con.raw.commit()
+        path = tmp_path / "p.strata"
+        path.write_text('source s(ns: "n", dataset: "s") { columns: { id: int64 } }\n'
+                        'model m { from s }\n')
+        rc = main(["run", str(path), "--dialect", "postgres",
+                   "-o", con.dsn, "--iceberg-dir", str(catalog)])
+        assert rc == 0
+        entry = exec_mod.load_history(str(path))[-1]
+    other = duckdb.connect(":memory:")
+    other.execute("INSTALL iceberg")
+    other.execute("LOAD iceberg")
+    status = iceberg_mod.verify_catalog_run(other, catalog, entry["run_id"])
+    assert status["rows"]["m"] == 2

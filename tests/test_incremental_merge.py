@@ -306,6 +306,69 @@ model m {
         self.assertEqual(rows[1], (10, "a"))  # stale mutation still ignored
         self.assertEqual(rows[2], (20, "b"))
 
+    def test_set_op_falls_back_to_post_filter_but_stays_correct(self):
+        text = '''source s(ns: "n", dataset: "s") {
+  columns: { id: int64, v: int64, ts: timestamp }
+}
+source t(ns: "n", dataset: "t") {
+  columns: { id: int64, v: int64, ts: timestamp }
+}
+model a { from s }
+model b { from t }
+model m {
+  from a union all b
+  incremental
+  merge_strategy: append
+  cdc_column: ts
+}
+'''
+        self.con.execute("CREATE TABLE t (id BIGINT, v BIGINT, ts TIMESTAMP)")
+        self.con.execute("INSERT INTO s VALUES (1, 10, '2026-01-01 00:00:00')")
+        self.con.execute("INSERT INTO t VALUES (100, 1000, '2026-01-01 00:00:00')")
+        self._run(text, only_stale=False)
+        self.assertEqual(
+            self.con.execute("SELECT count(*) FROM v_m").fetchone()[0], 2)
+        self.con.execute("UPDATE s SET v = 999 WHERE id = 1")  # no ts bump
+        self.con.execute("INSERT INTO s VALUES (2, 20, '2026-01-02 00:00:00')")
+        self.con.execute("INSERT INTO t VALUES (200, 2000, '2026-01-02 00:00:00')")
+        self._run(text, only_stale=True)
+        sql = _staged_sql(self.con, "m")
+        self.assertIn("__full", sql, "a set-op must fall back to the "
+                      "post-filter path, not push the predicate into one "
+                      "union branch")
+        rows = dict(self.con.execute("SELECT id, v FROM v_m").fetchall())
+        self.assertEqual(rows[1], 10)  # stale mutation still ignored
+        self.assertEqual(rows[100], 1000)
+        self.assertEqual(rows[2], 20)
+        self.assertEqual(rows[200], 2000)
+
+    def test_expand_falls_back_to_post_filter_but_stays_correct(self):
+        text = '''source tags(ns: "n", dataset: "tags") {
+  columns: { id: int64, tags: array(string), ts: timestamp }
+}
+model m {
+  from tags
+  expand tags as t
+  incremental
+  merge_strategy: append
+  cdc_column: ts
+}
+'''
+        self.con.execute("CREATE TABLE tags (id BIGINT, tags VARCHAR[], ts TIMESTAMP)")
+        self.con.execute("INSERT INTO tags VALUES (1, ['a','b'], '2026-01-01 00:00:00')")
+        self._run(text, only_stale=False)
+        self.assertEqual(
+            self.con.execute("SELECT count(*) FROM v_m").fetchone()[0], 2,
+            "one source row with two array elements expands to two rows")
+        self.con.execute("INSERT INTO tags VALUES (2, ['c','d'], '2026-01-02 00:00:00')")
+        self._run(text, only_stale=True)
+        sql = _staged_sql(self.con, "m")
+        self.assertIn("__full", sql, "an expand must fall back to the "
+                      "post-filter path, not push the predicate into the "
+                      "unnested base subquery")
+        rows = self.con.execute("SELECT id, t FROM v_m ORDER BY id").fetchall()
+        self.assertEqual(rows, [(1, "a"), (1, "b"), (2, "c"), (2, "d")])
+
     def test_date_typed_cdc_column_pushes_down_and_merges(self):
         self.con.execute("CREATE TABLE d (id BIGINT, v BIGINT, day DATE)")
         text = '''source d(ns: "n", dataset: "d") {

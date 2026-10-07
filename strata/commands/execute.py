@@ -1,6 +1,7 @@
 """Execute commands: run, bench, replay, backfill, seed"""
 
 import sys
+from pathlib import Path
 from typing import Any
 
 from .. import exec as exec_mod
@@ -19,11 +20,11 @@ def cmd_run(args: Any) -> int:
     proj = load(args.file, search_dirs=search or None)
     tms = check(proj)
     try:
-        get_dialect(getattr(args, "dialect", "duckdb"))
+        dialect = get_dialect(getattr(args, "dialect", "duckdb"))
     except ValueError as ve:
         print(str(ve), file=sys.stderr)
         return 4
-    dialect_name = getattr(args, "dialect", "duckdb")
+    dialect_name = dialect.name
     # Fail-loud physical schema check: every declared type expressible.
     bad = exec_mod.check_physical_schema(dialect_name, tms)
     if bad:
@@ -47,20 +48,29 @@ def cmd_run(args: Any) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
     if getattr(args, "iceberg_dir", None):
-        if dialect_name != "duckdb":
-            print(f"error: E100: --iceberg-dir requires duckdb SQL dialect, got "
-                  f"{dialect_name!r} (Iceberg is a physical destination, not a "
-                  f"SQL dialect)", file=sys.stderr)
+        if dialect_name not in ("duckdb", "postgres"):
+            print(f"error: E100: --iceberg-dir requires duckdb or postgres SQL "
+                  f"dialect, got {dialect_name!r} (Iceberg is a physical "
+                  f"destination, not a SQL dialect)", file=sys.stderr)
+            return 2
+        if dialect_name == "postgres" and not getattr(args, "output", None):
+            print("error: E100: --iceberg-dir with --dialect postgres needs "
+                  "-o postgres://... (the Postgres warehouse whose committed "
+                  "snapshots feed the catalog)", file=sys.stderr)
             return 2
         from .. import iceberg as iceberg_mod
         try:
-            iceberg_mod.ensure_iceberg(con)
+            if dialect_name == "duckdb":
+                iceberg_mod.ensure_iceberg(con)
+            else:
+                iceberg_mod.ensure_iceberg_postgres(con)
         except iceberg_mod.IcebergUnavailable as e:
             print(f"error: E100: {e}", file=sys.stderr)
             return 2
     if args.seed:
         _run_seed(con, args.file)
     result = exec_mod.run(con, proj, tms, args.file,
+                           dialect=dialect,
                            only_stale=args.only_stale,
                            names=wanted,
                            source_overrides=overrides or None,
@@ -97,8 +107,12 @@ def cmd_run(args: Any) -> int:
                 entry = exec_mod.load_history(args.file)[-1]
                 rid = entry["run_id"]
                 snapshots = dict(entry.get("snapshots") or {})
-                manifest = iceberg_mod.export_run(
-                    con, rid, snapshots, args.iceberg_dir)
+                if dialect_name == "postgres":
+                    manifest = iceberg_mod.export_run_postgres(
+                        con, rid, snapshots, Path(args.iceberg_dir))
+                else:
+                    manifest = iceberg_mod.export_run(
+                        con, rid, snapshots, Path(args.iceberg_dir))
                 exported = manifest["runs"][rid]
                 print(f"  iceberg: exported {len(exported)} table(s) to "
                       f"{args.iceberg_dir} (run {rid})")
@@ -183,13 +197,13 @@ def cmd_replay(args: Any) -> int:
             try:
                 if reader == "pyiceberg":
                     status = iceberg_mod.verify_catalog_run_pyiceberg(
-                        args.iceberg_dir, e["run_id"])
+                        Path(args.iceberg_dir), e["run_id"])
                     label = "pyiceberg"
                 else:
                     con = open_warehouse(None)
                     iceberg_mod.ensure_iceberg(con)
                     status = iceberg_mod.verify_catalog_run(
-                        con, args.iceberg_dir, e["run_id"])
+                        con, Path(args.iceberg_dir), e["run_id"])
                     label = "duckdb iceberg_scan"
             except Exception as ex:
                 print(f"error: E083: iceberg catalog verify failed for run "

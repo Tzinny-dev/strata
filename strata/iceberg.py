@@ -40,6 +40,41 @@ _RUN_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 # Matches the output of _safe_dirname: alphanumeric + underscore only
 _SAFE_REL_RE = re.compile(r"^runs/[0-9a-f]{12}/[A-Za-z0-9_]+$")
 
+# Postgres -> DuckDB writer column types for the bridge (export_snapshot_postgres).
+# Snapshot tables are created by strata, so the reachable set is the closed set
+# strata itself emits; unknown spellings degrade to VARCHAR.
+_PG_TO_DUCKDB = {
+    "bigint": "BIGINT",
+    "integer": "INTEGER",
+    "smallint": "SMALLINT",
+    "text": "VARCHAR",
+    "character varying": "VARCHAR",
+    "character": "VARCHAR",
+    "boolean": "BOOLEAN",
+    "date": "DATE",
+    "timestamp without time zone": "TIMESTAMP",
+    "timestamp with time zone": "TIMESTAMPTZ",
+    "time without time zone": "TIME",
+    "double precision": "DOUBLE",
+    "real": "DOUBLE",
+    "uuid": "UUID",
+    "bytea": "BLOB",
+    "jsonb": "VARCHAR",
+    "json": "VARCHAR",
+    "money": "DOUBLE",
+}
+# Array element types keyed by Postgres `udt_name` (the `_<pgtype>` convention,
+# same source of truth as dbcompat._PG_ARRAY_ELEM).
+_PG_ARRAY_ELEM = {
+    "_int8": "BIGINT", "_int4": "INTEGER", "_int2": "SMALLINT",
+    "_float8": "DOUBLE", "_float4": "DOUBLE",
+    "_text": "VARCHAR", "_varchar": "VARCHAR", "_bpchar": "VARCHAR",
+    "_bool": "BOOLEAN", "_date": "DATE",
+    "_timestamp": "TIMESTAMP", "_timestamptz": "TIMESTAMPTZ",
+    "_uuid": "UUID", "_jsonb": "VARCHAR", "_json": "VARCHAR",
+    "_numeric": "DECIMAL(38,18)",
+}
+
 
 class IcebergUnavailable(RuntimeError):
     """The DuckDB iceberg extension could not be loaded (fail-loud, §4)."""
@@ -65,6 +100,161 @@ def _validate_rel(rel: str, catalog_dir: Path) -> Path:
         raise IcebergExportError(
             f"rel path escapes catalog dir: {rel!r}")
     return path
+
+
+def ensure_iceberg_postgres(pg: Any) -> None:
+    """Probe the Postgres→Iceberg path BEFORE any run side-effects.
+
+    Iceberg stays a physical destination written by DuckDB's iceberg
+    extension; a Postgres run only moves the READ side to the warehouse
+    (`pg`, a dbcompat.PGConn). Both prerequisites are probed here,
+    fail-loud (`IcebergUnavailable`) — nothing creates catalog files:
+    - the DuckDB iceberg writer must install/load, and
+    - the Postgres warehouse must answer a query.
+    """
+    import duckdb
+    try:
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL iceberg")
+            con.execute("LOAD iceberg")
+        finally:
+            con.close()
+    except Exception as e:
+        raise IcebergUnavailable(
+            "DuckDB iceberg writer is not available; cannot export a "
+            f"Postgres run to Iceberg in this environment ({e}). "
+            "Install it via: INSTALL iceberg; LOAD iceberg"
+        ) from None
+    try:
+        pg.execute("SELECT 1").fetchone()
+    except Exception as e:
+        raise IcebergUnavailable(
+            f"cannot read the Postgres warehouse to export to Iceberg: {e}"
+        ) from None
+
+
+def _pg_type_to_duckdb(data_type: str, udt_name: str | None,
+                       precision: Any, scale: Any) -> str:
+    """Map a Postgres column to the DuckDB writer's physical type.
+
+    Snapshot tables are created by strata itself, so the reachable set is
+    the small, closed set strata emits (`physical_types()`); anything
+    unknown degrades to VARCHAR rather than failing to export.
+    """
+    dt = (data_type or "").lower()
+    if dt == "array":
+        elem = _PG_ARRAY_ELEM.get(udt_name or "", "VARCHAR")
+        return elem + "[]"
+    if dt == "numeric":
+        if precision is not None and scale is not None:
+            return f"DECIMAL({int(precision)},{int(scale)})"
+        return "DECIMAL(38,18)"
+    return _PG_TO_DUCKDB.get(dt, "VARCHAR")
+
+
+def export_snapshot_postgres(pg: Any, write: Any, snapshot_table: str,
+                             model_name: str, run_id: str,
+                             catalog_dir: Path) -> Path:
+    """Copy a Postgres snapshot table to an Iceberg table via DuckDB.
+
+    Reads the committed snapshot rows through the live Postgres connection
+    (`pg`, a dbcompat.PGConn) and writes real Iceberg through a throwaway
+    DuckDB connection (`write`) whose iceberg extension does the physical
+    copy. Fail-loud mirrors `export_snapshot`: a missing snapshot exports
+    nothing, and a write error leaves no manifest (the caller decides).
+    """
+    exists = pg.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_name = ? AND table_schema NOT IN "
+        "('pg_catalog', 'pg_toast', 'information_schema')",
+        [snapshot_table]).fetchone()
+    if not exists:
+        raise IcebergExportError(
+            f"snapshot table {snapshot_table!r} not found in Postgres "
+            "warehouse; refusing to export nothing to Iceberg")
+    cols = pg.execute(
+        "SELECT column_name, data_type, udt_name, character_maximum_length, "
+        "numeric_precision, numeric_scale FROM information_schema.columns "
+        "WHERE table_name = ? ORDER BY ordinal_position",
+        [snapshot_table]).fetchall()
+    if not cols:
+        raise IcebergExportError(
+            f"snapshot table {snapshot_table!r} has no columns in Postgres "
+            "warehouse; refusing to export an empty shape")
+    rel = run_rel(run_id, model_name)
+    target = catalog_dir / rel
+    target.mkdir(parents=True, exist_ok=True)
+    ddl = ", ".join(
+        f'"{c[0]}" {_pg_type_to_duckdb(c[1], c[2], c[4], c[5])}' for c in cols)
+    tmp = "__strata_iceberg_" + _safe_dirname(model_name)
+    try:
+        write.execute(f"CREATE TABLE {tmp} ({ddl})")
+    except Exception as e:
+        raise IcebergExportError(
+            f"failed to prepare the DuckDB writer schema for "
+            f"{model_name!r}: {e}") from None
+    try:
+        rows = pg.execute(f'SELECT * FROM "{snapshot_table}"').fetchall()
+    except Exception as e:
+        raise IcebergExportError(
+            f"failed to read Postgres snapshot {snapshot_table!r}: {e}"
+        ) from None
+    try:
+        if rows:
+            write.executemany(
+                f"INSERT INTO {tmp} VALUES ({','.join('?' for _ in cols)})",
+                rows)
+    except Exception as e:
+        raise IcebergExportError(
+            f"failed to bridge {model_name!r} rows from Postgres to "
+            f"DuckDB: {e}") from None
+    try:
+        write.execute(f"COPY (SELECT * FROM {tmp}) TO '{target}' (FORMAT iceberg)")
+    except Exception as e:
+        raise IcebergExportError(
+            f"failed to write {model_name!r} as Iceberg table: {e}") from None
+    finally:
+        write.execute(f"DROP TABLE IF EXISTS {tmp}")
+    return rel
+
+
+def export_run_postgres(pg: Any, run_id: str, snapshots: dict[str, str],
+                        catalog_dir: Path) -> dict[str, Any]:
+    """Export a committed Postgres run's snapshots to the Iceberg catalog.
+
+    Same contract as `export_run` — manifest written only after every table
+    succeeds, incomplete export fails loud with no manifest — but the READ
+    side is the Postgres warehouse instead of a DuckDB connection. The
+    produced catalog is layout-identical to `export_run`'s, so the duckdb
+    iceberg_scan and pyiceberg verifiers, and rollback/gc, work unchanged.
+    """
+    import duckdb
+    try:
+        write = duckdb.connect()
+        write.execute("INSTALL iceberg")
+        write.execute("LOAD iceberg")
+    except Exception as e:
+        raise IcebergUnavailable(
+            "DuckDB iceberg writer is not available; cannot export a "
+            f"Postgres run to Iceberg in this environment ({e})"
+        ) from None
+    try:
+        tables: dict[str, Path] = {}
+        failed: list[str] = []
+        for model, snap in sorted(snapshots.items()):
+            try:
+                tables[model] = export_snapshot_postgres(
+                    pg, write, snap, model, run_id, catalog_dir)
+            except IcebergExportError as e:
+                failed.append(str(e))
+        if failed:
+            raise IcebergExportError(
+                "iceberg export incomplete (no manifest written):\n  "
+                + "\n  ".join(failed))
+        return write_manifest(catalog_dir, run_id, tables)
+    finally:
+        write.close()
 
 
 def ensure_iceberg(con: Any) -> None:
