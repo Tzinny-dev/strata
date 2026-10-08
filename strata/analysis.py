@@ -738,6 +738,18 @@ class Checker:
                 for c in td.checks:
                     if c.kind == "row_count":
                         continue
+                    if c.kind == "referential":
+                        ref = self.p.typed.get(c.ref_model)
+                        if ref is None:
+                            raise self._err("E101",
+                                            f"test references non-existent model {c.ref_model!r}",
+                                            c.span, help="declare the referenced model or check the name")
+                        if c.ref_col not in ref.schema:
+                            raise self._err("E102",
+                                            f"test references unknown column {c.ref_col!r} in "
+                                            f"model {c.ref_model!r}",
+                                            c.span, help="check the column name and spelling")
+                        continue
                     if c.col and c.col not in tm.schema:
                         raise self._err("E092",
                                         f"test references unknown column {c.col!r} in model {mname!r}",

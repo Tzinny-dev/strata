@@ -214,6 +214,9 @@ def _decl_lines(d: ast.Node) -> list[str]:
     elif isinstance(d, ast.TestDecl):
         lines.append(f"test {d.model} {{")
         for c in d.checks:
+            if c.kind == "referential":
+                lines.append(f"  expect {c.col} in {c.ref_model}.{c.ref_col};")
+                continue
             target = "row_count" if c.kind == "row_count" else c.col
             rhs = _expr(ast.Literal(value=c.value))
             lines.append(f"  expect {target} {c.op} {rhs};")

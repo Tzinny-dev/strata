@@ -109,9 +109,11 @@ class Parser:
         return m
 
     def parse_test(self) -> ast.TestDecl:
-        """`test <model> { expect <col> <op> <literal>; ... }` — declarative
+        """`test <model> { expect <expr>; ... }` — declarative
         per-model data tests (Fase 5). The rhs is a literal (typed at compile
-        time); `expect row_count == N` is the reserved aggregate form."""
+        time); `expect row_count == N` is the reserved aggregate form.
+        `expect <col> in <model>.<col>` is a referential assertion: every
+        non-null value of `<col>` must appear in the referenced column."""
         kw = self.expect("KW", "test")
         decl = ast.TestDecl(span=self.span(kw))
         decl.model = self.expect("ID").value
@@ -124,6 +126,18 @@ class Parser:
                 chk.kind = "row_count"
             else:
                 chk.kind, chk.col = "expect", name
+            if self.at("KW", "in"):
+                # `expect <col> in <model>.<col>` — referential assertion.
+                self.advance()
+                chk.kind, chk.op = "referential", "in"
+                chk.ref_model = self.expect("ID").value
+                self.expect("SYM", ".")
+                chk.ref_col = self.expect("ID").value
+                if not self.match("SYM", ";"):
+                    if not (self.at("KW", "expect") or self.at("SYM", "}")):
+                        self.expect("SYM", ";")
+                decl.checks.append(chk)
+                continue
             chk.op = {"==": "==", "!=": "!=", ">": ">", "<": "<",
                       ">=": ">=", "<=": "<="}[self.expect("SYM").value]
             t = self.cur()

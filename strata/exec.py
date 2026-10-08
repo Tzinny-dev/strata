@@ -1229,14 +1229,23 @@ _ROW_COUNT_OPS = {
 
 def run_tests(con: Any, project: Project, tms: dict[str, TypedModel],
               names: list[str] | None = None, dialect: Dialect = DUCKDB,
-              branch: str = "main") -> list[str]:
-    """Run declarative tests against promoted live views, after the swap.
+              branch: str = "main", staged: bool = False) -> list[str]:
+    """Run declarative tests against a model's views.
 
-    Each ``test <model> { ... }`` block is evaluated against ``v_<model>``.
-    Returns list of result lines (one per expect clause); raises
-    ``StrataTestError`` on first failure.  Used by ``run`` (post-swap) and
-    ``strata test`` (standalone).
+    By default evaluates against promoted live views ``v_<model>`` (after the
+    swap, the ``run`` path). With ``staged=True`` it evaluates against the
+    staged views ``stg_<branch>__<model>`` instead, so a standalone
+    ``strata test`` never touches the live views (schema/test separation).
+
+    Each ``test <model> { ... }`` block is evaluated against the model's view
+    (referential checks against the referenced model's view too). Returns list
+    of result lines (one per expect clause); raises ``StrataTestError`` on
+    first failure.
     """
+
+    def _view(model: str) -> str:
+        return (staged_name(model, branch) if staged else promoted_name(model))
+
     if not project.tests:
         return []
     results: list[str] = []
@@ -1253,7 +1262,7 @@ def run_tests(con: Any, project: Project, tms: dict[str, TypedModel],
                     f"test references model not in compiled set: {td.model!r}",
                     "E080",
                 )
-            view = promoted_name(td.model)
+            view = _view(td.model)
             # Row total is invariant across every check on this model's view
             # (M23): count it once per model, not once per check.
             total: int | None = None
@@ -1272,6 +1281,27 @@ def run_tests(con: Any, project: Project, tms: dict[str, TypedModel],
                     results.append(
                         f"  ok  {td.model}: row_count {check.op} {expected} "
                         f"(got {got})"
+                    )
+                elif check.kind == "referential":
+                    # No orphans: every non-null value of check.col must appear
+                    # in the referenced model's column (nulls are allowed).
+                    ref_view = _view(check.ref_model)
+                    sql = (
+                        f"SELECT count(*) FROM {view} t "
+                        f"WHERE t.{check.col} IS NOT NULL AND NOT EXISTS "
+                        f"(SELECT 1 FROM {ref_view} r "
+                        f"WHERE r.{check.ref_col} = t.{check.col})"
+                    )
+                    n_bad = con.execute(sql).fetchone()[0]
+                    if n_bad:
+                        raise StrataTestError(
+                            f"test {td.model}: {check.col} in "
+                            f"{check.ref_model}.{check.ref_col} violated for "
+                            f"{n_bad} rows (orphans)"
+                        )
+                    results.append(
+                        f"  ok  {td.model}: {check.col} in "
+                        f"{check.ref_model}.{check.ref_col}"
                     )
                 else:
                     sql = (

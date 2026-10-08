@@ -8,7 +8,13 @@ from ..utils import check, get_dialect, load, open_warehouse
 
 
 def cmd_test(args: Any) -> int:
-    """`strata test <file>`: run declarative data tests against a module's models."""
+    """`strata test <file>`: run declarative data tests against a module's models.
+
+    Models are staged into a dedicated test branch (``stg_test__*``) and tests
+    run against those staged views — the live ``v_*`` views are never touched
+    (schema/test separation). ``--seed``/``--fixtures`` load data first.
+    """
+    import pathlib
     search_dirs = [args.search_dir] if getattr(args, 'search_dir', None) else None
     proj = load(args.file, search_dirs=search_dirs)
     tms = check(proj)
@@ -40,12 +46,16 @@ def cmd_test(args: Any) -> int:
         return 2
     if getattr(args, "seed", False):
         _run_seed(con, args.file)
+    fixtures_file = getattr(args, "fixtures", None)
+    if fixtures_file:
+        _load_fixtures(con, pathlib.Path(fixtures_file))
     model_arg = getattr(args, "model", None)
     tested_models: list[str] | None = [str(model_arg)] if model_arg else None
     exec_mod.materialize(con, proj, tms, names=tested_models, dialect=dialect,
-                         source_overrides=None, stage_only=False, branch="main")
+                         source_overrides=None, stage_only=True, branch="test")
     try:
-        results = exec_mod.run_tests(con, proj, tms, tested_models, dialect, "main")
+        results = exec_mod.run_tests(con, proj, tms, tested_models, dialect, "test",
+                                     staged=True)
     except exec_mod.StrataTestError as te:
         print(f"test FAILED: {te}", file=sys.stderr)
         con.close()
@@ -68,3 +78,12 @@ def _run_seed(con: Any, path: str) -> None:
     """Seed a warehouse with the built-in demo sources (from strata.seed)."""
     from ..seed import seed_sql  # lazy: seed imports live alongside examples
     con.execute(seed_sql()[0])
+
+
+def _load_fixtures(con: Any, path: Any) -> None:
+    """Load a raw SQL fixtures file (statements separated by ';') into the
+    warehouse before staging, so tests run against isolated fixture data."""
+    text = path.read_text()
+    for stmt in text.split(";"):
+        if stmt.strip():
+            con.execute(stmt)

@@ -273,6 +273,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dialect", default="duckdb", help="warehouse for evaluation: duckdb | postgres | bigquery | snowflake")
     p.add_argument("--output", "-o", help="persist warehouse to .duckdb (default: in-memory, discarded on exit)")
     p.add_argument("--seed", action="store_true", help="load demo source fixtures before running tests")
+    p.add_argument("--fixtures", default=None,
+                   help="load a raw SQL fixtures file (statements separated by ';') "
+                        "into the warehouse before staging")
     p.add_argument("--search-dir", default=None, help="extra dir resolving import a.b -> a/b.strata")
     p.set_defaults(fn=test_cmd.cmd_test)
 

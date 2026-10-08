@@ -348,13 +348,12 @@ class Translator:
         # A literal key becomes a compile-time path/member. A dynamic key is a
         # runtime value, so it is an *exact-key lookup* and is emitted only
         # where the dialect can express one: DuckDB (a `$`-less path is an
-        # exact key: it neither traverses dots nor indexes brackets) and
+        # exact key: it neither traverses dots nor indexes brackets),
         # PostgreSQL (`jsonb -> text` takes any text expression, never a
-        # path). BigQuery requires the JSONPath to be a string literal or
-        # query parameter and Snowflake's GET_PATH requires a quoted
-        # path-name literal, so both fail loud instead of emitting SQL the
-        # engine will reject or that reads a different member than the same
-        # expression on another warehouse.
+        # path) and Snowflake (GET is a key lookup, not a path, and accepts
+        # any VARCHAR expression for VARIANT input). BigQuery requires the
+        # JSONPath to be a string literal or query parameter, so it fails
+        # loud instead of emitting SQL the engine will reject.
         #
         # `NULLIF(key, '')` gives both warehouses the same answer for the one
         # degenerate runtime key: DuckDB resolves the *empty* path to the whole

@@ -319,10 +319,12 @@ class TestDecl(Node):
 
 @dataclass
 class TestCheck(Node):
-    kind: str = "expect"   # reserved: 'row_count'
+    kind: str = "expect"   # reserved: 'row_count'; 'referential' = `col in model.col`
     col: str | None = None
     op: str | None = None
     value: object = None
+    ref_model: str = ""
+    ref_col: str = ""
 
 
 @dataclass
