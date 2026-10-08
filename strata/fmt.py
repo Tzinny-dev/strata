@@ -173,6 +173,80 @@ def _stmts(stmts: list[ast.Stmt], ind: str) -> list[str]:
             raise ValueError(f"unsupported statement: {type(s).__name__}")
     return out
 
+def _decl_lines(d: ast.Node) -> list[str]:
+    """Render one declaration into its canonical text lines (no separators)."""
+    lines: list[str] = []
+    if isinstance(d, ast.ImportDecl):
+        lines.append(f"import {d.path}")
+    elif isinstance(d, ast.SourceDecl):
+        res = ", ".join(f'{k}: {_q(v)}' for k, v in d.resource.items())
+        lines.append(f"source {d.name}({res}) {{")
+        for k, v in d.props:
+            if k == "columns":
+                lines.append("  columns: {")
+                for field in v if isinstance(v, list) else []:
+                    lines.append(f"    {_field(field)},")
+                lines.append("  }")
+            elif isinstance(v, str):
+                lines.append(f"  {k}: {_q(v)}")
+            else:
+                lines.append(f"  {k}: {v}")
+        lines.append("}")
+    elif isinstance(d, ast.ContractDecl):
+        lines.append(f"contract {d.name} {{")
+        for f in d.fields:
+            lines.append(f"  {_field(f)},")
+        lines.append("}")
+    elif isinstance(d, ast.DomainDecl):
+        lines.append(f"domain {d.name} = {_type_str(d.type_spec, d.params)}")
+    elif isinstance(d, ast.ModelDecl):
+        head = f"model {_model_name(d.name)}" + (f" -> contract {d.contract}" if d.contract else "")
+        lines.append(head + " {")
+        for k, v in d.attrs.items():
+            lines.append(f'  {k}: {_q(v)}')
+        lines.extend(_stmts(d.stmts, "  "))
+        lines.append("}")
+    elif isinstance(d, ast.FnDecl):
+        params = ", ".join(f"{name}: {type_name}" for name, type_name in d.params)
+        if not d.return_type:
+            raise ValueError(f"function {d.name!r} has no return type annotation")
+        lines.append(f"fn {d.name}({params}) -> {d.return_type} {{ {_expr(d.body)} }}")
+    elif isinstance(d, ast.TestDecl):
+        lines.append(f"test {d.model} {{")
+        for c in d.checks:
+            target = "row_count" if c.kind == "row_count" else c.col
+            rhs = _expr(ast.Literal(value=c.value))
+            lines.append(f"  expect {target} {c.op} {rhs};")
+        lines.append("}")
+    elif isinstance(d, ast.PipelineDecl):
+        lines.append(f"pipeline {d.name} {{")
+        if d.env:
+            lines.append(f"  env: {d.env},")
+        lines.append(f"  models: [{', '.join(_expr(m) for m in d.models)}],")
+        if d.sources:
+            lines.append("  sources: {")
+            for src, kv in d.sources.items():
+                inner = ", ".join(f'{k}: {_q(v)}' for k, v in kv.items())
+                lines.append(f"    {src}: from({inner}),")
+            lines.append("  }")
+        lines.append("}")
+    elif isinstance(d, ast.GeneratorDecl):
+        lines.append(_expr(d.call))
+    else:
+        raise ValueError(f"unsupported declaration: {type(d).__name__}")
+    return lines
+
+
+def format_decl(d: ast.Node) -> str:
+    """Render a single declaration into canonical formatted text.
+
+    Contract: ``format_decl(d)`` equals what ``format_module`` emits for a
+    one-declaration module containing ``d`` — used by fingerprints, so the
+    digested text (and therefore stored fingerprints) stays identical.
+    """
+    return "\n".join(_decl_lines(d)).rstrip() + "\n"
+
+
 def format_module(mod: ast.Module) -> str:
     """Render a Strata module AST into canonical formatted text.
 
@@ -181,63 +255,6 @@ def format_module(mod: ast.Module) -> str:
     """
     out = []
     for d in mod.decls:
-        if isinstance(d, ast.ImportDecl):
-            out.append(f"import {d.path}")
-        elif isinstance(d, ast.SourceDecl):
-            res = ", ".join(f'{k}: {_q(v)}' for k, v in d.resource.items())
-            out.append(f"source {d.name}({res}) {{")
-            for k, v in d.props:
-                if k == "columns":
-                    out.append("  columns: {")
-                    for field in v if isinstance(v, list) else []:
-                        out.append(f"    {_field(field)},")
-                    out.append("  }")
-                elif isinstance(v, str):
-                    out.append(f"  {k}: {_q(v)}")
-                else:
-                    out.append(f"  {k}: {v}")
-            out.append("}")
-        elif isinstance(d, ast.ContractDecl):
-            out.append(f"contract {d.name} {{")
-            for f in d.fields:
-                out.append(f"  {_field(f)},")
-            out.append("}")
-        elif isinstance(d, ast.DomainDecl):
-            out.append(f"domain {d.name} = {_type_str(d.type_spec, d.params)}")
-        elif isinstance(d, ast.ModelDecl):
-            head = f"model {_model_name(d.name)}" + (f" -> contract {d.contract}" if d.contract else "")
-            out.append(head + " {")
-            for k, v in d.attrs.items():
-                out.append(f'  {k}: {_q(v)}')
-            out.extend(_stmts(d.stmts, "  "))
-            out.append("}")
-        elif isinstance(d, ast.FnDecl):
-            params = ", ".join(f"{name}: {type_name}" for name, type_name in d.params)
-            if not d.return_type:
-                raise ValueError(f"function {d.name!r} has no return type annotation")
-            out.append(f"fn {d.name}({params}) -> {d.return_type} {{ {_expr(d.body)} }}")
-        elif isinstance(d, ast.TestDecl):
-            out.append(f"test {d.model} {{")
-            for c in d.checks:
-                target = "row_count" if c.kind == "row_count" else c.col
-                rhs = _expr(ast.Literal(value=c.value))
-                out.append(f"  expect {target} {c.op} {rhs};")
-            out.append("}")
-        elif isinstance(d, ast.PipelineDecl):
-            out.append(f"pipeline {d.name} {{")
-            if d.env:
-                out.append(f"  env: {d.env},")
-            out.append(f"  models: [{', '.join(_expr(m) for m in d.models)}],")
-            if d.sources:
-                out.append("  sources: {")
-                for src, kv in d.sources.items():
-                    inner = ", ".join(f'{k}: {_q(v)}' for k, v in kv.items())
-                    out.append(f"    {src}: from({inner}),")
-                out.append("  }")
-            out.append("}")
-        elif isinstance(d, ast.GeneratorDecl):
-            out.append(_expr(d.call))
-        else:
-            raise ValueError(f"unsupported declaration: {type(d).__name__}")
+        out.append(format_decl(d).rstrip())
         out.append("")
     return "\n".join(out).rstrip() + "\n"

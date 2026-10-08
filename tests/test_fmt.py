@@ -3,7 +3,8 @@ import unittest
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 
-from strata.fmt import format_module
+from strata import ast as A
+from strata.fmt import format_decl, format_module
 from strata.parser import parse_strata
 
 
@@ -32,6 +33,16 @@ class TestFormatterRoundTrip(unittest.TestCase):
         reparsed = parse_strata(formatted, str(path))
         self.assertEqual(semantic_ast(original), semantic_ast(reparsed))
         self.assertEqual(formatted, format_module(reparsed))
+
+    def test_format_decl_matches_single_decl_module(self):
+        """M25: fingerprints rely on format_decl — it must byte-match the
+        single-declaration format_module output it replaces, or every stored
+        fingerprint (and therefore staleness) would churn."""
+        for src in (EXAMPLES / "multinacional.strata").read_text(), \
+                   (EXAMPLES / "daily_orders.strata").read_text():
+            for decl in parse_strata(src, "<fp>").decls:
+                single = format_module(A.Module(path="<fp>", decls=[decl]))
+                self.assertEqual(format_decl(decl), single)
 
     def assert_round_trip(self, source):
         original = parse_strata(source)

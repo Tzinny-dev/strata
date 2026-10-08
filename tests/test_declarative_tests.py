@@ -97,6 +97,52 @@ class TestRowCountOperators(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_DUCKDB, "duckdb not available (use the venv interpreter)")
+class TestRunTestsSharedRowTotal(unittest.TestCase):
+    """M23: run_tests counts the model's row total once and reuses it across
+    every check in that model (it is invariant) instead of once per check.
+
+    Behavioral guard: a model with a row_count check plus several column
+    checks must evaluate all of them against the same count, and a violating
+    column check still reports its bad/total fraction.
+    """
+
+    def _con(self):
+        con = duckdb.connect()
+        con.execute("CREATE TABLE s (id BIGINT)")
+        con.execute("INSERT INTO s VALUES (1), (2), (3)")
+        return con
+
+    def _materialize(self, expect_body, path):
+        text = SRC + f"test m {{\n{expect_body}\n}}\n"
+        Path(path).write_text(text)
+        proj, tms = build(text, path)
+        con = self._con()
+        ex.materialize(con, proj, tms, names=["m"])
+        return con, proj, tms
+
+    def test_row_count_and_column_checks_share_one_total(self):
+        d = tempfile.mkdtemp()
+        con, proj, tms = self._materialize(
+            "  expect row_count == 3;\n  expect id >= 1;\n  expect id <= 3;\n",
+            os.path.join(d, "m.strata"))
+        results = ex.run_tests(con, proj, tms, ["m"], branch="main")
+        self.assertEqual(len(results), 3)
+        self.assertIn("row_count == 3", results[0])
+        self.assertIn("id >= 1", results[1])
+
+    def test_column_violation_reports_shared_total(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "m.strata")
+        text = SRC + "test m {\n  expect id >= 3;\n}\n"
+        Path(path).write_text(text)
+        proj, tms = build(text, path)
+        con = self._con()
+        with self.assertRaises(ex.StrataTestError) as cm:
+            ex.materialize(con, proj, tms, names=["m"])
+        self.assertIn("violated for 2/3 rows", str(cm.exception))
+
+
+@unittest.skipUnless(HAVE_DUCKDB, "duckdb not available (use the venv interpreter)")
 class TestCliStrataTest(unittest.TestCase):
     """`strata test` through the real CLI entry point (main()), not just the
     library function — this is exactly the path that was broken."""

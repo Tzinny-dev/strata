@@ -1101,7 +1101,17 @@ def publish_snapshots(con: Any, names: list[str], run_id: str,
             if exists:
                 if exists[0] != "BASE TABLE":
                     raise PinError(f"snapshot {snap!r} is not a table")
-                if physical_schema(con, snap) != physical_schema(con, staged):
+                # Contact-patch schema read in ONE query (M24): publishing a
+                # delta over an existing snapshot used two round trips.
+                schemas = dbcompat.physical_schemas(con, [snap, staged])
+                snap_schema = schemas[snap]
+                staged_schema = schemas[staged]
+                if not snap_schema or not staged_schema:
+                    missing = snap if not snap_schema else staged
+                    raise PinError(
+                        "physical schema check FAILED: view "
+                        f"{missing!r} has no columns (does it exist?)")
+                if snap_schema != staged_schema:
                     raise PinError(f"snapshot identity conflict: {snap}")
                 different = con.execute(
                     f"SELECT EXISTS ((SELECT * FROM {snap} EXCEPT ALL SELECT * FROM {staged}) "
@@ -1244,9 +1254,15 @@ def run_tests(con: Any, project: Project, tms: dict[str, TypedModel],
                     "E080",
                 )
             view = promoted_name(td.model)
+            # Row total is invariant across every check on this model's view
+            # (M23): count it once per model, not once per check.
+            total: int | None = None
             for check in td.checks:
                 if check.kind == "row_count":
-                    got = con.execute(f"SELECT count(*) FROM {view}").fetchone()[0]
+                    if total is None:
+                        total = con.execute(
+                            f"SELECT count(*) FROM {view}").fetchone()[0]
+                    got = total
                     expected = int(check.value)
                     if not _ROW_COUNT_OPS[check.op](got, expected):
                         raise StrataTestError(
@@ -1264,9 +1280,9 @@ def run_tests(con: Any, project: Project, tms: dict[str, TypedModel],
                         f"{sqlgen._lit(dialect, check.value)})"
                     )
                     n_bad = con.execute(sql).fetchone()[0]
-                    total = con.execute(
-                        f"SELECT count(*) FROM {view}"
-                    ).fetchone()[0]
+                    if total is None:
+                        total = con.execute(
+                            f"SELECT count(*) FROM {view}").fetchone()[0]
                     if n_bad:
                         raise StrataTestError(
                             f"test {td.model}: {check.col} {check.op} "

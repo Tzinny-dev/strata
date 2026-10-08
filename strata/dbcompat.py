@@ -316,6 +316,67 @@ _PG_ARRAY_ELEM = {
 }
 
 
+def physical_schemas(con: Any, views: list[str]) -> dict[str, dict[str, str]]:
+    """Like `physical_schema`, but reads N views in ONE query per dialect.
+
+    Returns ``{view: {column: storage_type}}`` preserving the argument order
+    (a table that does not exist maps to `{}`, mirroring `physical_schema`).
+    Used by `publish_snapshots`' conflict path, which currently re-reads the
+    snapshot and staged schemas as two separate round trips (M24).
+    """
+    views = list(dict.fromkeys(views))
+    if not views:
+        return {}
+    schema = db_schema(con)
+    in_clause = ",".join("?" * len(views))
+    out: dict[str, dict[str, str]] = {v: {} for v in views}
+    if is_postgres(con):
+        rows = con.execute(
+            "SELECT table_name, column_name, data_type, numeric_precision, "
+            "numeric_scale, udt_name FROM information_schema.columns "
+            f"WHERE table_schema = ? AND table_name IN ({in_clause}) "
+            "ORDER BY table_name, ordinal_position", [schema, *views]).fetchall()
+        for tbl, name, dtype, prec, scale, udt in rows:
+            if dtype == "numeric" and prec is not None:
+                out[tbl][name] = f"NUMERIC({prec},{scale or 0})"
+            elif dtype == "ARRAY":
+                out[tbl][name] = _PG_ARRAY_ELEM.get(udt, udt) + "[]"
+            else:
+                out[tbl][name] = dtype.upper()
+        return out
+    if is_bigquery(con):
+        try:
+            rows = con.execute(
+                f"SELECT table_name, column_name, data_type FROM "
+                f"`{schema}.INFORMATION_SCHEMA.COLUMNS` "
+                f"WHERE table_name IN ({in_clause}) "
+                "ORDER BY table_name, ordinal_position", [*views]).fetchall()
+        except Exception:
+            return out
+        for tbl, name, dtype in rows:
+            out[tbl][name] = dtype.upper()
+        return out
+    if is_snowflake(con):
+        try:
+            rows = con.execute(
+                "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE FROM "
+                "INFORMATION_SCHEMA.COLUMNS "
+                f"WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ({in_clause}) "
+                "ORDER BY TABLE_NAME, ORDINAL_POSITION", [schema, *views]).fetchall()
+        except Exception:
+            return out
+        for tbl, name, dtype in rows:
+            out[tbl][name] = dtype.upper()
+        return out
+    rows = con.execute(
+        "SELECT table_name, column_name, data_type FROM information_schema.columns "
+        f"WHERE table_schema = ? AND table_name IN ({in_clause}) "
+        "ORDER BY table_name, ordinal_position", [schema, *views]).fetchall()
+    for tbl, name, dtype in rows:
+        out[tbl][name] = dtype
+    return out
+
+
 def physical_schema(con: Any, view: str) -> dict[str, str]:
     """Actual physical column types of a live table/view, normalized into
     the same convention `physical_types()` below compares against.
@@ -328,49 +389,7 @@ def physical_schema(con: Any, view: str) -> dict[str, str]:
     and array columns report the literal `data_type='ARRAY'` (element type
     in `udt_name`) — so this reconstructs the equivalent embedded string
     instead of trusting the bare `data_type`."""
-    schema = db_schema(con)
-    if is_postgres(con):
-        rows = con.execute(
-            "SELECT column_name, data_type, numeric_precision, "
-            "numeric_scale, udt_name FROM information_schema.columns "
-            "WHERE table_schema = ? AND table_name = ? "
-            "ORDER BY ordinal_position", [schema, view]).fetchall()
-        out: dict[str, str] = {}
-        for name, dtype, prec, scale, udt in rows:
-            if dtype == "numeric" and prec is not None:
-                out[name] = f"NUMERIC({prec},{scale or 0})"
-            elif dtype == "ARRAY":
-                out[name] = _PG_ARRAY_ELEM.get(udt, udt) + "[]"
-            else:
-                out[name] = dtype.upper()
-        return out
-    if is_bigquery(con):
-        # BigQuery INFORMATION_SCHEMA.COLUMNS — data_type is STRING, INT64, FLOAT64, BOOL, DATE, TIMESTAMP, NUMERIC, JSON etc.
-        try:
-            dataset = db_schema(con)
-            rows = con.execute(
-                f"SELECT column_name, data_type FROM `{dataset}.INFORMATION_SCHEMA.COLUMNS` "
-                "WHERE table_name = ? ORDER BY ordinal_position",
-                [view],
-            ).fetchall()
-            return {name: dtype.upper() for name, dtype in rows}
-        except Exception:
-            return {}
-    if is_snowflake(con):
-        try:
-            rows = con.execute(
-                "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
-                "WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
-                [schema, view],
-            ).fetchall()
-            return {name: dtype.upper() for name, dtype in rows}
-        except Exception:
-            return {}
-    rows = con.execute(
-        "SELECT column_name, data_type FROM information_schema.columns "
-        "WHERE table_schema = ? AND table_name = ? "
-        "ORDER BY ordinal_position", [schema, view]).fetchall()
-    return {name: dtype for name, dtype in rows}
+    return physical_schemas(con, [view])[view]
 
 
 # DuckDB integral storage types that widen losslessly into a declared

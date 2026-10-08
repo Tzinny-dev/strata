@@ -2085,8 +2085,7 @@ class ModelFinalizer:
         # AST) would spuriously mark everything stale. Canonicalize instead.
         """Canonical SHA-256 fingerprint over fmt-canonicalized AST text and upstream fingerprints."""
         from . import fmt as _fmt
-        text = _fmt.format_module(__import__("strata.ast", fromlist=["Module"]).Module(
-            path="<fp>", decls=[self.state.decl]))
+        text = _fmt.format_decl(self.state.decl)
         parts = [self.state.decl.name, self.state.decl.contract or "", re.sub(r"\s+", " ", text)]
         for d in self.tm.deps:
             up = self.checker.p.typed.get(d)

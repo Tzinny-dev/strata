@@ -134,6 +134,22 @@ class TestSnapshotsAndRollback(unittest.TestCase):
         self.assertEqual(con.execute(f"SELECT * FROM {snap} ORDER BY order_day").fetchall(), before)
         self.assertEqual(con.execute("SELECT * FROM v_daily_orders ORDER BY order_day").fetchall(), before)
 
+    def test_publish_conflict_path_reads_schemas_in_one_batch(self):
+        from unittest import mock
+        from strata import dbcompat
+        con = con_seeded()
+        self.addCleanup(con.close)
+        proj, tms = build(self.module)
+        ex.run(con, proj, tms, self.module)
+        entry = ex.load_history(self.module)[-1]
+        # Republish the same run's snapshot: the conflict path must go through
+        # dbcompat.physical_schemas (one batched query), never the per-view
+        # physical_schema function (M24 two-round-trips regression guard).
+        with mock.patch.object(dbcompat, "physical_schema",
+                               side_effect=AssertionError("per-view read leaked")):
+            snaps = ex.publish_snapshots(con, ["daily_orders"], entry["run_id"])
+        self.assertEqual(snaps, [entry["snapshots"]["daily_orders"]])
+
     def test_repeated_run_is_idempotent(self):
         con = con_seeded()
         self.addCleanup(con.close)
