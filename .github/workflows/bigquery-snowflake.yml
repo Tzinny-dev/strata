@@ -35,6 +35,8 @@ jobs:
     runs-on: ubuntu-latest
     # Emulator path runs by default; the real-GCP path activates when the
     # GCP_SERVICE_ACCOUNT_KEY / BIGQUERY_PROJECT secrets are configured.
+    env:
+      GCP_SA_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -52,13 +54,13 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq google-cloud-sdk
 
       - name: Authenticate with GCP
-        if: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY != '' }}
+        if: env.GCP_SA_KEY != ''
         uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+          credentials_json: ${{ env.GCP_SA_KEY }}
 
       - name: Set up BigQuery emulator
-        if: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY == '' }}
+        if: env.GCP_SA_KEY == ''
         run: |
           gcloud emulators bigquery start --host-port=localhost:9050 --project=strata-test &
           sleep 10
@@ -81,6 +83,8 @@ jobs:
     runs-on: ubuntu-latest
     # LocalStack emulator path runs by default; the real-Snowflake path
     # activates when the SNOWFLAKE_* secrets are configured.
+    env:
+      SF_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -92,7 +96,7 @@ jobs:
           cache: pip
 
       - name: Start LocalStack Snowflake emulator
-        if: ${{ secrets.SNOWFLAKE_ACCOUNT == '' }}
+        if: env.SF_ACCOUNT == ''
         run: |
           docker pull localstack/localstack:latest
           docker run -d --rm \
