@@ -32,7 +32,8 @@ on:
 jobs:
   bigquery:
     name: BigQuery Integration Tests
-    runs-on: ubuntu-latest
+    # google-cloud-sdk apt package has no candidate on 24.04+ → pin to 22.04
+    runs-on: ubuntu-22.04
     # Emulator path runs by default; the real-GCP path activates when the
     # GCP_SERVICE_ACCOUNT_KEY / BIGQUERY_PROJECT secrets are configured.
     env:
