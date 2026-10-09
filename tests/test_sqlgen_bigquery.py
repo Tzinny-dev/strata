@@ -38,9 +38,13 @@ model daily_orders -> contract DailyOrdersContract {
   from orders
   join_left refunds on orders.order_id == refunds.order_id
   filter orders.is_test == false
-  derive { net_amount = gross_amount_usd - if(refunds.discount_usd is not null, refunds.discount_usd, 0) }
-  select { country, order_day, order_id, gross_amount = gross_amount_usd, net_amount }
-  aggregate { country, order_day }
+  group { country, order_day } (
+    aggregate {
+      order_id = count(orders.order_id),
+      gross_amount = sum(orders.gross_amount_usd),
+      net_amount = sum(orders.gross_amount_usd - coalesce(refunds.discount_usd, 0)),
+    }
+  )
 }
 '''
 
@@ -81,11 +85,11 @@ class TestBigQueryLiveE2E(unittest.TestCase):
     def _test_impl(self, con):
 
         # Create source tables and insert test data
-        project_dataset = f"`{self.project}.{self.dataset}`"
+        project_dataset = f"{self.project}.{self.dataset}"
 
         # Create orders table
         con.execute(f"""
-            CREATE OR REPLACE TABLE {project_dataset}.orders (
+            CREATE OR REPLACE TABLE `{project_dataset}.orders` (
                 order_id INT64,
                 customer_id INT64,
                 country STRING,
@@ -97,7 +101,7 @@ class TestBigQueryLiveE2E(unittest.TestCase):
 
         # Create refunds table
         con.execute(f"""
-            CREATE OR REPLACE TABLE {project_dataset}.refunds (
+            CREATE OR REPLACE TABLE `{project_dataset}.refunds` (
                 order_id INT64,
                 discount_usd NUMERIC(38,2),
                 refunded_at TIMESTAMP
@@ -106,7 +110,7 @@ class TestBigQueryLiveE2E(unittest.TestCase):
 
         # Insert test data matching DuckDB test
         con.execute(f"""
-            INSERT INTO {project_dataset}.orders VALUES
+            INSERT INTO `{project_dataset}.orders` VALUES
             (1, 1001, 'ES', 120.00, FALSE, DATE '2026-09-01'),
             (2, 1001, 'ES', 90.00, FALSE, DATE '2026-09-01'),
             (3, 1002, 'MX', 200.00, FALSE, DATE '2026-09-02'),
@@ -115,7 +119,7 @@ class TestBigQueryLiveE2E(unittest.TestCase):
         """)
 
         con.execute(f"""
-            INSERT INTO {project_dataset}.refunds VALUES
+            INSERT INTO `{project_dataset}.refunds` VALUES
             (2, 10.00, TIMESTAMP '2026-09-02 10:00:00'),
             (4, 5.50, TIMESTAMP '2026-09-03 09:30:00')
         """)

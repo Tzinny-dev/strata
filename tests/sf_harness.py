@@ -1,7 +1,8 @@
 """Ephemeral Snowflake emulator (LocalStack) or real account for integration tests.
 
 Supports two modes:
-1. Local emulator: Uses LocalStack Snowflake emulator via Docker
+1. Local emulator: Uses LocalStack's dedicated Snowflake emulator image
+   (``localstack/snowflake``), which requires ``LOCALSTACK_AUTH_TOKEN``.
 2. Real account: Uses Snowflake credentials from environment
 
 Returns a SnowflakeConn that works with strata.exec (same API as DuckDB/PGConn).
@@ -29,32 +30,35 @@ def has_snowflake_credentials() -> bool:
 
 
 def _start_localstack_snowflake(port: int = 4444) -> Optional[subprocess.Popen]:
-    """Start LocalStack with Snowflake emulator.
+    """Start LocalStack's dedicated Snowflake emulator image.
 
-    Returns the process if successful, None if Docker not available.
+    Requires ``LOCALSTACK_AUTH_TOKEN`` (LocalStack license): the Snowflake
+    emulator is a licensed feature and won't serve requests without it.
+    Returns the process if successful, None otherwise.
     """
     if not shutil.which("docker"):
         return None
+    token = os.environ.get("LOCALSTACK_AUTH_TOKEN")
+    if not token:
+        return None
 
-    # Check if LocalStack image exists locally or can be pulled
     try:
         subprocess.run(
-            ["docker", "pull", "localstack/localstack:latest"],
+            ["docker", "pull", "localstack/snowflake:latest"],
             check=True,
             capture_output=True,
-            timeout=120,
+            timeout=300,
         )
     except Exception:
         return None
 
-    # Start LocalStack with Snowflake service
+    # LocalStack exposes the Snowflake API on its HTTPS gateway (443).
     proc = subprocess.Popen(
         [
             "docker", "run", "--rm",
             "-p", f"{port}:443",
-            "-e", "SERVICES=snowflake",
-            "-e", "DEBUG=1",
-            "localstack/localstack:latest",
+            "-e", f"LOCALSTACK_AUTH_TOKEN={token}",
+            "localstack/snowflake:latest",
         ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -96,7 +100,7 @@ def ephemeral_snowflake(
                         warehouse=warehouse,
                         database=database,
                         schema=schema,
-                        host="localhost",
+                        host="snowflake.localhost.localstack.cloud",
                         port=port,
                         protocol="https",
                     )
@@ -176,7 +180,7 @@ def snowflake_adapter(
                         warehouse=warehouse,
                         database=database,
                         schema=schema,
-                        host="localhost",
+                        host="snowflake.localhost.localstack.cloud",
                         port=port,
                         protocol="https",
                     )

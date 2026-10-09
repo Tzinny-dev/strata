@@ -32,10 +32,11 @@ on:
 jobs:
   bigquery:
     name: BigQuery Integration Tests
-    # google-cloud-sdk apt package has no candidate on 24.04+ → pin to 22.04
-    runs-on: ubuntu-22.04
-    # Emulator path runs by default; the real-GCP path activates when the
-    # GCP_SERVICE_ACCOUNT_KEY / BIGQUERY_PROJECT secrets are configured.
+    runs-on: ubuntu-latest
+    # Emulator path (goccy/bigquery-emulator via Docker) runs by default; the
+    # real-GCP path activates when the GCP_SERVICE_ACCOUNT_KEY / BIGQUERY_PROJECT
+    # secrets are configured. Working with secrets in `if:` is only possible via
+    # job-level env, hence the indirection.
     env:
       GCP_SA_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
     timeout-minutes: 30
@@ -48,23 +49,11 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install google-cloud-sdk (for BigQuery emulator)
-        run: |
-          echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
-          curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
-          sudo apt-get update -qq && sudo apt-get install -y -qq google-cloud-sdk
-
       - name: Authenticate with GCP
         if: env.GCP_SA_KEY != ''
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ env.GCP_SA_KEY }}
-
-      - name: Set up BigQuery emulator
-        if: env.GCP_SA_KEY == ''
-        run: |
-          gcloud emulators bigquery start --host-port=localhost:9050 --project=strata-test &
-          sleep 10
 
       - name: Install strata + dev deps
         run: |
@@ -73,19 +62,21 @@ jobs:
 
       - name: Run BigQuery SQL emission tests
         run: |
-          pytest tests/test_sqlgen_bigquery.py -v --tb=short
+          pytest tests/test_sqlgen_bigquery.py -v --tb=short --no-cov
 
       - name: Run BigQuery engine execution tests
         run: |
-          pytest tests/test_exec_bigquery.py -v --tb=short
+          pytest tests/test_exec_bigquery.py -v --tb=short --no-cov
 
   snowflake:
     name: Snowflake Integration Tests
     runs-on: ubuntu-latest
-    # LocalStack emulator path runs by default; the real-Snowflake path
-    # activates when the SNOWFLAKE_* secrets are configured.
+    # LocalStack Snowflake emulator path requires LOCALSTACK_AUTH_TOKEN (licensed);
+    # the real-Snowflake path activates when the SNOWFLAKE_* secrets are configured.
+    # Both are exposed as job-level env so steps can gate on them.
     env:
       SF_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -96,18 +87,6 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Start LocalStack Snowflake emulator
-        if: env.SF_ACCOUNT == ''
-        run: |
-          docker pull localstack/localstack:latest
-          docker run -d --rm \
-            -p 4444:443 \
-            -e SERVICES=snowflake \
-            -e DEBUG=1 \
-            --name localstack-snowflake \
-            localstack/localstack:latest
-          sleep 30
-
       - name: Install strata + dev deps
         run: |
           python -m pip install --upgrade pip
@@ -115,8 +94,8 @@ jobs:
 
       - name: Run Snowflake SQL emission tests
         run: |
-          pytest tests/test_sqlgen_snowflake.py -v --tb=short
+          pytest tests/test_sqlgen_snowflake.py -v --tb=short --no-cov
 
       - name: Run Snowflake engine execution tests
         run: |
-          pytest tests/test_exec_snowflake.py -v --tb=short
+          pytest tests/test_exec_snowflake.py -v --tb=short --no-cov

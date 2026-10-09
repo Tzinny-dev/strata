@@ -38,9 +38,13 @@ model daily_orders -> contract DailyOrdersContract {
   from orders
   join_left refunds on orders.order_id == refunds.order_id
   filter orders.is_test == false
-  derive { net_amount = gross_amount_usd - if(refunds.discount_usd is not null, refunds.discount_usd, 0) }
-  select { country, order_day, order_id, gross_amount = gross_amount_usd, net_amount }
-  aggregate { country, order_day }
+  group { country, order_day } (
+    aggregate {
+      order_id = count(orders.order_id),
+      gross_amount = sum(orders.gross_amount_usd),
+      net_amount = sum(orders.gross_amount_usd - coalesce(refunds.discount_usd, 0)),
+    }
+  )
 }
 '''
 

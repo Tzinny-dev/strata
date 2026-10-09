@@ -44,6 +44,9 @@ class TestAdapterUnavailable(unittest.TestCase):
         self.assertIn("psycopg2-binary", cm.exception.help)
 
     def test_bigquery_raises(self):
+        import importlib
+        if importlib.util.find_spec("google.cloud.bigquery") is not None:
+            self.skipTest("google-cloud-bigquery installed; adapter is available")
         with self.assertRaises(AdapterNotAvailable) as cm:
             get_adapter("bigquery")
         self.assertIn("google-cloud-bigquery", cm.exception.help)
