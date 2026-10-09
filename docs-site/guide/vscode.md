@@ -53,6 +53,6 @@ npx vsce package         # → strata-tzinny-<version>.vsix
 code --install-extension strata-tzinny-<version>.vsix
 ```
 
-The extension version follows that of `strata-lang` (currently `0.1.5`).
+The extension version follows that of `strata-lang` (currently `0.1.6`).
 See also `guide/binary-standalone.md` (`strata lsp` entry in the
 standalone binary) and the `README` of `vscode/` in the repository.

@@ -1,6 +1,6 @@
 # Strata — Standalone binary `strata`
 
-> Fulfills `propuesta-lenguaje-strata.md:49` "one single binary: compiler+LSP+runner". Status: **implemented 2026-09-22** — `prototype/strata.spec:1`, `prototype/strata_entry.py:1`, `prototype/.github/workflows/binary.yml:1`, `prototype/dist/strata` `34M` (UPX), `prototype/pyproject.toml:7` `strata-lang==0.1.5`.
+> Fulfills `propuesta-lenguaje-strata.md:49` "one single binary: compiler+LSP+runner". Status: **implemented 2026-09-22** — `prototype/strata.spec:1`, `prototype/strata_entry.py:1`, `prototype/.github/workflows/binary.yml:1`, `prototype/dist/strata` `34M` (UPX), `prototype/pyproject.toml:7` `strata-lang==0.1.6`.
 
 ## Summary
 
@@ -9,7 +9,7 @@ Strata ships in three equivalent forms (same `strata/cli.py:1084` `main()`):
 * `pip install strata-lang` — wheel `149K` `twine check PASSED` (`prototype/pyproject.toml:6`)
 * `uv tool install strata-lang` — zero-cost shortcut
 * **Standalone binary** `strata` — `prototype/dist/strata` `34M` with UPX (`_duckdb.so 58M` → `34M` compressed), `venv 143M` total. Without UPX expected `80–120M` (`prototype/docs-site/guide/binary-standalone.md:7` historical)
-* `ghcr.io/tzinny-dev/strata:0.1.5` — reproducible Docker (`prototype/Dockerfile:1`)
+* `ghcr.io/tzinny-dev/strata:0.1.6` — reproducible Docker (`prototype/Dockerfile:1`)
 
 The binary already exists and passes the smoke tests `help/build/compile --dialect postgres/run --seed/bench` in `binary.yml`. Current recommendation: **use the binary for distribution**; `pip`/`uv` remain valid for development.
 
@@ -84,7 +84,7 @@ CI time `90s` → `~270s` (×3 OS).
   Add as `if: startsWith(github.ref,'refs/tags/v')` steps in `binary.yml` with `secrets.APPLE_CERT`/`secrets.WINDOWS_CERT`.
 - `strata/lsp.py:18` already exposed as `strata lsp` (`cli.py:50`) and packaged via `collect_data_files`.
 
-### VS Code extension ✅ 0.1.5 (`prototype/vscode/`)
+### VS Code extension ✅ 0.1.6 (`prototype/vscode/`)
 
 - Marketplace **`Tzinny-dev.strata-tzinny`**: TextMate grammar for `.strata`,
   language-config (`//` comments) and an LSP client over `strata lsp`
@@ -99,7 +99,7 @@ CI time `90s` → `~270s` (×3 OS).
 
 ## 4. Costs and risks — updated
 
-- **Size:** `58M` for `_duckdb.so` alone → `34M` binary with UPX (`CHANGELOG.md:30`), `~85M` without UPX. `pip+Docker` (`ghcr.io/tzinny-dev/strata:0.1.5`) remains current for CI.
+- **Size:** `58M` for `_duckdb.so` alone → `34M` binary with UPX (`CHANGELOG.md:30`), `~85M` without UPX. `pip+Docker` (`ghcr.io/tzinny-dev/strata:0.1.6`) remains current for CI.
 - **Maintenance:** every `duckdb` or `psycopg2-binary` bump (`pyproject.toml:24`) forces a triple rebuild + re-sign (automated in `binary.yml` on `tag v*`).
 - **WASM/playground** `docs/warehouse-adapters.md:69` discarded — same cost as the binary with no proven demand.
 - **Distribution:** `install.sh:1` + `homebrew/strata-lang.rb:1` operational, pending: real Developer ID signature and automatic `REPLACE_SHA256` (see §5).

@@ -16,6 +16,7 @@ cp "$DOCS_DIR/getting-started.md" "$GUIDE_DIR/"
 cp "$DOCS_DIR/tutorial.md" "$GUIDE_DIR/"
 cp "$DOCS_DIR/warehouse-semantics.md" "$GUIDE_DIR/"
 cp "$DOCS_DIR/warehouse-adapters.md" "$GUIDE_DIR/"
+cp "$DOCS_DIR/lifecycle.md" "$GUIDE_DIR/"
 cp "$DOCS_DIR/binary-standalone.md" "$GUIDE_DIR/"
 cp "$DOCS_DIR/vscode.md" "$GUIDE_DIR/"
 

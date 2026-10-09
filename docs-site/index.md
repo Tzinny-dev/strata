@@ -60,8 +60,8 @@ strata --help
 ```
 
 ```bash [docker]
-docker pull ghcr.io/tzinny-dev/strata:0.1.5
-docker run --rm ghcr.io/tzinny-dev/strata:0.1.5 --help
+docker pull ghcr.io/tzinny-dev/strata:0.1.6
+docker run --rm ghcr.io/tzinny-dev/strata:0.1.6 --help
 ```
 
 :::
@@ -73,7 +73,7 @@ docker run --rm ghcr.io/tzinny-dev/strata:0.1.5 --help
 - **Reference** — syntax, contracts, incremental, setops, JSON/arrays, dates, joins
 - **Spec** — grammar + types (normative)
 - **VS Code** — syntax highlighting + LSP (diagnostics, completion, hover) from the marketplace extension
-- **Changelog** — 0.1.0 … 0.1.5, binary Fase 0-4, unreleased 0.1.6 (Iceberg L1–L4, `import-dbt`, `strata catalog`)
+- **Changelog** — 0.1.0 … 0.1.6 (Iceberg L1–L4, `import-dbt`, `strata catalog`, BQ/SF emulators)
 
 ## Status
 
@@ -81,4 +81,10 @@ docker run --rm ghcr.io/tzinny-dev/strata:0.1.5 --help
 
 Prototype: `619 tests, 80% coverage`, `strata.spec` onefile `34M`, `bench all green`.
 
-> Working title v0.1 — `strata-lang 0.1.5` on PyPI · `strata 34M` standalone · `ghcr.io/tzinny-dev/strata`
+> Working title v0.1 — `strata-lang 0.1.6` on PyPI · `strata 34M` standalone · `ghcr.io/tzinny-dev/strata`
+
+## Support
+
+If Strata saves you time, consider supporting development:
+
+[![PayPal](https://img.shields.io/badge/PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white)](https://paypal.me/carlostzin) [![Buy Me A Coffee](https://img.shields.io/badge/Buy_Me_A_Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/tzinny)

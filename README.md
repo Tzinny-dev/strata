@@ -78,7 +78,7 @@ See `docs/getting-started.md` and `docs/tutorial.md` for the full walkthrough (e
 curl -fsSL https://raw.githubusercontent.com/Tzinny-dev/strata/main/install.sh | bash
 strata --help
 # or pin version / custom dir
-curl -fsSL .../install.sh | bash -s -- --version 0.1.5 --to /usr/local/bin
+curl -fsSL .../install.sh | bash -s -- --version 0.1.6 --to /usr/local/bin
 ```
 
 ```bash
@@ -92,13 +92,13 @@ strata --help
 
 ```bash
 # from GHCR (after tag push triggers docker.yml)
-docker pull ghcr.io/tzinny-dev/strata:0.1.5
-docker run --rm ghcr.io/tzinny-dev/strata:0.1.5 --help
-docker run --rm -v $PWD:/work -w /work ghcr.io/tzinny-dev/strata:0.1.5 build examples/daily_orders.strata
-docker run --rm -v $PWD:/work -w /work ghcr.io/tzinny-dev/strata:0.1.5 run examples/daily_orders.strata --seed -o /tmp/demo.duckdb
+docker pull ghcr.io/tzinny-dev/strata:0.1.6
+docker run --rm ghcr.io/tzinny-dev/strata:0.1.6 --help
+docker run --rm -v $PWD:/work -w /work ghcr.io/tzinny-dev/strata:0.1.6 build examples/daily_orders.strata
+docker run --rm -v $PWD:/work -w /work ghcr.io/tzinny-dev/strata:0.1.6 run examples/daily_orders.strata --seed -o /tmp/demo.duckdb
 
 # local build (no docker daemon required on host for CI build via GHA)
-docker build -t ghcr.io/tzinny-dev/strata:0.1.5 -f Dockerfile .
+docker build -t ghcr.io/tzinny-dev/strata:0.1.6 -f Dockerfile .
 ```
 
 ## VS Code extension
