@@ -11,6 +11,7 @@ Skips tests if neither emulator nor real credentials are available.
 """
 from __future__ import annotations
 
+import os
 import contextlib
 import shutil
 import subprocess
